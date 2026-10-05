@@ -1,0 +1,8 @@
+/.cache/
+/work/
+/results/
+/local/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/

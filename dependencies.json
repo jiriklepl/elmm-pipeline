@@ -1,0 +1,10 @@
+{
+  "elmm": {
+    "url": "https://bitbucket.org/LadaF/elmm.git",
+    "revision": "ddb426fca5b020216083f02a218292fea70c1df2"
+  },
+  "PoisFFT": {
+    "url": "https://github.com/LadaF/PoisFFT.git",
+    "revision": "256a2338254c08f611881b2df5e72bdfa73bc257"
+  }
+}
