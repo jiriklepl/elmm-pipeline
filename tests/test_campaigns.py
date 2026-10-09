@@ -11,6 +11,7 @@ import pytest
 from elmm_pipeline.campaigns.identity import digest, guard_passed, read, repository, write
 from elmm_pipeline.campaigns.prepare import check, prepare, validate
 from elmm_pipeline.campaigns.run import borderline, environment, gates, planning_diagnostics, summaries
+from elmm_pipeline.campaigns.profile import command as profile_command
 
 
 def test_repository_identity_rejects_changed_committed_input(tmp_path):
@@ -103,6 +104,18 @@ def test_planning_phases_remain_separate_and_reject_nan():
     assert not result["timing_sample"]
     with pytest.raises(ValueError, match="finite"):
         planning_diagnostics(log.replace(".001", "nan"))
+
+
+def test_bounded_profile_continues_application_and_disables_sampling():
+    argv = profile_command("/explicit/nsys", "/new/capture", "/frozen/program", ["x=1"], 2)
+    assert "--duration=2" in argv
+    assert "--kill=none" in argv
+    assert "--trace=cuda,nvtx" in argv
+    assert "--sample=none" in argv and "--cpuctxsw=none" in argv
+    assert argv[-2:] == ["/frozen/program", "x=1"]
+    for seconds in (0, 31, -1, 1.5, True):
+        with pytest.raises(ValueError, match="duration"):
+            profile_command("nsys", "capture", "program", [], seconds)
 
 
 @pytest.mark.parametrize("update", [

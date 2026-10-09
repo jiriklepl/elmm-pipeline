@@ -510,3 +510,12 @@ measurements (seven near a gate, or `repetitions: 7`). Diagnostics run separatel
 planning construction, validation and selection have separate counters. Sealing
 requires successful guards, complete fields, halo checks, configured reports
 and current plots. A sealed snapshot is evidence, not automatic promotion.
+
+`python -m elmm_pipeline.campaigns.profile --campaign ... --case ... --mode ...
+--nsys /explicit/nsys --seconds 2 --output /new/diagnostic` runs a bounded
+CUDA/NVTX capture and validates the complete application output. Run it through
+`elmm_pipeline.campaigns.guard`, after timing jobs finish. The capture can last
+1–30 seconds; the application continues to completion after collection ends.
+CPU sampling and synchronizing phase timers are disabled. Recorded device
+durations remain separate from application wall time; a short trace is never
+extrapolated into a full-run speedup or overlap claim.
