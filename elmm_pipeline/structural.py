@@ -75,6 +75,20 @@ class Scope:
     symbols: dict[str, Symbol] = field(default_factory=dict)
     imports: list[tuple[str, dict[str, str] | None]] = field(default_factory=list)
     storage_aliases: bool = False
+    default_public: bool = True
+    accessibility: dict[str, bool] = field(default_factory=dict)
+
+    def exports(self, name: str) -> bool:
+        name = name.lower()
+        if name in self.accessibility:
+            return self.accessibility[name]
+        symbol = self.symbols.get(name)
+        if symbol is not None:
+            if "private" in symbol.attributes:
+                return False
+            if "public" in symbol.attributes:
+                return True
+        return self.default_public
 
     def intrinsic_unshadowed(self, name: str, seen: frozenset = frozenset()) -> bool:
         """Unknown wildcard imports cannot establish intrinsic binding."""
@@ -89,6 +103,8 @@ class Scope:
                 continue
             imported = aliases.get(name, name) if aliases is not None else name
             module = self.project.module(module_name)
+            if module is not None and not module.exports(imported):
+                continue
             if module is None or not module.intrinsic_unshadowed(imported, seen):
                 return False
         return self.parent.intrinsic_unshadowed(name, seen) if self.parent is not None else True
@@ -107,7 +123,7 @@ class Scope:
                 continue
             imported = aliases.get(name, name) if aliases is not None else name
             module = self.project.module(module_name)
-            if module is not None:
+            if module is not None and module.exports(imported):
                 symbol = module.resolve(imported, seen)
                 if symbol is not None and all(symbol is not old for old in matches):
                     matches.append(symbol)
@@ -119,6 +135,13 @@ class Scope:
 
     def populate(self, specification: Any) -> None:
         for node in content(specification):
+            if kind(node) == "Access_Stmt":
+                access, selected = node.items
+                public = str(access).lower() == "public"
+                if selected is None:
+                    self.default_public = public
+                else:
+                    self.accessibility.update((name, public) for name in names(selected))
             if kind(node) == "Use_Stmt":
                 _, _, module, only, values = node.items
                 aliases = None
@@ -200,6 +223,8 @@ class Parsed:
     mapping: list[tuple[Path | None, int]]
     text: str
     modules: dict[int, Scope]
+    preprocessed_text: str = ""
+    preprocess_command: list[str] = field(default_factory=list)
 
     def origin_span(self, node: Any) -> tuple[int, int]:
         if kind(node) == "Block_Nonlabel_Do_Construct":
@@ -227,6 +252,7 @@ class Project:
         self.parser = ParserFactory().create(std="f2008")
         self.files: dict[Path, Parsed | Exception] = {}
         self.modules: dict[str, Scope] = {}
+        self.procedures: dict[int, tuple[Parsed, Any]] = {}
         self.module_files: dict[str, list[Path]] = {}
         for path in sorted(self.root.rglob("*")):
             if path.suffix.lower() not in {".f90", ".f95", ".f03", ".f08"}:
@@ -295,7 +321,7 @@ class Project:
                 current_line += 1
             reader = FortranStringReader("\n".join(lines), ignore_comments=False)
             tree = self.parser(reader)
-            parsed = Parsed(path, tree, mapping, path.read_text(), {})
+            parsed = Parsed(path, tree, mapping, path.read_text(), {}, "\n".join(lines)+"\n",command)
             self.files[path] = parsed
             # Register every module before parsing specifications to permit
             # mutual imports; symbol resolution itself is lazy and cycle-safe.
@@ -312,7 +338,9 @@ class Project:
                     for procedure in content(part):
                         for header in (n for n in content(procedure) if kind(n) in {"Subroutine_Stmt", "Function_Stmt"}):
                             name = str(header.items[1]).lower()
-                            scope.symbols.setdefault(name, Symbol(name, "procedure", None, None, set(), None, None, scope))
+                            symbol = scope.symbols.setdefault(name, Symbol(name, "procedure", None, None, set(), None, None, scope))
+                            if kind(header) == "Subroutine_Stmt":
+                                self.procedures[id(symbol)] = (parsed, procedure)
             return parsed
         except Exception as error:
             self.files[path] = error
@@ -382,7 +410,7 @@ def literal_kind(node: Any, scope: Scope) -> int:
     return result
 
 
-def type_spec(symbol: Symbol) -> str:
+def type_spec(symbol: Symbol, *, logical: bool = False) -> str:
     if symbol.type_name in {"real", "double precision"}:
         value = integer_constant(symbol.kind_expr, symbol.scope) if symbol.kind_expr is not None else (8 if symbol.type_name == "double precision" else 4)
         if value not in {4, 8}:
@@ -392,6 +420,10 @@ def type_spec(symbol: Symbol) -> str:
         if symbol.kind_expr is not None and integer_constant(symbol.kind_expr, symbol.scope) != 4:
             raise Unsupported(f"non-default integer kind for {symbol.name}")
         return "integer"
+    if logical and symbol.type_name == "logical" and not symbol.rank:
+        if symbol.kind_expr is not None and integer_constant(symbol.kind_expr, symbol.scope) != 4:
+            raise Unsupported(f"non-default logical kind for {symbol.name}")
+        return "logical"
     raise Unsupported(f"unsupported type for {symbol.name}: {symbol.type_name}")
 
 
@@ -464,7 +496,8 @@ class Nest:
     assignments: list[Any]
 
 
-def rectangular(node: Any, scope: Scope, blocked: set[int]) -> Nest:
+def scope_checks(node: Any) -> None:
+    """Reject enclosing constructs with storage or concurrency contracts."""
     parent = getattr(node, "parent", None)
     while parent is not None and kind(parent) != "Subroutine_Subprogram":
         if kind(parent) in {"Block_Construct", "Associate_Construct", "Select_Type_Construct", "Select_Rank_Construct",
@@ -476,6 +509,8 @@ def rectangular(node: Any, scope: Scope, blocked: set[int]) -> Nest:
             if control is not None and control.items[1] is None and str(control).lower().startswith("concurrent"):
                 raise Unsupported("enclosing DO CONCURRENT requires a pure generated-call contract")
         parent = getattr(parent, "parent", None)
+def rectangular(node: Any, scope: Scope, blocked: set[int]) -> Nest:
+    scope_checks(node)
     if any(kind(n) == "Comment" and str(n).lstrip().startswith("!$") for n in walk(node)):
         raise Unsupported("directive inside outlined region requires preserved native scope")
     loops = []
@@ -504,7 +539,7 @@ def rectangular(node: Any, scope: Scope, blocked: set[int]) -> Nest:
     return Nest(node, loops, body)
 
 
-def original_scope(parsed: Parsed, routine: Any, project: Project) -> tuple[Scope, str, set[str], int]:
+def original_scope(parsed: Parsed, routine: Any, project: Project, *, declarations_only=False) -> tuple[Scope, str, set[str], int]:
     parent = getattr(routine, "parent", None)
     module_scope = None
     while parent is not None:
@@ -523,7 +558,7 @@ def original_scope(parsed: Parsed, routine: Any, project: Project) -> tuple[Scop
         raise Unsupported("procedure with BIND/suffix is not outlined")
     if any(kind(node) == "Entry_Stmt" for node in walk(routine)):
         raise Unsupported("ENTRY procedure requires argument-availability analysis")
-    if any(kind(node) == "Internal_Subprogram_Part" for node in content(routine)):
+    if not declarations_only and any(kind(node) == "Internal_Subprogram_Part" for node in content(routine)):
         raise Unsupported("contained procedures require analysis of hidden host-associated reads")
     scope = Scope(str(name), project, module_scope)
     for specification in (n for n in content(routine) if kind(n) == "Specification_Part"):
@@ -574,17 +609,21 @@ def omp_constraints(parsed: Parsed, routine: Any) -> tuple[set[int], set[int]]:
     return blocked, nested
 
 
-def symbol_checks(symbol: Symbol, scope: Scope, dummies: set[str]) -> None:
+def symbol_checks(symbol: Symbol, scope: Scope, dummies: set[str], *, stable_allocatable: bool = False) -> None:
     if symbol.scope.storage_aliases:
         raise Unsupported(f"EQUIVALENCE/COMMON/BIND/NAMELIST storage association in the scope of {symbol.name}")
-    if symbol.attributes & {"pointer", "target", "volatile", "asynchronous", "allocatable", "optional"}:
+    allowed_allocatable = stable_allocatable and symbol.rank > 0
+    unsafe = {"pointer", "target", "volatile", "asynchronous", "optional"}
+    if not allowed_allocatable:
+        unsafe.add("allocatable")
+    if symbol.attributes & unsafe:
         raise Unsupported(f"unsafe storage attributes for {symbol.name}")
-    unknown = symbol.attributes - {"parameter", "save", "contiguous", "value", "protected", "public", "private"}
+    unknown = symbol.attributes - {"parameter", "save", "contiguous", "value", "protected", "public", "private"} - ({"allocatable"} if allowed_allocatable else set())
     if unknown:
         raise Unsupported(f"unsupported declaration attributes for {symbol.name}: {', '.join(sorted(unknown))}")
     if symbol.rank and symbol.scope is scope and symbol.name.lower() not in dummies:
         raise Unsupported(f"local scratch array {symbol.name}")
-    type_spec(symbol)
+    type_spec(symbol, logical=stable_allocatable)
 
 
 def ancestors(node: Any) -> set[int]:
@@ -709,7 +748,8 @@ def normalize_statement(statement: Any, scope: Scope, lower_names: dict[str, lis
 
 
 def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
-                routine: Any, parsed: Parsed, insertion: int, nested: set[int], ordinal: int) -> dict:
+                routine: Any, parsed: Parsed, insertion: int, nested: set[int], ordinal: int,
+                *, liveness=live_after) -> dict:
     iterator_names = {name.lower() for nest in nests for name, _ in nest.loops}
     assigned_temporaries = {str(assignment.items[0]).lower() for nest in nests for assignment in nest.assignments
                             if kind(assignment.items[0]) == "Name"}
@@ -821,9 +861,15 @@ def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
         for _, bounds in nest.loops:
             for expression in bounds:
                 safe_bound(expression, scope, set(write_maps) | local_written, dummies)
+    check_local_liveness(nests, routine, parsed, local_written, liveness)
+    return render_region(nests, scope, module, dummies, routine, parsed, insertion, nested, ordinal,
+                         arrays, captured, local_symbols, set(write_maps))
+
+
+def check_local_liveness(nests, routine, parsed, local_written, liveness=live_after):
     first, _ = parsed.origin_span(nests[0].node)
     _, last = parsed.origin_span(nests[-1].node)
-    if live := live_after(routine, last, local_written, parsed, nests[-1].node):
+    if live := liveness(routine, last, local_written, parsed, nests[-1].node):
         raise Unsupported("written local value remains live after region: " + ", ".join(sorted(live)))
     # A scalar read on an enclosing loop's next iteration is also live-out.
     ancestor = getattr(nests[0].node, "parent", None)
@@ -845,6 +891,13 @@ def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
                 if start < line < first and reads & local_written:
                     raise Unsupported("local scalar is read across an enclosing-loop backedge")
         ancestor = getattr(ancestor, "parent", None)
+
+
+def render_region(nests, scope, module, dummies, routine, parsed, insertion, nested, ordinal,
+                  arrays, captured, local_symbols, write_maps, *, structured=False, statement_span=False,
+                  body_builder=None):
+    first, _ = parsed.origin_span(nests[0].node)
+    _, last = parsed.origin_span(nests[-1].node)
     source = str(parsed.path.relative_to(parsed.path.parents[0]))
     try:
         source = str(parsed.path.relative_to(scope.project.root))
@@ -856,7 +909,7 @@ def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
     if ";" in original:
         raise Unsupported("multiple statements on a source line need finer replacement spans")
     original_lines = original.splitlines()
-    if not re.match(r"\s*do\b", original_lines[0], re.I) or not re.match(r"\s*end\s*do\b", original_lines[-1], re.I):
+    if not statement_span and (not re.match(r"\s*do\b", original_lines[0], re.I) or not re.match(r"\s*end\s*do\b", original_lines[-1], re.I)):
         raise Unsupported("source macro/comment span does not exactly delimit the outlined DO region")
     digest = hashlib.sha256((source + "\0" + scope.name + "\0" + str(first) + "\0" + original).encode()).hexdigest()
     slug = digest[:12]
@@ -875,8 +928,8 @@ def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
         actuals.append(symbol.name)
         intent = "inout" if name in write_maps else "in"
         shape = "(" + ",".join(":" for _ in range(symbol.rank)) + ")" if symbol.rank else ""
-        declarations.append(f"    {type_spec(symbol)}, intent({intent}) :: {symbol.name}{shape}")
-        metadata_symbols.append({"name": symbol.name, "type": type_spec(symbol), "rank": symbol.rank,
+        declarations.append(f"    {type_spec(symbol, logical=structured)}, intent({intent}) :: {symbol.name}{shape}")
+        metadata_symbols.append({"name": symbol.name, "type": type_spec(symbol, logical=structured), "rank": symbol.rank,
                                  "intent": intent, "origin": "dummy" if name in dummies else "host/local",
                                  "contiguous_proven": bool(symbol.rank and ("contiguous" in symbol.attributes
                                      or kind(symbol.shape) == "Explicit_Shape_Spec_List"
@@ -891,29 +944,34 @@ def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
             declarations.append(f"    integer, intent(in) :: {argument}")
             lower_names[name].append(argument)
     body = []
-    bound_index = 0
-    bound_pairs = {}
-    for nest in nests:
-        for depth, (iterator, bounds) in enumerate(nest.loops):
-            bound_key = tuple(re.sub(r"\s+", "", str(expression)).lower() for expression in bounds)
-            bound_arguments = bound_pairs.get(bound_key)
-            if bound_arguments is None:
-                bound_arguments = []
-                for side, expression in zip(("lo", "hi"), bounds):
-                    argument = f"{prefix}_{side}_{bound_index}"
-                    args.append(argument)
-                    actuals.append(str(expression))
-                    declarations.append(f"    integer, intent(in) :: {argument}")
-                    bound_arguments.append(argument)
-                bound_pairs[bound_key] = bound_arguments
-            body.append("    " + "  " * depth + f"do {iterator} = {', '.join(bound_arguments)}")
-            bound_index += 1
-        for assignment in nest.assignments:
-            body.append("    " + "  " * len(nest.loops) + normalize_statement(assignment, scope, lower_names))
-        for depth in reversed(range(len(nest.loops))):
-            body.append("    " + "  " * depth + "end do")
+    if body_builder is not None:
+        body = body_builder(lower_names)
+    elif structured:
+        body = normalize_blocks(nests, scope, lower_names)
+    else:
+        bound_index = 0
+        bound_pairs = {}
+        for nest in nests:
+            for depth, (iterator, bounds) in enumerate(nest.loops):
+                bound_key = tuple(re.sub(r"\s+", "", str(expression)).lower() for expression in bounds)
+                bound_arguments = bound_pairs.get(bound_key)
+                if bound_arguments is None:
+                    bound_arguments = []
+                    for side, expression in zip(("lo", "hi"), bounds):
+                        argument = f"{prefix}_{side}_{bound_index}"
+                        args.append(argument)
+                        actuals.append(str(expression))
+                        declarations.append(f"    integer, intent(in) :: {argument}")
+                        bound_arguments.append(argument)
+                    bound_pairs[bound_key] = bound_arguments
+                body.append("    " + "  " * depth + f"do {iterator} = {', '.join(bound_arguments)}")
+                bound_index += 1
+            for assignment in nest.assignments:
+                body.append("    " + "  " * len(nest.loops) + normalize_statement(assignment, scope, lower_names))
+            for depth in reversed(range(len(nest.loops))):
+                body.append("    " + "  " * depth + "end do")
     for name, symbol in sorted(local_symbols.items()):
-        declarations.append(f"    {type_spec(symbol)} :: {symbol.name}")
+        declarations.append(f"    {type_spec(symbol, logical=structured)} :: {symbol.name}")
     header = f"  subroutine {entry}( &\n" + ", &\n".join("    " + name for name in args) + ")"
     module_source = "\n".join([f"module {generated_module}", "  implicit none", "contains", header,
                                   *declarations, *body, f"  end subroutine {entry}", f"end module {generated_module}", ""])
@@ -940,8 +998,199 @@ def make_region(nests: list[Nest], scope: Scope, module: str, dummies: set[str],
             "loop_nests": len(nests), "loop_ranks": [len(nest.loops) for nest in nests],
             "context": {"nested_parallel": any(id(nest.node) in nested for nest in nests)},
             "annotated": annotated,
-            "legality": "rectangular unit-stride loops; injective pointwise writes; written arrays read only at the same point; no calls with unknown effects; scalar temporaries defined before read and dead after region",
+            "legality": ("capture storage and native liveness proved; numerical and parallel legality delegated to selected compiler"
+                         if structured else "rectangular unit-stride loops; injective pointwise writes; written arrays read only at the same point; no calls with unknown effects; scalar temporaries defined before read and dead after region"),
             "ordinal": ordinal}
+
+
+def block_tree(nests: list[Nest], scope: Scope):
+    """Clone the retained DO/IF/assignment structure, without native directives."""
+    body = []
+    for nest in nests:
+        body.extend(f"do {iterator} = {', '.join(map(str, bounds))}" for iterator, bounds in nest.loops)
+        body.extend(str(statement) for statement in nest.assignments)
+        body.extend("end do" for _ in nest.loops)
+    source = "\n".join(line for line in "\n".join(body).splitlines() if not line.lstrip().startswith("!"))
+    tree = scope.project.parser(FortranStringReader("subroutine outline_body\n" + source + "\nend subroutine"))
+    return next(node for node in walk(tree) if kind(node) == "Execution_Part")
+
+
+def expression_names(node):
+    # Keyword labels are parsed as Names, but do not refer to source storage.
+    labels = {id(value.items[0]) for value in walk(node) if kind(value) == "Actual_Arg_Spec"}
+    return {str(value).lower() for value in walk(node) if kind(value) == "Name" and id(value) not in labels}
+
+
+def make_block_region(nests, scope, module, dummies, routine, parsed, insertion, ordinal, *, liveness=live_after,
+                      statement_span=False):
+    """Prove capture/storage contracts; the public compiler proves computation.
+
+    Bounds and scalar/conditional statements remain at their original positions.
+    This path is usable only when the caller checks the complete emitted entry
+    with its selected compiler before accepting the replacement.
+    """
+    body = block_tree(nests, scope)
+    statements = {"Execution_Part", "Block_Nonlabel_Do_Construct", "Nonlabel_Do_Stmt", "End_Do_Stmt",
+                  "Assignment_Stmt", "If_Construct", "If_Then_Stmt", "Else_If_Stmt", "Else_Stmt",
+                  "End_If_Stmt", "If_Stmt", "Comment"}
+
+    def check_statements(node):
+        if kind(node) not in statements:
+            raise Unsupported(f"unsupported statement in complete GPU block: {kind(node)}")
+        for child in content(node):
+            check_statements(child)
+        if kind(node) == "If_Stmt":
+            check_statements(node.items[1])
+
+    check_statements(body)
+    loops = [node for node in walk(body) if kind(node) == "Block_Nonlabel_Do_Construct"]
+    iterators = {loop_info(node)[0].lower() for node in loops}
+    assignments = [node for node in walk(body) if kind(node) == "Assignment_Stmt"]
+    scalar_writes = {str(node.items[0]).lower() for node in assignments if kind(node.items[0]) == "Name"}
+    local_written = iterators | scalar_writes
+    arrays, captured, local_symbols = {}, {}, {}
+    written_arrays = set()
+    for name in local_written:
+        symbol = scope.resolve(name)
+        if (symbol is None or symbol.rank or symbol.scope is not scope or name in dummies
+                or "parameter" in symbol.attributes):
+            raise Unsupported(f"write to captured or nonlocal scalar {name}")
+        symbol_checks(symbol, scope, dummies, stable_allocatable=True)
+        if "save" in symbol.attributes or symbol.initializer is not None:
+            raise Unsupported(f"write to persistent local scalar {name}")
+        if name in iterators and type_spec(symbol) != "integer":
+            raise Unsupported(f"induction variable {name} is not a local default integer")
+        local_symbols[name] = symbol
+    for assignment in assignments:
+        lhs = assignment.items[0]
+        if kind(lhs) not in {"Name", "Part_Ref"}:
+            raise Unsupported("unsupported assignment target")
+        if kind(lhs) == "Name" and str(lhs).lower() in iterators:
+            raise Unsupported("assignment changes an induction variable")
+        if kind(lhs) == "Part_Ref":
+            written_arrays.add(str(lhs.items[0]).lower())
+    if not written_arrays:
+        raise Unsupported("region has no array output")
+    # Array sections/whole-array assignments may allocate or change descriptors;
+    # derived references introduce hidden storage aliases. Neither is a capture.
+    if any(kind(node) in {"Data_Ref", "Structure_Constructor", "Array_Constructor", "Subscript_Triplet"}
+           for node in walk(body)):
+        raise Unsupported("array sections, derived data, or constructors in GPU capture")
+    for call in (node for node in walk(body) if kind(node) == "Intrinsic_Function_Reference"):
+        name = str(call.items[0]).lower()
+        if not scope.intrinsic_unshadowed(name):
+            raise Unsupported(f"intrinsic binding cannot be proved: {name}")
+    for reference in (node for node in walk(body) if kind(node) == "Part_Ref"):
+        name, indices = reference.items
+        symbol = visible_symbol(scope, str(name))
+        if symbol is None or not symbol.rank:
+            raise Unsupported(f"unresolved array or opaque function {name}")
+        if len(indices.items) != symbol.rank:
+            raise Unsupported(f"array rank mismatch for {name}")
+    # Fortran model inquiries inspect type even when their argument is
+    # undefined. Preserve scalar declarations used only there; passing them
+    # through a value ABI would introduce a native value read.
+    model_names = {id(value) for call in walk(body) if kind(call) == "Intrinsic_Function_Reference"
+                   and str(call.items[0]).lower() in {"kind", "epsilon", "tiny", "huge"}
+                   for value in walk(call.items[1]) if kind(value) == "Name"}
+    keyword_names = {id(value.items[0]) for value in walk(body) if kind(value) == "Actual_Arg_Spec"}
+    runtime_names = {str(value).lower() for value in walk(body) if kind(value) == "Name"
+                     and id(value) not in model_names | keyword_names}
+    for name in expression_names(body) - local_written:
+        symbol = visible_symbol(scope, name)
+        if symbol is None:
+            raise Unsupported(f"unresolved captured symbol {name}")
+        symbol_checks(symbol, scope, dummies, stable_allocatable=True)
+        if not symbol.rank and name not in runtime_names:
+            local_symbols[name] = symbol
+        else:
+            (arrays if symbol.rank else captured)[name] = symbol
+    if not scope.intrinsic_unshadowed("lbound"):
+        raise Unsupported("LBOUND intrinsic binding cannot be proved for generated call arguments")
+    allocated = sorted(symbol.name for symbol in arrays.values() if "allocatable" in symbol.attributes)
+    if allocated and not scope.intrinsic_unshadowed("allocated"):
+        raise Unsupported("ALLOCATED intrinsic binding cannot be proved for generated guard")
+    storage_names = {}
+    for name in arrays:
+        storage_names.setdefault(id(scope.resolve(name)), set()).add(name)
+    if any(len(aliases) > 1 and aliases & written_arrays for aliases in storage_names.values()):
+        raise Unsupported("multiple visible aliases of the same written array storage")
+    check_local_liveness(nests, routine, parsed, local_written, liveness)
+    region = render_region(nests, scope, module, dummies, routine, parsed, insertion, set(), ordinal,
+                           arrays, captured, local_symbols, written_arrays, structured=True, statement_span=statement_span)
+    region["allocated_arrays"] = allocated
+    return region
+
+
+def normalize_blocks(nests, scope, lower_names):
+    """Normalize descriptors and literal kinds without moving expressions."""
+    body = block_tree(nests, scope)
+
+    def normalize(node):
+        if isinstance(node, (list, tuple)):
+            return type(node)(normalize(value) for value in node)
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return node
+        if hasattr(node, "items"):
+            node.items = tuple(normalize(value) for value in node.items)
+        if hasattr(node, "content"):
+            node.content = [normalize(value) for value in node.content]
+        if kind(node) == "Real_Literal_Constant":
+            precision = literal_kind(node, scope)
+            node.items = (re.sub("[dD]", "e", node.items[0]), str(precision))
+        elif kind(node) in {"Int_Literal_Constant", "Logical_Literal_Constant"} and node.items[1] is not None:
+            selector = str(node.items[1])
+            precision = int(selector) if selector.isdigit() else integer_constant(F.Name(selector), scope)
+            if precision != 4:
+                raise Unsupported("non-default integer/logical literal kind in GPU block")
+            node.items = (node.items[0], None)
+        elif kind(node) == "Part_Ref":
+            name, subscripts = node.items
+            lowers = lower_names[str(name).lower()]
+            values = [f"({index}) - ({lower}) + 1" for index, lower in zip(subscripts.items, lowers)]
+            node.items = (name, F.Section_Subscript_List(", ".join(values)))
+        elif kind(node) == "Intrinsic_Function_Reference":
+            function, arguments = node.items
+            name = str(function).lower()
+            values = list(arguments.items)
+            if name in {"real", "int", "nint", "floor", "ceiling"}:
+                for index, value in enumerate(values):
+                    keyword = str(value.items[0]).lower() if kind(value) == "Actual_Arg_Spec" else None
+                    if keyword == "kind" or (keyword is None and index == 1):
+                        selector = value.items[1] if keyword else value
+                        precision = integer_constant(selector, scope)
+                        values[index] = (F.Actual_Arg_Spec(f"kind={precision}") if keyword else
+                                         F.Int_Literal_Constant(str(precision)))
+                node.items = (function, F.Actual_Arg_Spec_List(", ".join(map(str, values))))
+            if name in {"allocated", "lbound", "ubound"}:
+                bound_args = {}
+                formal = ["array"] if name == "allocated" else ["array", "dim", "kind"]
+                for index, value in enumerate(values):
+                    keyword = str(value.items[0]).lower() if kind(value) == "Actual_Arg_Spec" else None
+                    key = keyword or (formal[index] if index < len(formal) else "invalid")
+                    if key not in formal or key in bound_args:
+                        raise Unsupported("unsupported descriptor inquiry arguments")
+                    bound_args[key] = value.items[1] if keyword else value
+                array_node = bound_args.get("array")
+                array = str(array_node).lower()
+                symbol = scope.resolve(array) if kind(array_node) == "Name" else None
+                if name == "allocated":
+                    if symbol is None or "allocatable" not in symbol.attributes:
+                        raise Unsupported("ALLOCATED inquiry requires an allocatable capture")
+                    return F.Logical_Literal_Constant(".true.")
+                if "dim" not in bound_args or array not in lower_names:
+                    raise Unsupported("array bound inquiry requires a captured array and constant DIM")
+                if "kind" in bound_args and integer_constant(bound_args["kind"], scope) != 4:
+                    raise Unsupported("non-default integer array bound inquiry")
+                dimension = integer_constant(bound_args["dim"], scope)
+                if not 1 <= dimension <= len(lower_names[array]):
+                    raise Unsupported("invalid array bound DIM")
+                lower = lower_names[array][dimension - 1]
+                return (F.Name(lower) if name == "lbound" else
+                        F.Level_2_Expr(f"({lower}) + size({array}, {dimension}) - 1"))
+        return node
+
+    return ["    " + line for line in str(normalize(body)).splitlines()]
 
 
 def discover_sources(sources: list[str], project_root: str, output_dir: str,

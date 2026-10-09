@@ -1,3 +1,5 @@
+# PSyclone 3.3.1 requires fparser==0.2.4 and sympy<=1.13.3.
+# That SymPy release requires mpmath<1.4.
 configparser==7.2.0
 fparser==0.2.4
 graphviz==0.21

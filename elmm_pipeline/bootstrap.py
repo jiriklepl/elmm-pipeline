@@ -9,17 +9,26 @@ from .build import bootstrap_native
 
 
 def ensure_repo(name, spec):
+    """Reuse a clean cache, fetching an explicitly changed commit pin if needed."""
     destination = ROOT / ".cache" / "repos" / name
     if not destination.exists():
         destination.parent.mkdir(parents=True, exist_ok=True)
         command(["git", "clone", "--no-checkout", spec["url"], destination])
-        command(["git", "checkout", "--detach", spec["revision"]], cwd=destination)
-    revision = command(["git", "rev-parse", "HEAD"], cwd=destination)[0].strip()
-    if revision != spec["revision"]:
-        raise RuntimeError(f"{destination} is at {revision}, expected pinned {spec['revision']}")
+        command(["git", "checkout", "--detach", "--no-overwrite-ignore", spec["revision"]], cwd=destination)
     dirty = command(["git", "status", "--porcelain", "--untracked-files=all"], cwd=destination)[0]
     if dirty:
         raise RuntimeError(f"Cached {name} checkout has source changes; preserve it and refresh the cache")
+    revision = command(["git", "rev-parse", "HEAD"], cwd=destination)[0].strip()
+    if revision != spec["revision"]:
+        try:
+            command(["git", "cat-file", "-e", spec["revision"] + "^{commit}"], cwd=destination)
+        except RuntimeError:
+            command(["git", "fetch", "--no-tags", spec["url"], spec["revision"]], cwd=destination)
+        # No reset/clean/force: even a concurrent worktree edit must be preserved.
+        command(["git", "checkout", "--detach", "--no-overwrite-ignore", spec["revision"]], cwd=destination)
+        revision = command(["git", "rev-parse", "HEAD"], cwd=destination)[0].strip()
+        if revision != spec["revision"]:
+            raise RuntimeError(f"{destination} is at {revision}, expected pinned {spec['revision']}")
     return destination
 
 

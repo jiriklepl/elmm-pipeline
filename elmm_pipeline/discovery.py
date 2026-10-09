@@ -13,13 +13,20 @@ from .common import python_environment
 
 def discover(source_path: Path | Iterable[Path], project_root: Path, python: Path,
              output_dir: Path, defines: Iterable[str] = ("DPREC",),
-             select: Iterable[str] = ()) -> dict:
+             select: Iterable[str] = (), *, backend: str = "cpu",
+             compiler_root: Path | None = None, compiler_python: Path | None = None) -> dict:
     """Discover independently executable loop regions without application names.
 
     A file, directory, or explicit collection of files is accepted. Directories
     are scanned recursively for free-form Fortran. Discovery never changes an
     input file. ``select`` contains optional case-insensitive routine globs.
     """
+    if backend not in {"cpu", "gpu"}:
+        raise ValueError(f"Unknown discovery backend: {backend}")
+    if (compiler_root is None) != (compiler_python is None):
+        raise ValueError("Compiler discovery requires an explicit compiler root and Python environment")
+    if compiler_root is not None and backend != "gpu":
+        raise ValueError("Compiler-backed discovery currently requires the GPU target")
     project_root = Path(project_root).resolve(strict=True)
     if isinstance(source_path, (str, Path)):
         path = Path(source_path).resolve(strict=True)
@@ -29,7 +36,10 @@ def discover(source_path: Path | Iterable[Path], project_root: Path, python: Pat
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     request = {"sources": [str(path) for path in sources], "project_root": str(project_root),
-               "output_dir": str(output_dir), "defines": list(defines), "select": list(select)}
+               "output_dir": str(output_dir), "defines": list(defines), "select": list(select), "backend": backend}
+    if compiler_root is not None:
+        request.update(compiler_root=str(Path(compiler_root).resolve(strict=True)),
+                       compiler_python=str(Path(compiler_python).absolute()))
     request_path = output_dir / "discovery-request.json"
     request_path.write_text(json.dumps(request, indent=2) + "\n")
     worker = Path(__file__).with_name("tool_workers") / "discovery_worker.py"
@@ -46,7 +56,8 @@ def discover(source_path: Path | Iterable[Path], project_root: Path, python: Pat
 
 def discover_project(project_root: Path, python: Path, output_dir: Path, *,
                      patterns: Iterable[str] = ("*.f90",), defines: Iterable[str] = ("DPREC",),
-                     select: Iterable[str] = ()) -> dict:
+                     select: Iterable[str] = (), backend: str = "cpu",
+                     compiler_root: Path | None = None, compiler_python: Path | None = None) -> dict:
     """Batch a project scan so imported modules are parsed once per worker."""
     project_root = Path(project_root).resolve(strict=True)
     patterns = list(patterns or ("*.f90",))
@@ -55,4 +66,5 @@ def discover_project(project_root: Path, python: Path, output_dir: Path, *,
                and path.suffix.lower() in {".f90", ".f95", ".f03", ".f08"}
                and any(fnmatch.fnmatchcase(str(path.relative_to(project_root)).lower(), pattern.lower())
                        or fnmatch.fnmatchcase(path.name.lower(), pattern.lower()) for pattern in patterns)]
-    return discover(sources, project_root, python, output_dir, defines, select)
+    return discover(sources, project_root, python, output_dir, defines, select, backend=backend,
+                    compiler_root=compiler_root, compiler_python=compiler_python)

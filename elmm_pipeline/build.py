@@ -16,8 +16,10 @@ import shutil
 import subprocess
 import venv
 
+from .gpu_toolchain import GPUSource, compile_gpu_sources, validate_gpu_sources
 
-SCONS_VERSION = "4.9.1"
+
+SCONS_VERSION = "4.11.1"
 NATIVE_LIBRARIES = ("fftw3", "fftw3f", "fftw3_omp", "fftw3f_omp", "blas", "lapack")
 
 
@@ -181,6 +183,8 @@ def build(
     extra_args: list[str],
     extra_sources: list[Path] | None = None,
     patched_sources: list[Path] | None = None,
+    gpu_sources: list[GPUSource] | list[dict] | None = None,
+    gpu_options: dict | None = None,
 ) -> Path:
     """Build double-precision ELMM and return the absolute executable path.
 
@@ -189,6 +193,8 @@ def build(
     build file. Fortran module dependencies are scanned by SCons; an explicit
     dependency also protects every changed native source's generated interface
     modules. Matching uses source paths, so upstream object names can differ.
+    Optional CUDA/OpenACC units are compiled separately and linked into the GNU
+    host through C entry points; their NVIDIA module files remain isolated.
     """
     if jobs < 1 or threads < 1:
         raise ValueError("jobs and threads must be positive")
@@ -217,12 +223,16 @@ def build(
     for path in patched:
         if not path.is_file() or path.suffix.lower() not in {".f90", ".f"}:
             raise ValueError(f"Missing or unsupported patched Fortran source: {path}")
+    gpu_units = validate_gpu_sources(gpu_sources or [])
+    if {unit["source"] for unit in gpu_units} & {str(path) for path in sources}:
+        raise ValueError("GPU sources must not also appear among GNU host extra_sources")
 
     build_dir.mkdir(parents=True, exist_ok=True)
     original = (source_dir / "SConstruct").read_text(encoding="utf-8")
     anchor = "t = env.Program("
     if original.count(anchor) != 1:
         raise RuntimeError("Unsupported ELMM SConstruct: program insertion point changed")
+    gpu_build = compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines) if gpu_units else None
     injection = [
         "# Additional sources supplied by elmm-pipeline.",
         "if os.environ.get('FC'):",
@@ -241,6 +251,47 @@ def build(
         injection.append("pipeline_extra += pipeline_object")
         if source.suffix.lower() in {".f90", ".f"}:
             injection.append("pipeline_interfaces += pipeline_object")
+    if gpu_build:
+        injection.extend([
+            f"pipeline_extra += [env.File(p) for p in {gpu_build['objects']!r}]",
+            f"env.AppendUnique(LIBPATH={gpu_build['library_dirs']!r})",
+            f"env.AppendUnique(LIBS={gpu_build['libraries']!r})",
+            f"env.AppendUnique(RPATH={gpu_build['rpaths']!r})",
+            f"env.AppendUnique(LINKFLAGS={gpu_build['link_flags']!r})",
+        ])
+    # NVHPC ships libgomp.so -> libnvomp.so. Selecting that alias through an
+    # inherited -L path replaces GNU host OpenMP with NVIDIA's compatibility
+    # layer. Resolve GNU's own runtime explicitly for every build, including
+    # the baseline. With OpenACC, NVIDIA's acc_* API must precede GNU libgomp's
+    # competing acc_* API, while GNU's GOMP_* API must precede libnvomp.
+    openacc_library = gpu_build.get("openacc_library") if gpu_build else None
+    openacc_notify_library = gpu_build.get("openacc_notify_library") if gpu_build else None
+    injection.extend([
+        "import subprocess as pipeline_subprocess, json as pipeline_json",
+        "pipeline_host_fc = os.environ.get('FC', 'gfortran')",
+        "pipeline_gomp_link = pipeline_subprocess.check_output([pipeline_host_fc, '-print-file-name=libgomp.so'], text=True).strip()",
+        "if not os.path.isabs(pipeline_gomp_link) or not os.path.isfile(pipeline_gomp_link):",
+        "  raise RuntimeError('The GNU Fortran compiler did not identify its own libgomp runtime')",
+        "pipeline_gomp = os.path.realpath(pipeline_gomp_link)",
+        "if 'nvomp' in os.path.basename(pipeline_gomp):",
+        "  raise RuntimeError('GNU OpenMP runtime lookup resolved NVIDIA libnvomp; fix the GNU compiler configuration')",
+        f"pipeline_openacc = {openacc_library!r}",
+        f"pipeline_openacc_notify = {openacc_notify_library!r}",
+        "pipeline_runtime_prefix = ([pipeline_openacc, pipeline_openacc_notify] if pipeline_openacc else []) + [pipeline_gomp]",
+        "pipeline_runtime_flags = []",
+        "if pipeline_openacc:",
+        "  pipeline_runtime_flags = [env.File(pipeline_openacc), '-Wl,--push-state,--no-as-needed', env.File(pipeline_openacc_notify), '-Wl,--pop-state']",
+        "pipeline_runtime_flags += [env.File(pipeline_gomp)]",
+        "env.Replace(PIPELINE_RUNTIME_LIBFLAGS=pipeline_runtime_flags)",
+        "env.Replace(_LIBFLAGS='$PIPELINE_RUNTIME_LIBFLAGS ' + env['_LIBFLAGS'])",
+        "env.PrependUnique(LIBPATH=[os.path.dirname(pipeline_gomp_link)])",
+        "env.PrependUnique(RPATH=[os.path.dirname(pipeline_gomp)])",
+        # DT_RPATH protects the chosen GNU SONAME from NVHPC libgomp aliases in
+        # an inherited LD_LIBRARY_PATH, and applies to FFTW's dependencies too.
+        "env.AppendUnique(LINKFLAGS=['-Wl,--disable-new-dtags'])",
+        f"with open({str(build_dir / 'host-runtime.json')!r}, 'w') as pipeline_runtime_file:",
+        "  pipeline_json.dump({'gnu_openmp': pipeline_gomp, 'ordered_prefix': pipeline_runtime_prefix}, pipeline_runtime_file, indent=2)",
+    ])
     injection.extend([
         "if pipeline_interfaces:",
         "  for pipeline_native_object in objs:",
@@ -267,12 +318,15 @@ def build(
         "fast=yes", "aggressive=no", "lto=no", "openmp=yes", "prec=dp",
         f"dir={build_dir}", *extra_args,
     ]
+    build_manifest = {"argv": command, "cwd": str(source_dir),
+                      "native_library_dir": str(fftw_library_dir),
+                      "preprocessing_defines": defines,
+                      "extra_sources": [str(path) for path in sources],
+                      "patched_sources": [str(path) for path in patched]}
+    if gpu_build:
+        build_manifest["gpu"] = gpu_build
     (build_dir / "build-command.json").write_text(
-        json.dumps({"argv": command, "cwd": str(source_dir),
-                    "native_library_dir": str(fftw_library_dir),
-                    "preprocessing_defines": defines,
-                    "extra_sources": [str(path) for path in sources],
-                    "patched_sources": [str(path) for path in patched]}, indent=2) + "\n",
+        json.dumps(build_manifest, indent=2) + "\n",
         encoding="utf-8",
     )
     with (build_dir / "build.log").open("w", encoding="utf-8") as log:
@@ -281,4 +335,8 @@ def build(
     binary = build_dir / "ELMM"
     if completed.returncode != 0 or not binary.is_file():
         raise RuntimeError(f"ELMM build failed; inspect {build_dir / 'build.log'}")
+    runtime_manifest = build_dir / "host-runtime.json"
+    if runtime_manifest.is_file():
+        build_manifest["host_runtime"] = json.loads(runtime_manifest.read_text(encoding="utf-8"))
+        (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
     return binary

@@ -1,0 +1,233 @@
+"""Independent source-scope integration consumes only public compiler artifacts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from elmm_pipeline.local_adapter import (
+    LocalAdapterError,
+    apply_scope_sources,
+    transform_scopes,
+)
+
+PROGRAM="""module source_application
+contains
+subroutine produce(a,b,n)
+real(8),intent(in)::a(:)
+real(8),intent(out)::b(:)
+integer,intent(in)::n
+integer::i
+do i=1,n
+b(i)=2*a(i)
+enddo
+end subroutine
+subroutine native_scale(b)
+real(8),intent(inout)::b(:)
+b=3*b
+end subroutine
+subroutine consume(a,b,c,n)
+real(8),intent(in)::a(:),b(:)
+real(8),intent(out)::c(:)
+integer,intent(in)::n
+integer::i
+do i=1,n
+c(i)=a(i)+b(i)
+enddo
+end subroutine
+subroutine step(a,b,c,n)
+real(8),intent(in)::a(:)
+real(8),intent(out)::b(:),c(:)
+integer,intent(in)::n
+call produce(a,b,n)
+call native_scale(b)
+call consume(a,b,c,n)
+end subroutine
+end module
+"""
+FACT={"storage":"stable","escapes":False,"allocation_changes":False,"initialized":"whole"}
+FACTS={"schema_version":1,"participation":"serial","captures":{
+    "argument::a":FACT,"argument::b":{**FACT,"initialized":"none"},
+    "argument::c":{**FACT,"initialized":"none"}}}
+
+
+def checked(command, *, cwd, env=None):
+    result=subprocess.run(command,cwd=cwd,env=env,capture_output=True,text=True,timeout=180,check=False)
+    assert result.returncode==0, result.stdout+result.stderr
+    return result
+
+
+@pytest.fixture(scope="module")
+def independent(tmp_path_factory):
+    directory=tmp_path_factory.mktemp("independent_scope_pipeline")
+    compiler_source=Path(os.environ.get("ELMM_TEST_COMPILER_ROOT",Path(__file__).resolve().parents[2]))
+    if not (compiler_source/"compiler/__main__.py").is_file():
+        pytest.skip("Set ELMM_TEST_COMPILER_ROOT to a compiler source checkout")
+    compiler=directory/"compiler-checkout"
+    pipeline=directory/"pipeline-checkout"
+    shutil.copytree(compiler_source/"compiler",compiler/"compiler",ignore=shutil.ignore_patterns("__pycache__",".*cache"))
+    shutil.copytree(Path(__file__).resolve().parents[1]/"elmm_pipeline",pipeline/"elmm_pipeline",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    source=directory/"application-source.f90"
+    source.write_text(PROGRAM)
+    facts=directory/"facts.json"
+    facts.write_text(json.dumps(FACTS))
+    output=directory/"artifacts"
+    script="""import json,sys
+from pathlib import Path
+from elmm_pipeline.local_adapter import transform_scopes
+source,compiler,facts,output=map(Path,sys.argv[1:])
+metadata=transform_scopes(source,compiler,Path(sys.executable),output,entry='step',
+                          capture_facts=json.loads(facts.read_text()))
+print(json.dumps(metadata))
+"""
+    environment={**os.environ,"PYTHONPATH":str(pipeline)}
+    response=checked([sys.executable,"-c",script,str(source),str(compiler),str(facts),str(output)],
+                     cwd=directory,env=environment)
+    return directory,pipeline,compiler,source,output,json.loads(response.stdout)
+
+
+def test_independent_checkouts_form_and_apply_public_scope(independent,tmp_path):
+    directory,pipeline,_compiler,source,output,metadata=independent
+    assert metadata["scope_manifest"]["scope_count"]==1
+    assert metadata["scope_manifest"]["runtime"]["link_once"]
+    assert len(metadata["gpu_sources"])==3 # two entries and one common runtime
+    expected = [str(output / item["path"]) for item in metadata["scope_manifest"]["build_sources"]
+                if item["language"] == "fortran" and item["role"] != "original_source"]
+    assert metadata["extra_sources"] == expected
+    assert len(expected) == len(set(expected))
+    assert os.path.normpath(metadata["command"][0]) == os.path.normpath(sys.executable)
+    assert "--form-scopes" in metadata["command"]
+    destination=tmp_path/"application-copy.f90"
+    destination.write_bytes(source.read_bytes())
+    mappings=tmp_path/"destinations.json"
+    mappings.write_text(json.dumps({str(source):str(destination)}))
+    script="""import json,sys
+from pathlib import Path
+from elmm_pipeline.local_adapter import apply_scope_sources
+metadata=json.loads(Path(sys.argv[1]).read_text())
+mappings={s:Path(d) for s,d in json.loads(Path(sys.argv[2]).read_text()).items()}
+print(json.dumps([str(p) for p in apply_scope_sources(metadata,mappings)]))
+"""
+    result=checked([sys.executable,"-c",script,str(output/"scope-transformation.json"),str(mappings)],
+                   cwd=directory,env={**os.environ,"PYTHONPATH":str(pipeline)})
+    assert json.loads(result.stdout)==[str(destination)]
+    assert "fort_scope_owner_" in destination.read_text()
+    assert source.read_text()==PROGRAM
+
+
+@pytest.mark.parametrize("transfers", ["pinned", "pipelined"])
+def test_independent_adapter_transports_transfer_choice_and_compiler_reason(independent, tmp_path, transfers):
+    _, _, compiler, source, _, _ = independent
+    metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "generated", entry="step",
+                                capture_facts=FACTS, gpu_options={"scope_transfers": transfers})
+    command = metadata["command"]
+    assert command[command.index("--scope-transfers") + 1] == transfers
+    scope, = metadata["scope_manifest"]["scopes"]
+    configuration = scope["transfer_configuration"]
+    assert configuration["requested"] == transfers
+    assert configuration["selected"] == ("pinned" if transfers == "pinned" else "direct")
+    assert configuration["reason"] == (None if transfers == "pinned" else "pipelined_not_available")
+    assert metadata["compiler_report"]["scopes"] == metadata["scope_manifest"]
+
+
+def test_stale_application_source_is_rejected_before_any_edit(independent,tmp_path):
+    *_,source,_output,metadata=independent
+    destination=tmp_path/"application.f90"
+    destination.write_text(PROGRAM+"! changed\n")
+    before=destination.read_bytes()
+    with pytest.raises(LocalAdapterError,match="Application source changed"):
+        apply_scope_sources(metadata,{str(source):destination})
+    assert destination.read_bytes()==before
+
+
+def test_modified_replacement_is_rejected_before_any_edit(independent,tmp_path):
+    *_,source,output,metadata=independent
+    copied=tmp_path/"artifacts"
+    shutil.copytree(output,copied)
+    metadata={**metadata,"artifact_root":str(copied)}
+    replacement=copied/metadata["scope_manifest"]["sources"][str(source)]["replacement"]
+    replacement.write_text(replacement.read_text()+"! modified\n")
+    destination=tmp_path/"application.f90"
+    destination.write_text(PROGRAM)
+    with pytest.raises(LocalAdapterError,match="Approved source replacement changed"):
+        apply_scope_sources(metadata,{str(source):destination})
+    assert destination.read_text()==PROGRAM
+
+
+@pytest.mark.parametrize("change",["abi","runtime_identity","build_role","escape"])
+def test_incompatible_public_build_manifest_is_rejected(independent,tmp_path,change):
+    _,_,compiler,source,_output,metadata=independent
+    report=json.loads(json.dumps(metadata["compiler_report"]))
+    manifest=report["scopes"]
+    if change=="abi":
+        manifest["runtime"]["abi_version"]=999
+    elif change=="runtime_identity":
+        manifest["runtime"]["runtime_id"]="0"*64
+    elif change=="build_role":
+        manifest["build_sources"][0]["role"]="unknown"
+    else:
+        manifest["artifacts_sha256"]["../outside.f90"]=hashlib.sha256(b"outside").hexdigest()
+    with patch("elmm_pipeline.local_adapter._invoke",return_value=(report,[])),pytest.raises(LocalAdapterError):
+        transform_scopes(source,compiler,Path(sys.executable),tmp_path/"output",entry="step",capture_facts=FACTS)
+
+
+def test_pipeline_builds_and_links_public_common_runtime_once(independent,tmp_path):
+    directory,pipeline,_compiler,source,output,metadata=independent
+    fortran=shutil.which("gfortran-15") or shutil.which("gfortran")
+    nvcc=shutil.which("nvcc")
+    if not nvcc or not fortran:
+        pytest.skip("CUDA and GNU Fortran toolchain required")
+    destination=tmp_path/"application.f90"
+    destination.write_text(PROGRAM)
+    apply_scope_sources(metadata,{str(source):destination})
+    script="""import json,sys
+from pathlib import Path
+from elmm_pipeline.gpu_toolchain import compile_gpu_sources
+metadata=json.loads(Path(sys.argv[1]).read_text())
+print(json.dumps(compile_gpu_sources(metadata['gpu_sources'],Path(sys.argv[2]),{'architecture':'86'})))
+"""
+    result=checked([sys.executable,"-c",script,str(output/"scope-transformation.json"),str(tmp_path)],
+                   cwd=directory,env={**os.environ,"PYTHONPATH":str(pipeline)})
+    linked=json.loads(result.stdout)
+    assert len(linked["objects"])==3
+    objects=[]
+    # The common modules precede interfaces which USE them. SCons discovers
+    # those dependencies in production; this manual linker fixture uses the
+    # compiler's public roles instead of assuming an incidental artifact order.
+    units = sorted((item for item in metadata["scope_manifest"]["build_sources"]
+                    if item["language"] == "fortran" and item["role"] != "original_source"),
+                   key=lambda item: item["role"] != "common_runtime")
+    for index,item in enumerate(units):
+        filename = str(output / item["path"])
+        target=tmp_path/(str(index)+"_"+Path(filename).stem+".o")
+        checked([fortran,"-std=f2018","-fopenmp","-c",filename,"-o",str(target)],cwd=tmp_path)
+        objects.append(str(target))
+    driver=tmp_path/"driver.f90"
+    driver.write_text("""program caller
+use source_application,only:step
+use fort_scoped_memory,only:fort_scope_serial_caller
+real(8)::a(-2:29),b(-2:29),c(-2:29)
+if(fort_scope_serial_caller()/=1) error stop 'runtime was built without OpenMP caller detection'
+a=4
+call step(a,b,c,32)
+if(any(b/=24) .or. any(c/=28)) error stop 'complete fields disagree'
+print *, 'FIELDS_OK'
+end program
+""")
+    target=tmp_path/"caller"
+    arguments=[fortran,"-std=f2018","-fopenmp","-fcheck=all",str(destination),str(driver),
+               *objects,*linked["objects"],*["-L"+p for p in linked["library_dirs"]],
+               *["-Wl,-rpath,"+p for p in linked["rpaths"]],*["-l"+n for n in linked["libraries"]],
+               "-o",str(target)]
+    checked(arguments,cwd=tmp_path)
+    result=checked([str(target)],cwd=tmp_path,
+                   env={**os.environ,"CUDA_VISIBLE_DEVICES":"","OMP_NUM_THREADS":"4"})
+    assert "FIELDS_OK" in result.stdout
