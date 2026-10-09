@@ -58,14 +58,17 @@ def scoped_configuration(args):
     """Validate explicit scope configuration without inferring capture facts."""
     model = getattr(args, "memory_model", "call")
     transfers = getattr(args, "scope_transfers", "direct")
+    execution = getattr(args, "scope_execution", "bounded")
     if transfers not in {"direct", "pinned", "pipelined", "auto"}:
         raise ValueError("Unknown scope transfer mode")
+    if execution not in {"bounded", "reached"}:
+        raise ValueError("Unknown scope execution mode")
     values = {"entry": getattr(args, "scope_entry", None), "source": getattr(args, "scope_source", None),
               "source_files": getattr(args, "scope_source_file", None) or [],
               "capture_facts": getattr(args, "scope_facts", None),
               "effect_contracts": getattr(args, "scope_effect_contracts", None)}
     if model == "call":
-        if transfers != "direct" or any(values[key] for key in values):
+        if transfers != "direct" or execution != "bounded" or any(values[key] for key in values):
             raise ValueError("--scope-* options require --memory-model scoped")
         return None
     if model != "scoped":
@@ -80,6 +83,7 @@ def scoped_configuration(args):
         if values[key]:
             values[key] = Path(values[key]).resolve(strict=True)
     values["transfers"] = transfers
+    values["execution"] = execution
     return values
 
 
@@ -153,6 +157,7 @@ def prepare_build(tool, args, setup_state, compilers):
         gpu_options.update(gpu_policy=getattr(args, "gpu_policy", "always"), host_threads=args.threads)
         if scope_options:
             gpu_options["scope_transfers"] = scope_options["transfers"]
+            gpu_options["scope_execution"] = scope_options["execution"]
         profile_path = getattr(args, "calibration_profile", None)
         if profile_path:
             copied_profile = directory / "calibration.json"
@@ -458,6 +463,8 @@ def main():
                          help="Local CUDA memory ownership; scoped uses compiler-owned source scopes")
     measure.add_argument("--scope-transfers", choices=("direct", "pinned", "pipelined", "auto"), default="direct",
                          help="Pass the scoped transfer mode to the compiler; independent of GPU placement")
+    measure.add_argument("--scope-execution", choices=("bounded", "reached"), default="bounded",
+                         help="Pass the opt-in reached source execution mode to the compiler")
     measure.add_argument("--scope-entry", help="Explicit procedure or module::procedure for scoped execution")
     measure.add_argument("--scope-source", help="Entry source path relative to the application src/ tree")
     measure.add_argument("--scope-source-file", action="append", default=[],

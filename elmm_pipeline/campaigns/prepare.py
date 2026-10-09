@@ -39,6 +39,11 @@ def validate(config):
         slug(name)
     if set(config.get("commands", {})) & {"verification", "halos", "timings"}:
         raise ValueError("additional commands cannot replace required correctness/timing phases")
+    for driver in config.get('halo_drivers', []):
+        if 'application_case' in driver and (
+                driver['application_case'] not in {row['name'] for row in config['cases']}
+                or not set(driver['sources']) <= modes):
+            raise ValueError('application field driver requires configured case and modes')
 
 
 def prepare(config_path, output):

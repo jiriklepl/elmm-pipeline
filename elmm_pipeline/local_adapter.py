@@ -289,6 +289,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
                "--host-threads",str(options.get("host_threads",4))]
     if options.get("scope_transfers", "direct") != "direct":
         arguments += ["--scope-transfers", options["scope_transfers"]]
+    if options.get("scope_execution", "bounded") != "bounded":
+        arguments += ["--scope-execution", options["scope_execution"]]
     if collective is not None:
         arguments += ["--gpu-collective"]
     for source in source_files:

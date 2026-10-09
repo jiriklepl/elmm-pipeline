@@ -138,6 +138,19 @@ def test_independent_adapter_transports_transfer_choice_and_compiler_reason(inde
     assert metadata["compiler_report"]["scopes"] == metadata["scope_manifest"]
 
 
+def test_independent_adapter_transports_reached_execution_without_choosing_segments(independent,tmp_path):
+    _, _, compiler, source, _, _ = independent
+    metadata = transform_scopes(source,compiler,Path(sys.executable),tmp_path/'reached',entry='step',
+                                capture_facts=FACTS,gpu_options={'scope_execution':'reached'})
+    argv = metadata['command']
+    assert argv[argv.index('--scope-execution')+1] == 'reached'
+    manifest = metadata['scope_manifest']
+    assert manifest['scope_execution'] == 'reached'
+    assert manifest['scope_count'] == 1
+    assert manifest['scopes'][0]['native_continuation'].startswith('original lexical scope')
+    assert metadata['compiler_report']['scopes'] == manifest
+
+
 def test_stale_application_source_is_rejected_before_any_edit(independent,tmp_path):
     *_,source,_output,metadata=independent
     destination=tmp_path/"application.f90"

@@ -183,6 +183,8 @@ def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_
     assert scoped_configuration(args)["capture_facts"] == facts
     args.scope_transfers = "pinned"
     assert scoped_configuration(args)["transfers"] == "pinned"
+    args.scope_execution = "reached"
+    assert scoped_configuration(args)["execution"] == "reached"
     args.memory_model = "call"
     args.scope_entry = args.scope_source = args.scope_facts = None
     with pytest.raises(ValueError, match="require --memory-model"):

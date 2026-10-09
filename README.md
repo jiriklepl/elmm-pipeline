@@ -150,6 +150,14 @@ imports needed for capture and effect analysis. Call-region selection filters
 (`--select`, `--exclude`, `--marked-only`) do not apply to this mode. The entry
 names and source paths identify available input; they supply no grouping recipe.
 
+`--scope-execution reached` opts into the compiler's experimental reached-owner
+implementation; `bounded` remains the default. The adapter forwards the option,
+includes it in build identity, and applies the returned public artifacts. The
+compiler decides which original child regions, lexical coordinators and native
+operations can share a context. Consult its manifest for reached boundaries and
+available numerical work; selecting this mode is not evidence of a resident
+application chain or improved performance.
+
 Capture facts use the compiler's versioned public JSON contract. They declare
 participation and canonical resource roots with storage lifetime, escape,
 allocation-change, and physical initialization facts. Supply `whole`, `none`, or
@@ -494,6 +502,16 @@ application validation sources and linker inputs, complete field counts and
 unchanged tolerances. Their application-specific calls do not affect compiler
 eligibility. `external_files` binds shared libraries, objects and public build
 artifacts to their reviewed hashes.
+
+An application validation driver can set `application_case` to a configured case
+name. It then runs its diagnostic main with that case's original inputs and
+step/VTK checks; these runs never contribute timing samples. The explicit linker
+inputs retain the original numerical objects. Set `metadata_format` to
+`storage-shape-bounds-v1` to require a `fields-NAME.shape` companion to each
+binary dump: element bits, extents, lower bounds and upper bounds, in that order.
+Validation checks precision, exact original bounds, file size and every element,
+including halos and empty fields. Drivers without this option retain their
+existing fixed-layout dump format.
 
 Optional `commands` configure additional maintained tools as argument lists,
 working directories, explicit environment and expected report paths. The only
