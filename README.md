@@ -471,6 +471,7 @@ runtime libraries and tools. Reusing a verified binary requires its exact hash
 and retained build provenance; timing samples are always fresh.
 
 ```sh
+python -m pip install -r requirements-campaign.txt
 python -m elmm_pipeline.campaigns prepare --config /path/to/comparison.json --output /path/to/new-campaign
 python -m elmm_pipeline.campaigns run --campaign /path/to/new-campaign verification
 python -m elmm_pipeline.campaigns run --campaign /path/to/new-campaign halos
