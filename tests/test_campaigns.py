@@ -118,6 +118,30 @@ def test_bounded_profile_continues_application_and_disables_sampling():
             profile_command("nsys", "capture", "program", [], seconds)
 
 
+def test_shared_plot_scale_includes_later_case_outliers(tmp_path, monkeypatch):
+    from elmm_pipeline.campaigns import report
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
+    import matplotlib.pyplot as plt
+    modes = [{"name": "native", "label": "Native"}, {"name": "auto", "label": "Automatic"}]
+    monkeypatch.setattr(report, "check", lambda root: {"modes": modes, "title": "Fixture"})
+    cases = [{"case": name, "gates": {"baseline_seconds": 1}, "summary": {
+        mode["name"]: {"median": 1, "min": .9, "max": maximum} for mode in modes}}
+        for name, maximum in (("first", 1.1), ("later", 3))]
+    write(tmp_path / "timings/report.json", {"status": "passed", "cases": cases})
+    write(tmp_path / "verification/report.json", {"status": "passed", "cases": [
+        {"case": row["case"], "runs": [{"mode": mode["name"], "activity": {"kernel_launches": 0}}
+                                       for mode in modes]} for row in cases]})
+    limits = []
+    original_close = plt.close
+    def close(figure=None):
+        if hasattr(figure, "axes"):
+            limits.extend(axis.get_ylim() for axis in figure.axes)
+        original_close(figure)
+    monkeypatch.setattr(plt, "close", close)
+    report.plot(tmp_path)
+    assert len(limits) == 2 and all(low == 0 and high >= 3 for low, high in limits)
+
+
 @pytest.mark.parametrize("update", [
     {"cleanup_complete": False}, {"remaining_descendants": [{"pid": 123}]},
     {"minimum_available_bytes": 2 * 2**30}, {"stopped_for_memory": True}, {"exit_code": 1}])

@@ -42,9 +42,11 @@ def plot(root):
         ax.axhline(.70, color="#15803d", linestyle="--", linewidth=1)
         ax.set_xticks(np.arange(len(values)), [mode["label"] for mode in state["modes"]], rotation=45, ha="right")
         ax.set_title(f"{case['case']}\nBest frozen baseline: {baseline:.3f} s")
-        ax.set_ylim(bottom=0)
         ax.grid(axis="y", alpha=.2)
         ax.set_axisbelow(True)
+    # Shared limits must be fixed only after every panel contributes its
+    # whiskers; setting a bound inside the loop disables later autoscaling.
+    axes[0, 0].set_ylim(bottom=0)
     axes[0, 0].set_ylabel("Complete wall time / better native or frozen implementation")
     fig.suptitle(state["title"] + " · four host threads")
     fig.text(.5, -.07, "Fresh medians; whiskers: sample min–max. Green: 30% reduction; red: 5% regression.\n"
@@ -54,7 +56,8 @@ def plot(root):
         fig.savefig(output / ("complete-wall-relative." + suffix), dpi=180, bbox_inches="tight")
     plt.close(fig)
     write(output / "source.json", {"report_sha256": digest(root / "timings/report.json"),
-                                   "verification_sha256": digest(root / "verification/report.json")})
+                                   "verification_sha256": digest(root / "verification/report.json"),
+                                   "plotter_sha256": digest(__file__)})
 
 
 def seal(root, output):
