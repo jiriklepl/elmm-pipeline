@@ -575,6 +575,11 @@ Validation checks precision, exact original bounds, file size and every element,
 including halos and empty fields. Drivers without this option retain their
 existing fixed-layout dump format.
 
+Numerical mismatches are collected across all drivers and modes against each
+driver's first native reference. The report retains every mismatch and finishes
+with `status: failed`; timing remains blocked. Build, execution and malformed
+field errors stop immediately and retain a failed report with the error.
+
 Optional `commands` configure additional maintained tools as argument lists,
 working directories, explicit environment and expected report paths. The only
 substitutions are `{campaign}` and `{python}`; commands never pass through a

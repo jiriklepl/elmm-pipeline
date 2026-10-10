@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import numpy as np
 
-from .identity import read, write
+from .identity import write
 from .launch_environment import launch_environment_values
 from .prepare import check
 from .run import environment, run_one
@@ -63,55 +63,68 @@ def run(root):
     state = check(root)
     output = root / "halos"
     output.mkdir(exist_ok=False)
-    if not state["halo_drivers"]:
-        raise ValueError("explicit complete-array validation drivers required")
-    report = {"status": "in_progress", "drivers": [], "performance_measured": False}
-    for driver in state["halo_drivers"]:
-        reference = None
-        entry = {"name": driver["name"], "coverage": driver["coverage"], "runs": []}
-        report["drivers"].append(entry)
-        modes = sorted(driver["sources"], key=lambda name: name != "native")
-        if "native" not in modes:
-            raise ValueError("each validation driver requires an original native reference")
-        for mode in modes:
-            env = environment(state["threads"], traced=mode != "native",
-                              cpu_placement=state.get("cpu_placement"),
-                              openmp_launch_environment=state.get("openmp_launch_environment"))
-            env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
-            directory = output / driver["name"] / mode
-            directory.mkdir(parents=True)
-            binary = directory / "driver"
-            link = driver["link"][mode]
-            command = [state["tools"]["fortran"]["path"], *driver["flags"],
-                       *["-I" + path for path in link["include_dirs"]],
-                       str(root / driver["sources"][mode]), *link["objects"], *link["flags"], "-o", str(binary)]
-            write(directory / "build-command.json", {"argv": command})
-            compiled = subprocess.run(command, cwd=directory, capture_output=True, text=True, check=False, timeout=120)
-            (directory / "build.log").write_text(compiled.stdout + compiled.stderr)
-            if compiled.returncode:
-                raise RuntimeError("validation driver build failed: " + str(directory))
-            if 'application_case' in driver:
-                case = next(row for row in state['cases'] if row['name'] == driver['application_case'])
-                original_mode = next(row for row in state['modes'] if row['name'] == mode)
-                dump_directory = directory / 'run'
-                run_one(root, state, case, {**original_mode, 'binary': str(binary)}, dump_directory, traced=True)
-            else:
-                result = subprocess.run([str(binary)], cwd=directory, env=env,
-                    text=True, capture_output=True, check=False, timeout=120)
-                (directory / "stdout.log").write_text(result.stdout)
-                (directory / "stderr.log").write_text(result.stderr)
-                if result.returncode or driver["success_marker"] not in result.stdout:
-                    raise RuntimeError("validation driver failed: " + str(directory))
-                dump_directory = directory
-            observed = fields(dump_directory, driver)
-            if reference is None:
-                reference = observed
-            comparisons = compare_fields(observed, reference, driver)
-            entry["runs"].append({"mode": mode, "comparisons": comparisons,
-                                  "openmp_launch_environment": launch_environment_values(env)})
-            write(output / "report.json", report)
-            if not all(row["passed"] for row in comparisons.values()):
-                raise RuntimeError("complete-array or halo disagreement")
-    check(root)
-    report["status"] = "passed"
+    report = {"status": "in_progress", "drivers": [], "failures": [], "performance_measured": False}
     write(output / "report.json", report)
+    try:
+        if not state["halo_drivers"]:
+            raise ValueError("explicit complete-array validation drivers required")
+        for driver in state["halo_drivers"]:
+            _run_driver(root, state, output, driver, report)
+        check(root)
+    except Exception as error:
+        report.update(status="failed", error={"type": type(error).__name__, "message": str(error)})
+        write(output / "report.json", report)
+        raise
+    report["status"] = "failed" if report["failures"] else "passed"
+    write(output / "report.json", report)
+    if report["failures"]:
+        raise RuntimeError("complete-array or halo disagreement; all comparisons retained")
+
+
+def _run_driver(root, state, output, driver, report):
+    reference = None
+    entry = {"name": driver["name"], "coverage": driver["coverage"], "runs": []}
+    report["drivers"].append(entry)
+    modes = sorted(driver["sources"], key=lambda name: name != "native")
+    if "native" not in modes:
+        raise ValueError("each validation driver requires an original native reference")
+    for mode in modes:
+        env = environment(state["threads"], traced=mode != "native",
+                          cpu_placement=state.get("cpu_placement"),
+                          openmp_launch_environment=state.get("openmp_launch_environment"))
+        env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
+        directory = output / driver["name"] / mode
+        directory.mkdir(parents=True)
+        binary = directory / "driver"
+        link = driver["link"][mode]
+        command = [state["tools"]["fortran"]["path"], *driver["flags"],
+                   *["-I" + path for path in link["include_dirs"]],
+                   str(root / driver["sources"][mode]), *link["objects"], *link["flags"], "-o", str(binary)]
+        write(directory / "build-command.json", {"argv": command})
+        compiled = subprocess.run(command, cwd=directory, capture_output=True, text=True, check=False, timeout=120)
+        (directory / "build.log").write_text(compiled.stdout + compiled.stderr)
+        if compiled.returncode:
+            raise RuntimeError("validation driver build failed: " + str(directory))
+        if 'application_case' in driver:
+            case = next(row for row in state['cases'] if row['name'] == driver['application_case'])
+            original_mode = next(row for row in state['modes'] if row['name'] == mode)
+            dump_directory = directory / 'run'
+            run_one(root, state, case, {**original_mode, 'binary': str(binary)}, dump_directory, traced=True)
+        else:
+            result = subprocess.run([str(binary)], cwd=directory, env=env,
+                text=True, capture_output=True, check=False, timeout=120)
+            (directory / "stdout.log").write_text(result.stdout)
+            (directory / "stderr.log").write_text(result.stderr)
+            if result.returncode or driver["success_marker"] not in result.stdout:
+                raise RuntimeError("validation driver failed: " + str(directory))
+            dump_directory = directory
+        observed = fields(dump_directory, driver)
+        if reference is None:
+            reference = observed
+        comparisons = compare_fields(observed, reference, driver)
+        entry["runs"].append({"mode": mode, "comparisons": comparisons,
+                              "openmp_launch_environment": launch_environment_values(env)})
+        failed = [name for name, row in comparisons.items() if not row["passed"]]
+        if failed:
+            report["failures"].append({"driver": driver["name"], "mode": mode, "fields": failed})
+        write(output / "report.json", report)
