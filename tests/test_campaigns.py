@@ -1,17 +1,29 @@
 """Campaign identity, clean timing and paired baseline regression contracts."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from elmm_pipeline.campaigns.identity import digest, guard_passed, read, repository, write
+from elmm_pipeline.campaigns.identity import (
+    digest,
+    guard_passed,
+    read,
+    repository,
+    write,
+)
 from elmm_pipeline.campaigns.prepare import check, prepare, validate
-from elmm_pipeline.campaigns.run import borderline, environment, gates, planning_diagnostics, run_one, summaries
 from elmm_pipeline.campaigns.profile import command as profile_command
+from elmm_pipeline.campaigns.run import (
+    borderline,
+    environment,
+    gates,
+    planning_diagnostics,
+    run_one,
+    summaries,
+)
 
 
 def test_repository_identity_rejects_changed_committed_input(tmp_path):
@@ -227,6 +239,7 @@ def test_shared_plot_scale_includes_later_case_outliers(tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
     modes = [{"name": "native", "label": "Native"}, {"name": "auto", "label": "Automatic"}]
     monkeypatch.setattr(report, "check", lambda root: {"modes": modes, "title": "Fixture"})
+    write(tmp_path / "campaign.json", {})
     cases = [{"case": name, "gates": {"baseline_seconds": 1}, "summary": {
         mode["name"]: {"median": 1, "min": .9, "max": maximum} for mode in modes}}
         for name, maximum in (("first", 1.1), ("later", 3))]
@@ -243,6 +256,54 @@ def test_shared_plot_scale_includes_later_case_outliers(tmp_path, monkeypatch):
     monkeypatch.setattr(plt, "close", close)
     report.plot(tmp_path)
     assert len(limits) == 2 and all(low == 0 and high >= 3 for low, high in limits)
+
+
+def test_long_policy_labels_cannot_collapse_plot_area_or_replace_existing_figures(tmp_path, monkeypatch):
+    from elmm_pipeline.campaigns import report
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
+    import matplotlib.pyplot as plt
+
+    labels = ['Native', 'Momentum direct', 'Momentum pinned', 'Momentum pipelined',
+              'Momentum transfer auto', 'Momentum AUTO', 'SGS direct', 'SGS AUTO',
+              'Reached forced GPU', 'Joined momentum + SGS forced GPU',
+              'Reached momentum + SGS AUTO (experimental; rejected CPU estimates)']
+    modes = [{'name': str(index), 'label': label} for index, label in enumerate(labels)]
+    monkeypatch.setattr(report, 'check', lambda root: {'modes': modes, 'title': 'Long labels'})
+    write(tmp_path / 'campaign.json', {})
+    cases = [{'case': name, 'gates': {'baseline_seconds': 1}, 'summary': {
+        mode['name']: {'median': 1, 'min': .9, 'max': 1.1} for mode in modes}}
+        for name in ('first', 'second', 'third')]
+    write(tmp_path / 'timings/report.json', {'status': 'passed', 'cases': cases})
+    write(tmp_path / 'verification/report.json', {'status': 'passed', 'cases': [
+        {'case': row['case'], 'runs': [{'mode': mode['name'], 'activity': {'kernel_launches': 0}}
+                                     for mode in modes]} for row in cases]})
+    existing = tmp_path / 'figures/complete-wall-relative.png'
+    existing.parent.mkdir()
+    existing.write_bytes(b'immutable previous figure')
+    geometry = []
+    original_close = plt.close
+
+    def close(figure=None):
+        if hasattr(figure, 'axes'):
+            figure.canvas.draw()
+            renderer = figure.canvas.get_renderer()
+            for axis in figure.axes:
+                geometry.append((axis.get_window_extent(renderer).height / figure.dpi,
+                                 [label.get_text() for label in axis.get_xticklabels()],
+                                 min(label.get_window_extent(renderer).y0 for label in axis.get_xticklabels())))
+        original_close(figure)
+
+    monkeypatch.setattr(plt, 'close', close)
+    output = tmp_path / 'readable/figures'
+    report.plot(tmp_path, output)
+    assert len(geometry) == 3
+    assert all(height >= 4.4 and observed == labels and bottom > 0
+               for height, observed, bottom in geometry)
+    assert existing.read_bytes() == b'immutable previous figure'
+    assert read(output / 'source.json')['rendering_only'] is True
+    assert (output / 'complete-wall-relative.svg').is_file()
+    with pytest.raises(FileExistsError):
+        report.plot(tmp_path, output)
 
 
 @pytest.mark.parametrize("update", [

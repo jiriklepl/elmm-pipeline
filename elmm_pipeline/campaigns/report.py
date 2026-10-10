@@ -1,16 +1,16 @@
 """Immutable plots and receipts for complete application comparisons."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
-from pathlib import Path
 import shutil
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .identity import digest, guard_passed, read, tree_hashes, write
 from .prepare import check
 
 
-def plot(root):
+def plot(root, output=None):
     root = Path(root).resolve(strict=True)
     state = check(root)
     report = read(root / "timings/report.json")
@@ -22,8 +22,8 @@ def plot(root):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
-    output = root / "figures"
-    output.mkdir(exist_ok=False)
+    output = root / "figures" if output is None else Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=False)
     fig, axes = plt.subplots(1, len(report["cases"]), figsize=(17, 5), squeeze=False, sharey=True)
     for ax, case in zip(axes[0], report["cases"], strict=True):
         rows = case["summary"]
@@ -49,14 +49,29 @@ def plot(root):
     axes[0, 0].set_ylim(bottom=0)
     axes[0, 0].set_ylabel("Complete wall time / better native or frozen implementation")
     fig.suptitle(state["title"] + " · four host threads")
-    fig.text(.5, -.07, "Fresh medians; whiskers: sample min–max. Green: 30% reduction; red: 5% regression.\n"
+    footer = fig.text(.5, .025, "Fresh medians; whiskers: sample min–max. Green: 30% reduction; red: 5% regression.\n"
              "Hatching: no CUDA kernels in separate validation. Startup, output and teardown included.", ha="center")
-    fig.tight_layout()
+    # Reserve a real plotting height before accommodating rotated labels.
+    # tight_layout can otherwise spend almost the entire fixed-height figure
+    # on long labels and collapse all three axes into a few pixels.
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    label_height = max(label.get_window_extent(renderer).height for ax in axes[0]
+                       for label in ax.get_xticklabels()) / fig.dpi
+    footer_height = footer.get_window_extent(renderer).height / fig.dpi
+    bottom = label_height + footer_height + .65
+    top = .8
+    height = 4.5 + bottom + top
+    fig.set_size_inches(17, height)
+    fig.subplots_adjust(left=.075, right=.99, bottom=bottom / height,
+                        top=1 - top / height, wspace=.14)
     for suffix in ("png", "svg", "pdf"):
         fig.savefig(output / ("complete-wall-relative." + suffix), dpi=180, bbox_inches="tight")
     plt.close(fig)
     write(output / "source.json", {"report_sha256": digest(root / "timings/report.json"),
                                    "verification_sha256": digest(root / "verification/report.json"),
+                                   "campaign_sha256": digest(root / "campaign.json"),
+                                   "rendering_only": True,
                                    "plotter_sha256": digest(__file__)})
 
 
@@ -89,8 +104,8 @@ def seal(root, output):
     pair = {name: value["commit"] for name, value in state["repositories"].items()}
     lines = ["# " + state["title"], "", "Fresh complete-application runs; no timings reused.", "",
              f"Compiler `{pair['compiler']}` · pipeline `{pair['pipeline']}`.", "",
-             "[Current application comparison](figures/complete-wall-relative.png) · "
-             f"[Previous snapshot]({previous}).", "",
+             ("[Current application comparison](figures/complete-wall-relative.png) · "
+              f"[Previous snapshot]({previous})."), "",
              "| Case | Better baseline | Median (s) | 30% target (s) |", "|---|---|---:|---:|"]
     for case in timing["cases"]:
         gate = case["gates"]

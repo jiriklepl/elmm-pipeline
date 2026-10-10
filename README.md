@@ -522,6 +522,12 @@ python -m elmm_pipeline.campaigns plot --campaign /path/to/new-campaign
 python -m elmm_pipeline.campaigns seal --campaign /path/to/new-campaign --output /path/to/new-snapshot
 ```
 
+To redraw existing measurements without replacing an immutable chart, use
+`python -m elmm_pipeline.campaigns plot --campaign /path/to/campaign --output /path/to/new-figures`.
+The new plot receipt identifies the original timing and verification reports;
+this renders recorded data and does not run benchmarks. Plot height reserves
+space for the numerical axes before accommodating long policy labels.
+
 Configuration schema 1 requires `threads: 4`, `runtime_id`, `profile`, `title`,
 `previous_snapshot`, `repositories` (explicit paths and selected tracked files),
 `tools` (executable/version-query argument lists), `modes` and `cases`. Each mode

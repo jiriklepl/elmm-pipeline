@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
-from .identity import read, write
+from .identity import write
 from .launch_environment import apply_launch_environment, launch_environment_values
 from .prepare import check, prepare, validate_cpu_placement
 
@@ -54,8 +54,8 @@ def main():
         child.add_argument("--campaign", type=Path, required=True)
         if name in ("run", "worker"):
             child.add_argument("phase")
-        if name == "seal":
-            child.add_argument("--output", type=Path, required=True)
+        if name in ("plot", "seal"):
+            child.add_argument("--output", type=Path, required=name == "seal")
     args = parser.parse_args()
     if args.command == "prepare":
         print(prepare(args.config, args.output))
@@ -84,7 +84,7 @@ def main():
             external(root, args.phase)
     elif args.command == "plot":
         from .report import plot
-        plot(root)
+        plot(root, args.output)
     elif args.command == "seal":
         from .report import seal
         print(seal(root, args.output))
