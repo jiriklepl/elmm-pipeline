@@ -250,6 +250,15 @@ class VTKTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "[Nn]on-finite"):
                     self.read(content=vtk_bytes(pressure=(value, -3.0)))
 
+    def test_direct_comparison_rejects_nonfinite_reference_and_candidate(self):
+        reference = ((1, 1, 1), {"p": [1.], "u": [1., 2., 3.]})
+        for value in (math.nan, math.inf, -math.inf):
+            invalid = ((1, 1, 1), {"p": [value], "u": [1., 2., 3.]})
+            for left, right in ((reference, invalid), (invalid, reference), (invalid, invalid)):
+                with self.subTest(value=value, left=left, right=right):
+                    with self.assertRaisesRegex(ValueError, "Non-finite comparison field"):
+                        compare_vtk(left, right)
+
     def test_truncated_binary_field_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Truncated"):
             self.read(content=vtk_bytes()[:-8])

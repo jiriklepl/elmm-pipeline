@@ -581,6 +581,12 @@ Validation checks precision, exact original bounds, file size and every element,
 including halos and empty fields. Drivers without this option retain their
 existing fixed-layout dump format.
 
+Tolerances must be finite and nonnegative. Any nonfinite field value fails,
+including matching NaNs or infinities. Reports retain failed-value and nonfinite
+counts plus up to eight zero-based flat failure indices in binary file order;
+`max_absolute_error` is `null` when the error is nonfinite. Such failures block
+timing with the original tolerances unchanged.
+
 Numerical mismatches are collected across all drivers and modes against each
 driver's first native reference. The report retains every mismatch and finishes
 with `status: failed`; timing remains blocked. Build, execution and malformed

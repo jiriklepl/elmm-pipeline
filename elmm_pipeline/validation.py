@@ -108,6 +108,8 @@ def compare_vtk(reference, candidate, *, atol=1e-6, rtol=1e-5):
             raise ValueError(f"Field length mismatch: {name}")
         worst, failures = 0.0, 0
         for a, b in zip(expected, actual):
+            if not math.isfinite(a) or not math.isfinite(b):
+                raise ValueError(f"Non-finite comparison field: {name}")
             error = abs(a - b)
             worst = max(worst, error)
             if error > atol + rtol * abs(a):

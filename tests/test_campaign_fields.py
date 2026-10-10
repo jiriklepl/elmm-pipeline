@@ -79,6 +79,57 @@ def test_fixed_layout_fixture_format_remains_supported(tmp_path):
     assert compare_fields(reference, reference, driver)['fields-state.bin']['passed']
 
 
+@pytest.mark.parametrize('name', ['atol', 'rtol'])
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf'), -1.])
+def test_complete_fields_reject_invalid_tolerance_even_for_identical_values(name, value):
+    observed = {'state': (np.asarray([1.]), None)}
+    with pytest.raises(ValueError, match='tolerances must be finite and nonnegative'):
+        compare_fields(observed, observed, {**DRIVER, name: value})
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), -float('inf')])
+@pytest.mark.parametrize('side', ['candidate', 'reference', 'both'])
+def test_complete_fields_reject_and_record_nonfinite_values(value, side):
+    import json
+
+    actual, expected = np.arange(6, dtype=np.float64), np.arange(6, dtype=np.float64)
+    if side in ('candidate', 'both'):
+        actual[2] = value
+    if side in ('reference', 'both'):
+        expected[2] = value
+    row = compare_fields({'state': (actual, None)}, {'state': (expected, None)}, DRIVER)['state']
+    assert not row['passed'] and row['failed_values'] == 1
+    assert row['candidate_nonfinite_values'] == int(side in ('candidate', 'both'))
+    assert row['reference_nonfinite_values'] == int(side in ('reference', 'both'))
+    assert row['absolute_error_nonfinite_values'] == 1 and row['max_absolute_error'] is None
+    assert row['failed_flat_indices'] == [2] and not row['failed_locations_truncated']
+    assert (row['atol'], row['rtol']) == (DRIVER['atol'], DRIVER['rtol'])
+    json.dumps(row, allow_nan=False)
+
+
+def test_complete_field_failure_locations_are_bounded_and_tolerance_is_unchanged():
+    actual, expected = np.ones(20), np.zeros(20)
+    row = compare_fields({'state': (actual, None)}, {'state': (expected, None)}, DRIVER)['state']
+    assert not row['passed'] and row['failed_values'] == 20
+    assert row['failed_flat_indices'] == list(range(8)) and row['failed_locations_truncated']
+    assert row['max_absolute_error'] == 1
+    assert row['candidate_nonfinite_values'] == row['reference_nonfinite_values'] == 0
+    assert compare_fields({'state': (np.asarray([0.5e-6]), None)},
+                          {'state': (np.asarray([0.]), None)}, DRIVER)['state']['passed']
+
+
+def test_finite_subtraction_overflow_has_serializable_failure_evidence():
+    import json
+
+    maximum = np.finfo(np.float64).max
+    row = compare_fields({'state': (np.asarray([maximum]), None)},
+                         {'state': (np.asarray([-maximum]), None)}, DRIVER)['state']
+    assert not row['passed'] and row['failed_values'] == 1
+    assert row['candidate_nonfinite_values'] == row['reference_nonfinite_values'] == 0
+    assert row['absolute_error_nonfinite_values'] == 1 and row['max_absolute_error'] is None
+    json.dumps(row, allow_nan=False)
+
+
 def mock_validation(monkeypatch, values):
     """Exercise the complete suite controller without compiling application code."""
     drivers = []
@@ -125,6 +176,31 @@ def test_suite_without_mismatches_passes(tmp_path, monkeypatch):
     halos.run(tmp_path)
     report = read(tmp_path / 'halos/report.json')
     assert report['status'] == 'passed' and report['failures'] == []
+
+
+def test_matching_nonfinite_reference_fails_suite_and_blocks_timing(tmp_path, monkeypatch):
+    import importlib
+    import os
+
+    from elmm_pipeline.campaigns.identity import digest, write
+
+    mock_validation(monkeypatch, {'fixture': {'native': float('inf'), 'candidate': float('inf')}})
+    with pytest.raises(RuntimeError, match='all comparisons retained'):
+        halos.run(tmp_path)
+    report = read(tmp_path / 'halos/report.json')
+    assert report['status'] == 'failed'
+    assert [row['mode'] for row in report['failures']] == ['native', 'candidate']
+    assert all(not run['comparisons']['fields-state.bin']['passed']
+               for run in report['drivers'][0]['runs'])
+    runner = importlib.import_module('elmm_pipeline.campaigns.run')
+    write(tmp_path / 'campaign.json', {})
+    write(tmp_path / 'verification/report.json', {
+        'status': 'passed', 'campaign_sha256': digest(tmp_path / 'campaign.json')})
+    monkeypatch.setattr(runner, 'check', lambda root: {'host': {'affinity': sorted(os.sched_getaffinity(0))}})
+    monkeypatch.setattr(runner, 'gpu_identity', lambda *args: None)
+    monkeypatch.setattr(runner, 'run_one', lambda *args, **kwargs: pytest.fail('timing must not start'))
+    with pytest.raises(ValueError, match='halo verification must pass before timing'):
+        runner.run(tmp_path, 'timings')
 
 
 @pytest.mark.parametrize('failure', ['build', 'execution', 'metadata'])
