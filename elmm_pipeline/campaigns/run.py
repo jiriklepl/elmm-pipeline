@@ -16,7 +16,7 @@ from ..validation import compare_vtk, read_vtk, validate_log
 from .batches import batch_summary
 from .guard import available
 from .identity import digest, read, write
-from .prepare import check
+from .prepare import check, validate_cpu_placement
 from .transfers import aggregate_final_statistics
 
 
@@ -35,24 +35,30 @@ def planning_diagnostics(log):
     return {"phases": totals, "timing_sample": False, "trace_overhead_present": True}
 
 
-def environment(threads, *, traced):
+def environment(threads, *, traced, cpu_placement=None):
+    validate_cpu_placement(cpu_placement)
     env = trace_environment(clean_environment(threads), "local", enabled=traced)
     for name in list(env):
         if name.startswith("FORT_") and name not in {"FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE"}:
             env.pop(name)
+    if cpu_placement is not None:
+        env.pop("OMP_PLACES", None)
+        env.pop("GOMP_CPU_AFFINITY", None)
+        env.update(cpu_placement["environment"])
     return env
 
 
 def run_one(root, state, case, mode, directory, *, traced):
     if available() < 3 * 2**30:
         raise RuntimeError("less than 3 GiB available; no workload started")
+    env = environment(state["threads"], traced=traced and mode["name"] != "native",
+                      cpu_placement=state.get("cpu_placement"))
     if directory.exists():
         raise ValueError("existing run evidence is immutable: " + str(directory))
     shutil.copytree(root / case["config"], directory)
     argv = [str(root / mode["binary"]), *case["configuration"]["runtime_arguments"]]
     rss = directory / "peak-rss-kib.txt"
     command = [state["tools"]["time"]["path"], "--format=%M", "--output=" + str(rss), *argv]
-    env = environment(state["threads"], traced=traced and mode["name"] != "native")
     env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     print("TRACE" if traced else "TIMING", case["name"], mode["name"], directory.name, flush=True)
     started = time.perf_counter()

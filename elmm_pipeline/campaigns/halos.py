@@ -91,7 +91,8 @@ def run(root):
                 dump_directory = directory / 'run'
                 run_one(root, state, case, {**original_mode, 'binary': str(binary)}, dump_directory, traced=True)
             else:
-                env = environment(state["threads"], traced=mode != "native")
+                env = environment(state["threads"], traced=mode != "native",
+                                  cpu_placement=state.get("cpu_placement"))
                 env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
                 result = subprocess.run([str(binary)], cwd=directory, env=env,
                     text=True, capture_output=True, check=False, timeout=120)

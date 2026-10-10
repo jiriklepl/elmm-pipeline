@@ -17,6 +17,40 @@ def slug(value):
     return value
 
 
+def validate_cpu_placement(placement):
+    """Check the optional calibrated process mask without changing affinity."""
+    if placement is None:
+        return
+    if (not isinstance(placement, dict) or type(placement.get("schema_version")) is not int
+            or placement["schema_version"] != 1
+            or placement.get("environment") != {"OMP_PROC_BIND": "false"}):
+        raise ValueError("invalid calibrated CPU placement contract")
+    cpus = placement.get("cpu_affinity")
+    if (not isinstance(cpus, list) or len(cpus) != 4
+            or any(type(cpu) is not int or cpu < 0 for cpu in cpus)
+            or cpus != sorted(set(cpus))):
+        raise ValueError("calibrated CPU placement requires four sorted unique CPU numbers")
+    if sorted(os.sched_getaffinity(0)) != cpus:
+        raise ValueError("process CPU affinity must exactly match numerical calibration; launch the campaign with taskset")
+
+
+def calibrated_cpu_placement(profile):
+    numerical = profile.get("numerical")
+    if not isinstance(numerical, dict) or numerical.get("schema_version") != 2:
+        return None
+    if type(numerical["schema_version"]) is not int:
+        raise ValueError("invalid numerical calibration schema")
+    identity, protocol = numerical.get("identity"), numerical.get("protocol")
+    if not isinstance(identity, dict) or not isinstance(protocol, dict):
+        raise ValueError("numerical calibration v2 requires CPU placement identity and protocol")
+    placement = {"schema_version": 1, "cpu_affinity": identity.get("cpu_affinity"),
+                 "environment": {"OMP_PROC_BIND": "false"}}
+    validate_cpu_placement(placement)
+    if protocol.get("cpu_affinity") != placement["cpu_affinity"] or protocol.get("omp_proc_bind") != "false":
+        raise ValueError("numerical calibration CPU placement protocol mismatch")
+    return placement
+
+
 def validate(config):
     if config.get("schema_version") != 1 or config.get("threads") != 4:
         raise ValueError("campaign schema 1 and the four-thread comparison budget required")
@@ -106,6 +140,10 @@ def prepare(config_path, output):
         raise ValueError("matching four-thread double-precision profile required")
     if profile.get("scoped", {}).get("runtime_id") != config["runtime_id"]:
         raise ValueError("profile/runtime identity mismatch")
+    placement = calibrated_cpu_placement(profile)
+    state.pop("cpu_placement", None)  # Derived from frozen evidence, not user overrides.
+    if placement is not None:
+        state["cpu_placement"] = placement
     state["profile_sha256"] = digest(output / state["profile"])
     state["selected_gpu_uuid"] = profile.get("hardware", {}).get("gpu_uuid")
     if not isinstance(state["selected_gpu_uuid"], str) or not state["selected_gpu_uuid"].startswith("GPU-"):

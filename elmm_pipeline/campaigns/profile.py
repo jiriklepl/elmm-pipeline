@@ -95,7 +95,7 @@ def profile(root, output, *, case, mode, profiler, seconds=2):
     if any(path.exists() for path in (target, completion, application_log)):
         raise ValueError("configuration collides with profiler target completion files")
     target.write_text(TARGET_WRAPPER)
-    env = environment(state["threads"], traced=False)
+    env = environment(state["threads"], traced=False, cpu_placement=state.get("cpu_placement"))
     env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     record = {"schema_version": 1, "status": "in_progress", "case": case, "mode": mode,
               "argv": argv, "cwd": str(output), "campaign_sha256": digest(root / "campaign.json"),

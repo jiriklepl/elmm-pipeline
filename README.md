@@ -535,6 +535,15 @@ unchanged tolerances. Their application-specific calls do not affect compiler
 eligibility. `external_files` binds shared libraries, objects and public build
 artifacts to their reviewed hashes.
 
+Numerical calibration schema 2 also freezes a derived `cpu_placement` contract:
+the profile's four sorted CPU numbers and `OMP_PROC_BIND=false`. Launch preparation
+and every campaign phase externally under that exact process mask, for example
+with `taskset -c 0-3` when those CPUs match the profile. The runner checks the mask,
+sets the calibrated binding value, and removes inherited `OMP_PLACES` and
+`GOMP_CPU_AFFINITY` overrides for all modes and diagnostics. It does not change
+process affinity or silently continue with different placement. Older profiles
+retain their existing environment behavior and have no derived contract.
+
 An application validation driver can set `application_case` to a configured case
 name. It then runs its diagnostic main with that case's original inputs and
 step/VTK checks; these runs never contribute timing samples. The explicit linker
