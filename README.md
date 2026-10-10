@@ -543,6 +543,8 @@ sets the calibrated binding value, and removes inherited `OMP_PLACES` and
 `GOMP_CPU_AFFINITY` overrides for all modes and diagnostics. It does not change
 process affinity or silently continue with different placement. Older profiles
 retain their existing environment behavior and have no derived contract.
+Configured external phases enforce the same placement and four-thread budget;
+explicit conflicting environment overrides are rejected before execution.
 
 An application validation driver can set `application_case` to a configured case
 name. It then runs its diagnostic main with that case's original inputs and

@@ -154,3 +154,52 @@ def test_tampered_contract_does_not_change_openmp_binding(monkeypatch):
     with pytest.raises(ValueError, match="invalid calibrated CPU placement"):
         validate_cpu_placement({"schema_version": 1, "cpu_affinity": CPUS,
                                 "environment": {"OMP_PROC_BIND": "true"}})
+
+
+def external_fixture(tmp_path, monkeypatch, *, overrides=None, calibrated=True):
+    from elmm_pipeline.campaigns import __main__ as commands
+
+    monkeypatch.setattr("os.sched_getaffinity", lambda pid: set(CPUS))
+    state = {"threads": 4, "selected_gpu_uuid": "GPU-fixture", "commands": {
+        "ordinary": {"argv": ["fixture", "{campaign}"], "environment": overrides or {}}}}
+    if calibrated:
+        state["cpu_placement"] = calibrated_cpu_placement({"numerical": numerical()})
+    monkeypatch.setattr(commands, "check", lambda root: state)
+    invoked = []
+    monkeypatch.setattr(commands.subprocess, "run", lambda *args, **kwargs: invoked.append((args, kwargs)))
+    return commands, invoked
+
+
+def test_external_phase_enforces_placement_and_records_effective_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("OMP_PROC_BIND", "spread")
+    monkeypatch.setenv("OMP_PLACES", "cores")
+    monkeypatch.setenv("GOMP_CPU_AFFINITY", "9-12")
+    monkeypatch.setenv("OMP_NUM_THREADS", "16")
+    commands, invoked = external_fixture(tmp_path, monkeypatch, overrides={"CUSTOM": "{campaign}"})
+    commands.external(tmp_path, "ordinary")
+    _, kwargs = invoked[0]
+    env = kwargs["env"]
+    assert env["OMP_PROC_BIND"] == "false" and env["OMP_NUM_THREADS"] == "4"
+    assert env["OMP_DYNAMIC"] == "FALSE" and env["CUSTOM"] == str(tmp_path)
+    assert "OMP_PLACES" not in env and "GOMP_CPU_AFFINITY" not in env
+    assert read(tmp_path / "ordinary-command.json")["placement_environment"] == {
+        "OMP_NUM_THREADS": "4", "OMP_DYNAMIC": "FALSE", "OMP_PROC_BIND": "false"}
+
+
+@pytest.mark.parametrize("overrides", [{"OMP_PROC_BIND": "close"}, {"OMP_PLACES": "cores"},
+                                       {"GOMP_CPU_AFFINITY": "9-12"}, {"OMP_NUM_THREADS": "8"},
+                                       {"OMP_DYNAMIC": "true"}])
+def test_external_phase_rejects_placement_overrides_before_execution(tmp_path, monkeypatch, overrides):
+    commands, invoked = external_fixture(tmp_path, monkeypatch, overrides=overrides)
+    with pytest.raises(ValueError, match="conflicts with calibrated CPU placement"):
+        commands.external(tmp_path, "ordinary")
+    assert not invoked and not (tmp_path / "ordinary-command.json").exists()
+
+
+def test_legacy_external_phase_preserves_explicit_environment(tmp_path, monkeypatch):
+    commands, invoked = external_fixture(tmp_path, monkeypatch, calibrated=False,
+                                         overrides={"OMP_PROC_BIND": "spread", "OMP_NUM_THREADS": "8"})
+    commands.external(tmp_path, "ordinary")
+    env = invoked[0][1]["env"]
+    assert env["OMP_PROC_BIND"] == "spread" and env["OMP_NUM_THREADS"] == "8"
+    assert read(tmp_path / "ordinary-command.json")["placement_environment"] == {}
