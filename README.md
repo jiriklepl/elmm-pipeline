@@ -570,6 +570,11 @@ and current plots. A sealed snapshot is evidence, not automatic promotion.
 CUDA/NVTX capture and validates the complete application output. Run it through
 `elmm_pipeline.campaigns.guard`, after timing jobs finish. The capture can last
 1–30 seconds; the application continues to completion after collection ends.
+An independent target completion marker confirms the application's exit status
+before validating its full `application.log` and fields; `profiler.log` contains
+the profiler's own output. Profiler execution and
+completion waiting share the configured application timeout; failures retain
+their diagnostic receipt and never rerun numerical work.
 CPU sampling and synchronizing phase timers are disabled. Recorded device
 durations remain separate from application wall time; a short trace is never
 extrapolated into a full-run speedup or overlap claim.
