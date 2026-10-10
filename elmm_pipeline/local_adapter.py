@@ -9,10 +9,67 @@ import subprocess
 from pathlib import Path
 
 from .common import python_environment
+from .gpu_toolchain import validate_numerical_contract
 
 
 class LocalAdapterError(RuntimeError):
     pass
+
+
+def _numerical_build_fields(item):
+    if not isinstance(item, dict):
+        raise LocalAdapterError("Compiler numerical build metadata requires a source descriptor")
+    if "numerical_contract" not in item:
+        return {}
+    if item.get("language") not in {"cuda", "c++"}:
+        raise LocalAdapterError("Compiler numerical contract requires a CUDA or C++ build source")
+    try:
+        return {"numerical_contract": validate_numerical_contract(item["numerical_contract"])}
+    except ValueError as error:
+        raise LocalAdapterError(str(error)) from error
+
+
+def cuda_build_fields(report, path):
+    """Transport one ordinary compiler-approved CUDA build descriptor."""
+    if "build_sources" not in report:
+        return {}  # Historical compiler response; the build records legacy status.
+    units = report["build_sources"]
+    if not isinstance(units, list) or any(not isinstance(item, dict) for item in units):
+        raise LocalAdapterError("Compiler build sources require public source descriptors")
+    for item in units:
+        _numerical_build_fields(item)
+    selected = [item for item in units if item.get("path") == path and item.get("language") == "cuda"]
+    if len(selected) != 1:
+        raise LocalAdapterError("Compiler build sources must identify the requested CUDA artifact exactly once")
+    return _numerical_build_fields(selected[0])
+
+
+def _scope_numerical_contracts(manifest):
+    """Required runtime metadata must match the actual common build source."""
+    units = manifest.get("build_sources", [])
+    if not isinstance(units, list):
+        raise LocalAdapterError("Compiler build sources require public source descriptors")
+    for item in units:
+        _numerical_build_fields(item)
+    runtime = manifest.get("runtime") or {}
+    if not isinstance(runtime, dict):
+        raise LocalAdapterError("Compiler numerical runtime metadata requires a source descriptor")
+    declarations = runtime.get("sources", [])
+    if not isinstance(declarations, list):
+        raise LocalAdapterError("Compiler numerical runtime metadata requires public source descriptors")
+    for item in declarations:
+        required = _numerical_build_fields(item)
+        if required:
+            selected = [unit for unit in units if unit.get("role") == "common_runtime"
+                        and (unit.get("path"), unit.get("language")) == (item.get("path"), item.get("language"))]
+            if len(selected) != 1 or _numerical_build_fields(selected[0]) != required:
+                raise LocalAdapterError("Common runtime numerical build contract differs from its declared source")
+    for unit in units:
+        if unit.get("role") == "common_runtime" and _numerical_build_fields(unit):
+            selected = [item for item in declarations
+                        if (item.get("path"), item.get("language")) == (unit.get("path"), unit.get("language"))]
+            if len(selected) != 1 or _numerical_build_fields(selected[0]) != _numerical_build_fields(unit):
+                raise LocalAdapterError("Common runtime numerical build contract differs from its declared source")
 
 
 def remap_scope_facts(facts, original_root, destination_root=None):
@@ -331,6 +388,7 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         raise LocalAdapterError("Compiler source-scope report is missing versioned scope/capture/artifact facts")
     if collective is not None:
         _check_collective_scope_report(manifest, collective)
+    _scope_numerical_contracts(manifest)
     if manifest["scope_count"]:
         runtime=manifest.get("runtime")
         if (not isinstance(runtime,dict) or runtime.get("abi_version") != 1
@@ -348,6 +406,7 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
                     or item.get("language") not in {"cuda","fortran"}
                     or item.get("role") not in {"common_runtime","shared_entry","original_source"}):
                 raise LocalAdapterError("Compiler scope build source is missing a public artifact/role")
+            _numerical_build_fields(item)
     for name,digest in manifest["artifacts_sha256"].items():
         artifact=_scope_artifact(output_dir,name)
         if hashlib.sha256(artifact.read_bytes()).hexdigest() != digest:
@@ -378,7 +437,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
     metadata["extra_sources"]=[str(_scope_artifact(output_dir,item["path"])) for item in units
                                if item["language"]=="fortran" and item["role"]!="original_source"]
     metadata["gpu_sources"]=[{"source":str(_scope_artifact(output_dir,item["path"])),
-                              "language":"cuda","tool":"local"} for item in units if item["language"]=="cuda"]
+                              "language":"cuda","tool":"local", **_numerical_build_fields(item)}
+                             for item in units if item["language"]=="cuda"]
     (output_dir/"scope-transformation.json").write_text(json.dumps(metadata,indent=2)+"\n")
     return metadata
 
@@ -399,6 +459,7 @@ def _scope_artifact(root, name):
 def _prepare_scope_sources(metadata, destinations):
     """Validate replacements without changing any application source."""
     manifest=metadata["scope_manifest"]
+    _scope_numerical_contracts(manifest)
     root=Path(metadata["artifact_root"]).resolve(strict=True)
     prepared=[]
     dependencies=manifest.get("analysis_sources") or {}
@@ -485,7 +546,11 @@ def _scope_package_build(metadata):
                or item["path"] not in hashes or item.get("language") not in {"cuda", "fortran"}
                for item in runtime["sources"]):
             raise LocalAdapterError("Scope runtime sources require public paths and languages")
+        for item in runtime["sources"]:
+            _numerical_build_fields(item)
         expected_runtime = {(item["path"], item["language"]) for item in runtime["sources"]}
+        if len(expected_runtime) != len(runtime["sources"]):
+            raise LocalAdapterError("Scope runtime source descriptors must not repeat")
     else:
         if runtime is not None:
             raise LocalAdapterError("Native scope package unexpectedly declares a runtime")
@@ -498,15 +563,21 @@ def _scope_package_build(metadata):
                 or item.get("role") not in {"common_runtime", "shared_entry", "original_source"}):
             raise LocalAdapterError("Scope build source is missing a public artifact/role")
         name, language, role = (item[key] for key in ("path", "language", "role"))
+        numerical = _numerical_build_fields(item)
         source = _scope_artifact(root, name)
         if role == "common_runtime":
             actual_runtime.add((name, language))
             if runtime is None or name not in runtime["source_sha256"]:
                 raise LocalAdapterError("Common runtime build source lacks runtime identity")
+            declared = next((entry for entry in runtime["sources"]
+                             if (entry["path"], entry["language"]) == (name, language)), None)
+            if declared is None or _numerical_build_fields(declared) != numerical:
+                raise LocalAdapterError("Common runtime numerical build contract differs from its declared source")
         if role == "original_source":
             replacements.add(source.relative_to(root).as_posix())
         build.append({"path": source.relative_to(root).as_posix(), "source": str(source),
-                      "language": language, "role": role, "sha256": manifest["artifacts_sha256"][name]})
+                      "language": language, "role": role, "sha256": manifest["artifacts_sha256"][name],
+                      **numerical})
     if actual_runtime != expected_runtime:
         raise LocalAdapterError("Common runtime build roles differ from its declared sources")
     # Complete original-source replacements compose by destination below;
@@ -549,6 +620,8 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
                 previous = artifacts[name]
                 if any(previous[key] != item[key] for key in ("language", "role", "sha256")):
                     raise LocalAdapterError("Conflicting approved scope build artifact: " + name)
+                if previous.get("numerical_contract") != item.get("numerical_contract"):
+                    raise LocalAdapterError("Conflicting approved scope numerical build contract: " + name)
                 previous["packages"].append(index)
             else:
                 artifacts[name] = {**item, "packages": [index]}
@@ -558,5 +631,6 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
             "scope_packages": packages, "runtime": runtime, "build_artifacts": list(artifacts.values()),
             "patched_sources": [str(path) for path in replacements],
             "extra_sources": [item["source"] for item in artifacts.values() if item["language"] == "fortran"],
-            "gpu_sources": [{"source": item["source"], "language": "cuda", "tool": "local"}
+            "gpu_sources": [{"source": item["source"], "language": "cuda", "tool": "local",
+                             **_numerical_build_fields(item)}
                             for item in artifacts.values() if item["language"] == "cuda"]}

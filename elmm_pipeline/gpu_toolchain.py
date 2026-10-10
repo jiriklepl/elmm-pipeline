@@ -11,18 +11,37 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
 import subprocess
-from typing import Literal, TypedDict
+from pathlib import Path
+from typing import Literal, NotRequired, TypedDict
 
 
 class GPUSource(TypedDict):
     source: str | Path
     language: Literal["cuda", "openacc"]
     tool: str
+    numerical_contract: NotRequired[dict]
+
+
+def validate_numerical_contract(contract: object) -> dict:
+    """Validate a compiler-owned contract without interpreting numerical code."""
+    keys = {"schema_version", "id", "identity", "required_cuda_options", "required_host_options"}
+    if (not isinstance(contract, dict) or set(contract) != keys
+            or type(contract.get("schema_version")) is not int or contract["schema_version"] != 1
+            or contract.get("id") != "separate-arithmetic-v1"
+            or contract.get("required_cuda_options") != [
+                "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true"]
+            or contract.get("required_host_options") != ["-ffp-contract=off"]):
+        raise ValueError("Unknown or conflicting required numerical build contract")
+    payload = {key: value for key, value in contract.items() if key != "identity"}
+    identity = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if contract["identity"] != identity:
+        raise ValueError("Numerical build contract identity differs from its requirements")
+    return {**contract, "required_cuda_options": list(contract["required_cuda_options"]),
+            "required_host_options": list(contract["required_host_options"])}
 
 
 def _executable(explicit: str | Path | None, names: list[str], candidates: list[Path]) -> str:
@@ -138,7 +157,14 @@ def validate_gpu_sources(sources: list[GPUSource] | list[dict]) -> list[dict]:
         if source in seen:
             raise ValueError(f"Duplicate GPU source: {source}")
         seen.add(source)
-        normalized.append({"source": str(source), "language": language, "tool": str(entry.get("tool", language))})
+        unit = {"source": str(source), "language": language, "tool": str(entry.get("tool", language)),
+                "numerical_contract_status": "legacy_unspecified"}
+        if "numerical_contract" in entry:
+            if language != "cuda":
+                raise ValueError("Numerical CUDA build contracts require a CUDA source")
+            unit["numerical_contract"] = validate_numerical_contract(entry["numerical_contract"])
+            unit["numerical_contract_status"] = "validated"
+        normalized.append(unit)
     return normalized
 
 
@@ -202,6 +228,9 @@ def compile_gpu_sources(
     units = validate_gpu_sources(sources)
     if not units:
         return {"objects": [], "library_dirs": [], "libraries": [], "rpaths": [], "link_flags": [], "sources": []}
+    compiler_environment = {name: os.environ.get(name) for name in ("NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS")}
+    if any("numerical_contract" in unit for unit in units) and any(compiler_environment.values()):
+        raise ValueError("Contracted CUDA builds reject hidden NVCC_PREPEND_FLAGS/NVCC_APPEND_FLAGS overrides")
     languages = tuple(dict.fromkeys(unit["language"] for unit in units))
     config = toolchain or discover_toolchain(options, languages=languages)
     directory = build_dir.resolve() / "gpu"
@@ -211,6 +240,7 @@ def compile_gpu_sources(
     commands = []
     objects = []
     manifest: dict = {"toolchain": config, "sources": units, "commands": commands, "objects": objects,
+                      "compiler_environment": compiler_environment,
                       "library_dirs": [], "libraries": [], "rpaths": [], "link_flags": []}
     log_path = directory / "gpu-build.log"
     with log_path.open("w", encoding="utf-8") as log:
@@ -219,9 +249,14 @@ def compile_gpu_sources(
             target = directory / f"{index:03d}_{source.stem}.o"
             macros = ["-D" + macro for macro in (defines or [])]
             if unit["language"] == "cuda":
+                contract = unit.get("numerical_contract")
+                numerical_options = (contract or {}).get("required_cuda_options", [])
+                host_options = (contract or {}).get("required_host_options", [])
                 command = [config["nvcc"], "-O3", "-std=c++17", "-arch=sm_" + config["architecture"],
                            "-ccbin", config["cuda_host_cxx"], "-Xcompiler=-fPIC,-fopenmp", *macros,
+                           *numerical_options, *["-Xcompiler=" + option for option in host_options],
                            "-c", str(source), "-o", str(target)]
+                unit["resolved_numerical_options"] = {"cuda": numerical_options, "host": host_options}
             else:
                 command = [config["nvfortran"], "-O3", "-fPIC", "-acc=gpu", "-gpu=cc" + config["architecture"] + ",nordc",
                            "-Mfreeform", "-Mextend", "-Mpreprocess", "-module", str(module_dir), *macros,
@@ -235,6 +270,7 @@ def compile_gpu_sources(
                 (directory / "gpu-build-command.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
                 raise RuntimeError(f"GPU compilation failed; inspect {log_path}")
             objects.append(str(target))
+            unit["build_status"] = "compiled"
     if "cuda" in languages:
         manifest["library_dirs"].append(config["cuda_library_dir"])
         manifest["rpaths"].append(config["cuda_library_dir"])

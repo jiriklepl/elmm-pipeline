@@ -10,6 +10,14 @@ import pytest
 from elmm_pipeline.local_adapter import LocalAdapterError, compose_scope_packages
 
 
+def numerical_contract():
+    value = {"schema_version": 1, "id": "separate-arithmetic-v1",
+             "required_cuda_options": ["--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true"],
+             "required_host_options": ["-ffp-contract=off"]}
+    value["identity"] = digest(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    return value
+
+
 def digest(content):
     return hashlib.sha256(content).hexdigest()
 
@@ -243,4 +251,69 @@ def test_native_package_and_empty_batch_need_no_runtime(tmp_path, sources):
         bundle = compose_scope_packages(packages, sources[1])
         assert bundle["runtime"] is None
         assert bundle["extra_sources"] == bundle["gpu_sources"] == bundle["patched_sources"] == []
+    unchanged(sources)
+
+
+def test_compiler_numerical_contract_survives_shared_runtime_composition(tmp_path, sources):
+    first = package(tmp_path, sources, "one")
+    second = package(tmp_path, sources, "two", source="consumer.f90")
+    for metadata in (first, second):
+        for descriptor in [*metadata["scope_manifest"]["build_sources"],
+                           *metadata["scope_manifest"]["runtime"]["sources"]]:
+            if descriptor["language"] == "cuda":
+                descriptor["numerical_contract"] = numerical_contract()
+        save(metadata)
+    bundle = compose_scope_packages([first, second], sources[1])
+    assert len(bundle["gpu_sources"]) == 3
+    assert all(unit["numerical_contract"] == numerical_contract() for unit in bundle["gpu_sources"])
+    cuda = [unit for unit in bundle["build_artifacts"] if unit["language"] == "cuda"]
+    assert all(unit["numerical_contract"] == numerical_contract() for unit in cuda)
+
+
+def test_equal_artifact_bytes_cannot_hide_different_numerical_requirements(tmp_path, sources):
+    first = package(tmp_path, sources, "one", entry="same")
+    second = package(tmp_path, sources, "two", source="consumer.f90", entry="same")
+    second["scope_manifest"]["build_sources"][0]["numerical_contract"] = numerical_contract()
+    save(second)
+    with pytest.raises(LocalAdapterError, match="Conflicting approved scope numerical build contract"):
+        compose_scope_packages([first, second], sources[1])
+    unchanged(sources)
+
+
+def test_runtime_source_and_build_contract_must_agree_before_application(tmp_path, sources):
+    first = package(tmp_path, sources, "one")
+    first["scope_manifest"]["build_sources"][-2]["numerical_contract"] = numerical_contract()
+    save(first)
+    with pytest.raises(LocalAdapterError, match="runtime numerical build contract differs"):
+        compose_scope_packages([first], sources[1])
+    unchanged(sources)
+
+
+def test_bad_second_numerical_contract_cannot_partially_apply(tmp_path, sources):
+    first = package(tmp_path, sources, "one")
+    second = package(tmp_path, sources, "two", source="consumer.f90")
+    second["scope_manifest"]["build_sources"][0]["numerical_contract"] = {**numerical_contract(), "schema_version": True}
+    save(second)
+    with pytest.raises(LocalAdapterError, match="numerical build contract"):
+        compose_scope_packages([first, second], sources[1])
+    unchanged(sources)
+
+
+def test_duplicate_runtime_declaration_cannot_hide_additional_requirements(tmp_path, sources):
+    first = package(tmp_path, sources, "one")
+    runtime = first["scope_manifest"]["runtime"]
+    runtime["sources"].append({**runtime["sources"][0], "numerical_contract": numerical_contract()})
+    save(first)
+    with pytest.raises(LocalAdapterError, match="must not repeat"):
+        compose_scope_packages([first], sources[1])
+    unchanged(sources)
+
+
+def test_single_package_apply_checks_runtime_required_metadata_first(tmp_path, sources):
+    from elmm_pipeline.local_adapter import apply_scope_sources
+    first = package(tmp_path, sources, "one")
+    first["scope_manifest"]["runtime"]["sources"][0]["numerical_contract"] = numerical_contract()
+    save(first)
+    with pytest.raises(LocalAdapterError, match="runtime numerical build contract differs"):
+        apply_scope_sources(first, sources[1])
     unchanged(sources)

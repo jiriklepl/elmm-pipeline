@@ -220,6 +220,20 @@ Approved entry identities are checked across the packages; an all-native
 contract applies only when every package establishes it. GPU activity and
 transfer counters still come from the separate runtime trace.
 
+New compiler CUDA build descriptors can declare the versioned
+`numerical_contract` `separate-arithmetic-v1`. The pipeline validates the exact
+requirements and canonical identity, transports them through independent scope
+packages, and applies `--fmad=false`, `--ftz=false`, `--prec-div=true`,
+`--prec-sqrt=true` and host `-ffp-contract=off` when compiling the approved CUDA
+sources. This covers generated CPU workers inside those CUDA translation units;
+it does not change the original application's Fortran flags. Exact commands,
+resolved options and contract identity are saved in `gpu-build-command.json`.
+Unknown contracts, conflicting requirements and hidden `NVCC_PREPEND_FLAGS` or
+`NVCC_APPEND_FLAGS` overrides fail before compilation. Legacy descriptors without
+the contract retain their existing flags and are recorded as `legacy_unspecified`;
+they do not acquire a strict numerical guarantee. Compiler metadata is consumed
+through public JSON, without importing its implementation or inspecting kernels.
+
 Scoped runtime traces report successful launches, upload/download bytes,
 allocations and waits during separate validation runs. Adapter call markers are
 not available for source scopes, so transformed-call coverage is explicitly

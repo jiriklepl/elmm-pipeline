@@ -61,6 +61,9 @@ def transform(tool: str, source_path: Path, python: Path, output_dir: Path, *,
         raise ValueError(f"Unknown GPU tool: {tool}")
     interface = output_dir / "interface.f90"
     units = [{"source": str(backend), "language": target, "tool": tool}]
+    if tool == "local":
+        from .local_adapter import cuda_build_fields
+        units[0].update(cuda_build_fields(metadata["compiler_report"], backend.name))
     metadata.update(tool=tool, entry=entry, changed=True, generated_path=str(interface),
                     extra_sources=[str(interface)], gpu_sources=units, compile_units=units,
                     source_sha256=hashlib.sha256(source_path.read_bytes()).hexdigest(),
