@@ -5,6 +5,8 @@ import json
 import math
 import re
 
+from .scoped_provenance import scoped_provenance
+
 TRACE_VARIABLES = ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE", "NVCOMPILER_ACC_NOTIFY", "NVCOMPILER_ACC_TIME",
                    "PGI_ACC_NOTIFY", "PGI_ACC_TIME", "CUDA_LAUNCH_BLOCKING")
 
@@ -262,6 +264,7 @@ def gpu_activity(log, tool, regions, *, scope_manifest=None, scope_packages=None
         download = sum(map(int, re.findall(r"(?<![A-Za-z0-9_])FORT_RUNTIME download bytes=(\d+)", log)))
         scoped = scoped_runtime_activity(log)
         manifests = _scope_manifests(scope_manifest, scope_packages)
+        scoped["source_provenance"] = scoped_provenance(log, manifests)
         native = bool(manifests)
         for manifest in manifests:
             scopes = manifest.get("scopes", [])

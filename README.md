@@ -243,6 +243,14 @@ when coherent estimates are unavailable; this is a compiled manifest decision,
 not an invented runtime decision count. Complete runs still compare final fields
 against the unmodified baseline and include required CPU boundaries and exports.
 
+When the compiler publishes `runtime_provenance` version 1, these diagnostics
+also group actual transfers, launches and coherence operations by its owner,
+procedure, segment, operation, implementation and boundary identities. Public
+records resolve the identities; unknown and legacy events remain explicitly
+unattributed. Conflicting mappings or unresolved traced identities fail diagnostic
+validation. These are API and coherence counters, without device durations,
+overlap claims or inferred placement decisions. Timed runs keep tracing disabled.
+
 The opt-in native integration check builds a small generic
 producer→native helper→consumer application from independent compiler/pipeline
 copies using the public adaptation and build APIs. It checks every field after
