@@ -188,6 +188,38 @@ selection, extraction implementation, policy, calibration and thread budget
 participate in build identity. No parent checkout, compiler IR or generated CUDA
 inspection is used.
 
+Independent compiler-approved roots can share one application build through
+`elmm_pipeline.local_adapter.compose_scope_packages(packages, destinations)`.
+Prepare each package with `transform_scopes` against pristine sources and use a
+separate artifact directory for each root. `destinations` maps original source
+identities to the application copy. The helper validates every package before
+applying replacements, rejects conflicting replacements of the same file, and
+links exactly one matching common runtime. Shared build artifacts deduplicate
+only when their public path, role, language and hash agree. Every colliding
+supporting artifact path, including helper headers, must have identical bytes;
+original-source replacements compose by destination. Incompatible runtime
+identities or artifacts are errors. It does not merge Fortran bodies or choose
+implementations.
+
+```python
+bundle = compose_scope_packages([first_package, second_package], destinations)
+binary = build(...,
+               extra_sources=[Path(path) for path in bundle["extra_sources"]],
+               patched_sources=[Path(path) for path in bundle["patched_sources"]],
+               gpu_sources=bundle["gpu_sources"])
+```
+
+Keep `bundle["scope_packages"]` in the build receipt: the original compiler
+manifests remain authoritative separately. Retain each artifact directory for
+relative includes. The CLI continues to accept one scope entry per invocation;
+batch composition is an explicit Python API. Preparing or applying independent
+packages sequentially to already edited sources is unsupported.
+Pass these packages to `gpu_activity(..., scope_packages=bundle["scope_packages"])`
+for combined diagnostic validation. Campaign adapters transport the same field.
+Approved entry identities are checked across the packages; an all-native
+contract applies only when every package establishes it. GPU activity and
+transfer counters still come from the separate runtime trace.
+
 Scoped runtime traces report successful launches, upload/download bytes,
 allocations and waits during separate validation runs. Adapter call markers are
 not available for source scopes, so transformed-call coverage is explicitly

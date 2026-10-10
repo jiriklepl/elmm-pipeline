@@ -15,6 +15,7 @@ import pytest
 from elmm_pipeline.local_adapter import (
     LocalAdapterError,
     apply_scope_sources,
+    compose_scope_packages,
     transform_scopes,
 )
 
@@ -121,6 +122,28 @@ print(json.dumps([str(p) for p in apply_scope_sources(metadata,mappings)]))
     assert json.loads(result.stdout)==[str(destination)]
     assert "fort_scope_owner_" in destination.read_text()
     assert source.read_text()==PROGRAM
+
+
+def test_independent_compiler_packages_compose_without_ir_or_source_merging(independent, tmp_path):
+    _, _, compiler, _, _, _ = independent
+    originals, destinations = [], {}
+    for name in ("first", "second"):
+        original = tmp_path / f"{name}_original.f90"
+        original.write_text(PROGRAM.replace("source_application", f"{name}_application"))
+        destination = tmp_path / f"{name}_application.f90"
+        destination.write_bytes(original.read_bytes())
+        originals.append(original)
+        destinations[str(original)] = destination
+    packages = [transform_scopes(source, compiler, Path(sys.executable), tmp_path / f"artifacts_{index}",
+                                 entry=f"{name}_application::step", source_files=[originals[1-index]],
+                                 capture_facts=FACTS)
+                for index, (name, source) in enumerate(zip(("first", "second"), originals))]
+    bundle = compose_scope_packages(packages, destinations)
+    assert len(bundle["patched_sources"]) == 2
+    assert all("fort_scope_owner_" in path.read_text() for path in destinations.values())
+    common = [item for item in bundle["build_artifacts"] if item["role"] == "common_runtime"]
+    assert len(common) == 3 and all(item["packages"] == [0, 1] for item in common)
+    assert len(bundle["gpu_sources"]) == 5
 
 
 @pytest.mark.parametrize("transfers", ["pinned", "pipelined"])

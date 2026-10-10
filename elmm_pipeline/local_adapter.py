@@ -396,19 +396,15 @@ def _scope_artifact(root, name):
     return path
 
 
-def apply_scope_sources(metadata: dict, destinations: dict[str, Path]) -> list[Path]:
-    """Apply complete compiler-approved replacements to an application copy.
-
-    Validate every source/artifact first, so a stale source cannot produce a
-    partially applied transformation. Unchanged application sources stay under
-    the build system's existing ownership.
-    """
+def _prepare_scope_sources(metadata, destinations):
+    """Validate replacements without changing any application source."""
     manifest=metadata["scope_manifest"]
     root=Path(metadata["artifact_root"]).resolve(strict=True)
     prepared=[]
     dependencies=manifest.get("analysis_sources") or {}
     for source,digest in dependencies.get("dependencies",{}).items():
-        if hashlib.sha256(Path(source).read_bytes()).hexdigest()!=digest:
+        dependency=Path(destinations.get(source,source)).resolve(strict=True)
+        if hashlib.sha256(dependency.read_bytes()).hexdigest()!=digest:
             raise LocalAdapterError("Configured source dependency changed before applying approved scope: "+source)
     for source,digest in manifest["source_inputs"].items():
         path=Path(destinations.get(source,source)).resolve(strict=True)
@@ -426,6 +422,141 @@ def apply_scope_sources(metadata: dict, destinations: dict[str, Path]) -> list[P
         if hashlib.sha256(content).hexdigest() != manifest["artifacts_sha256"].get(name):
             raise LocalAdapterError("Approved source replacement changed: " + name)
         prepared.append((destination,content))
-    for destination,content in prepared:
+    return prepared
+
+
+def apply_scope_sources(metadata: dict, destinations: dict[str, Path]) -> list[Path]:
+    """Apply complete compiler-approved replacements to an application copy.
+
+    Validate every source/artifact first, so a stale source cannot produce a
+    partially applied transformation. Unchanged application sources stay under
+    the build system's existing ownership.
+    """
+    prepared = _prepare_scope_sources(metadata, destinations)
+    for destination, content in prepared:
         destination.write_bytes(content)
-    return [destination for destination,_ in prepared]
+    return [destination for destination, _ in prepared]
+
+
+def _scope_package_build(metadata):
+    """Revalidate saved public artifacts and return their declared build roles."""
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("scope_manifest"), dict):
+        raise LocalAdapterError("Scope composition requires compiler package metadata")
+    manifest = metadata["scope_manifest"]
+    try:
+        root = Path(metadata["artifact_root"]).resolve(strict=True)
+    except (KeyError, TypeError, OSError) as error:
+        raise LocalAdapterError("Scope composition requires an existing artifact directory") from error
+    if (type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1
+            or type(manifest.get("scope_count")) is not int or manifest["scope_count"] < 0
+            or not isinstance(manifest.get("source_inputs"), dict) or not isinstance(manifest.get("sources"), dict)
+            or not isinstance(manifest.get("artifacts_sha256"), dict)):
+        raise LocalAdapterError("Scope composition requires a versioned artifact manifest")
+    try:
+        recorded = json.loads((root / "scope-manifest.json").read_text())
+    except (OSError, ValueError) as error:
+        raise LocalAdapterError("Cannot read saved compiler scope manifest") from error
+    if recorded != manifest:
+        raise LocalAdapterError("Saved compiler scope manifest differs from its package")
+    artifact_hashes = {}
+    for name, digest in manifest["artifacts_sha256"].items():
+        artifact = _scope_artifact(root, name)
+        if hashlib.sha256(artifact.read_bytes()).hexdigest() != digest:
+            raise LocalAdapterError("Approved scope artifact changed: " + name)
+        artifact_hashes[artifact.relative_to(root).as_posix()] = digest
+    units = manifest.get("build_sources", [])
+    if not isinstance(units, list):
+        raise LocalAdapterError("Scope composition requires public build roles")
+    runtime = manifest.get("runtime")
+    if manifest.get("scope_count", 0):
+        if (not isinstance(runtime, dict) or runtime.get("schema_version") != 1
+                or runtime.get("abi_version") != 1 or runtime.get("link_once") is not True
+                or not isinstance(runtime.get("source_sha256"), dict) or not runtime["source_sha256"]
+                or not isinstance(runtime.get("sources"), list)):
+            raise LocalAdapterError("Scope composition requires a compatible link-once runtime")
+        hashes = runtime["source_sha256"]
+        if any(not isinstance(name, str) or not isinstance(digest, str) for name, digest in hashes.items()):
+            raise LocalAdapterError("Scope runtime identity requires source hashes")
+        identity = hashlib.sha256("\n".join(f"{name}:{digest}" for name, digest in sorted(hashes.items())).encode()).hexdigest()
+        if (runtime.get("runtime_id") != identity
+                or any(manifest["artifacts_sha256"].get(name) != digest for name, digest in hashes.items())):
+            raise LocalAdapterError("Scope runtime identity differs from its approved artifacts")
+        if any(not isinstance(item, dict) or not isinstance(item.get("path"), str)
+               or item["path"] not in hashes or item.get("language") not in {"cuda", "fortran"}
+               for item in runtime["sources"]):
+            raise LocalAdapterError("Scope runtime sources require public paths and languages")
+        expected_runtime = {(item["path"], item["language"]) for item in runtime["sources"]}
+    else:
+        if runtime is not None:
+            raise LocalAdapterError("Native scope package unexpectedly declares a runtime")
+        expected_runtime = set()
+    actual_runtime, build, replacements = set(), [], set()
+    for item in units:
+        if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                or item["path"] not in manifest["artifacts_sha256"]
+                or item.get("language") not in {"cuda", "fortran"}
+                or item.get("role") not in {"common_runtime", "shared_entry", "original_source"}):
+            raise LocalAdapterError("Scope build source is missing a public artifact/role")
+        name, language, role = (item[key] for key in ("path", "language", "role"))
+        source = _scope_artifact(root, name)
+        if role == "common_runtime":
+            actual_runtime.add((name, language))
+            if runtime is None or name not in runtime["source_sha256"]:
+                raise LocalAdapterError("Common runtime build source lacks runtime identity")
+        if role == "original_source":
+            replacements.add(source.relative_to(root).as_posix())
+        build.append({"path": source.relative_to(root).as_posix(), "source": str(source),
+                      "language": language, "role": role, "sha256": manifest["artifacts_sha256"][name]})
+    if actual_runtime != expected_runtime:
+        raise LocalAdapterError("Common runtime build roles differ from its declared sources")
+    # Complete original-source replacements compose by destination below;
+    # their incidental artifact paths do not identify shared helper code.
+    return runtime, build, {path: digest for path, digest in artifact_hashes.items() if path not in replacements}
+
+
+def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
+    """Apply independent approved packages once and combine their build inputs.
+
+    Every package must describe pristine sources. Validate all packages before
+    writing any replacement; differing replacements of one destination are
+    rejected. Deduplicate artifacts by public path, role and digest, and require
+    exactly matching link-once runtime identities. Original manifests remain
+    separate in the receipt; this function makes no compiler decisions.
+    """
+    packages = list(packages)
+    replacements, artifacts, artifact_hashes, runtime = {}, {}, {}, None
+    for index, metadata in enumerate(packages):
+        package_runtime, build, package_hashes = _scope_package_build(metadata)
+        if package_runtime is not None:
+            if runtime is not None and package_runtime != runtime:
+                raise LocalAdapterError("Scope packages require exactly matching runtime identities and artifacts")
+            runtime = package_runtime
+        # Shared entry bytes alone do not identify included helper headers.
+        # Reject every colliding approved path before dropping any duplicate TU.
+        for name, digest in package_hashes.items():
+            if name in artifact_hashes and artifact_hashes[name] != digest:
+                raise LocalAdapterError("Conflicting approved scope artifact: " + name)
+            artifact_hashes[name] = digest
+        for destination, content in _prepare_scope_sources(metadata, destinations):
+            if destination in replacements and replacements[destination] != content:
+                raise LocalAdapterError("Conflicting approved scope replacements: " + str(destination))
+            replacements[destination] = content
+        for item in build:
+            if item["role"] == "original_source":
+                continue
+            name = item["path"]
+            if name in artifacts:
+                previous = artifacts[name]
+                if any(previous[key] != item[key] for key in ("language", "role", "sha256")):
+                    raise LocalAdapterError("Conflicting approved scope build artifact: " + name)
+                previous["packages"].append(index)
+            else:
+                artifacts[name] = {**item, "packages": [index]}
+    for destination, content in replacements.items():
+        destination.write_bytes(content)
+    return {"schema_version": 1, "tool": "local", "memory_model": "scoped",
+            "scope_packages": packages, "runtime": runtime, "build_artifacts": list(artifacts.values()),
+            "patched_sources": [str(path) for path in replacements],
+            "extra_sources": [item["source"] for item in artifacts.values() if item["language"] == "fortran"],
+            "gpu_sources": [{"source": item["source"], "language": "cuda", "tool": "local"}
+                            for item in artifacts.values() if item["language"] == "cuda"]}

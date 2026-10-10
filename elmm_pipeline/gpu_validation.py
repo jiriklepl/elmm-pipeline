@@ -22,12 +22,30 @@ def trace_environment(environment, tool, *, enabled=False):
     return result
 
 
-def offload_decisions(log, regions, *, scope_manifest=None):
+def _scope_manifests(scope_manifest, scope_packages):
+    """Transport separate compiler manifests without synthesizing decisions."""
+    manifests = []
+    if scope_manifest is not None:
+        if not isinstance(scope_manifest, dict):
+            raise ValueError("Scoped diagnostics require a public source-scope manifest")
+        manifests.append(scope_manifest)
+    if scope_packages is not None:
+        if not isinstance(scope_packages, (list, tuple)):
+            raise ValueError("Scoped diagnostics require a list of compiler packages")
+        for package in scope_packages:
+            if not isinstance(package, dict) or not isinstance(package.get("scope_manifest"), dict):
+                raise ValueError("Scoped diagnostics package lacks its public source-scope manifest")
+            manifests.append(package["scope_manifest"])
+    return manifests
+
+
+def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None):
     """Separate policy decisions from evidence that a CUDA kernel ran."""
     entries = {region["entry"].lower() for region in regions}
-    if scope_manifest:
-        entries.update(item["entry"].lower().split("::")[-1] for item in scope_manifest.get("numerical_sources", []))
-        entries.update(leaf.lower().split("::")[-1] for scope in scope_manifest.get("scopes", [])
+    manifests = _scope_manifests(scope_manifest, scope_packages)
+    for manifest in manifests:
+        entries.update(item["entry"].lower().split("::")[-1] for item in manifest.get("numerical_sources", []))
+        entries.update(leaf.lower().split("::")[-1] for scope in manifest.get("scopes", [])
                        for leaf in scope.get("gpu_leaves", []))
     pattern = (r"(?<![A-Za-z0-9_])FORT_OFFLOAD[ \t]+entry=([A-Za-z][A-Za-z0-9_]*)"
                r"[ \t]+mode=(native(?:-scoped-[a-z-]+)?|scoped-scheduled|gpu|mixed|hybrid|chunked)[ \t]+gpu_units=(\d+)"
@@ -42,7 +60,7 @@ def offload_decisions(log, regions, *, scope_manifest=None):
         unit_kind = unit_kind or "regions"
         if entry not in entries:
             raise ValueError("Offload policy trace contains an entry absent from the build manifest")
-        if (mode.startswith("native-scoped-") or mode == "scoped-scheduled") and scope_manifest is None:
+        if (mode.startswith("native-scoped-") or mode == "scoped-scheduled") and not manifests:
             raise ValueError("Scoped offload trace requires its public source-scope manifest")
         if mode.startswith("native-scoped-"):
             reasons[mode] = reasons.get(mode, 0) + 1
@@ -72,7 +90,8 @@ def native_policy_exercised(activity, regions):
     """Intentional all-native policy execution is valid without a GPU claim."""
     policies = [region.get("transformation", {}).get("compiler_report", {}).get("offload") or {}
                 for region in regions]
-    scoped = any(region.get("transformation", {}).get("memory_model") == "scoped" for region in regions)
+    scoped = activity.get("scope_manifest_count", 0) > 0 or any(
+        region.get("transformation", {}).get("memory_model") == "scoped" for region in regions)
     decisions = activity.get("offload_decisions", {})
     return activity.get("compiler_native_selection", False) or ((scoped or any(policy.get("policy", "always") != "always" for policy in policies))
             and decisions.get("modes", {}).get("native", 0) > 0 and decisions.get("gpu_units", 0) == 0)
@@ -236,31 +255,34 @@ def scoped_modeled_decisions(log):
     return records
 
 
-def gpu_activity(log, tool, regions, *, scope_manifest=None):
+def gpu_activity(log, tool, regions, *, scope_manifest=None, scope_packages=None):
     if tool == "local":
         kernels = len(re.findall(r"(?<![A-Za-z0-9_])FORT_RUNTIME kernel\b", log))
         upload = sum(map(int, re.findall(r"(?<![A-Za-z0-9_])FORT_RUNTIME upload bytes=(\d+)", log)))
         download = sum(map(int, re.findall(r"(?<![A-Za-z0-9_])FORT_RUNTIME download bytes=(\d+)", log)))
         scoped = scoped_runtime_activity(log)
-        native = False
-        if scope_manifest is not None:
-            scopes = scope_manifest.get("scopes", [])
-            native = (scope_manifest.get("schema_version") == 1
-                      and (scope_manifest.get("scope_count") == 0 or
-                           scope_manifest.get("automatic_estimate_available") is False and bool(scopes)
+        manifests = _scope_manifests(scope_manifest, scope_packages)
+        native = bool(manifests)
+        for manifest in manifests:
+            scopes = manifest.get("scopes", [])
+            native = native and (manifest.get("schema_version") == 1
+                      and (manifest.get("scope_count") == 0 or
+                           manifest.get("automatic_estimate_available") is False and bool(scopes)
                            and all(scope.get("mode") == "auto" and scope.get("estimate_available") is False
                                    for scope in scopes)))
-            if native and (kernels or scoped["kernel_launches"]):
-                raise ValueError("CUDA launch contradicts the compiler's all-native source-scope contract")
+        if native and (kernels or scoped["kernel_launches"]):
+            raise ValueError("CUDA launch contradicts the compiler's all-native source-scope contract")
         return {"verified": kernels + scoped["kernel_launches"] > 0,
                 "kernel_launches": kernels + scoped["kernel_launches"], "probe_kernel_launches": 0,
                 "upload_bytes": upload + scoped["upload_bytes"], "download_bytes": download + scoped["download_bytes"],
                 "allocations": len(re.findall(r"(?<![A-Za-z0-9_])FORT_RUNTIME alloc\b", log)) + scoped["allocations"],
                 "scoped_runtime": scoped, "compiler_native_selection": native,
+                "scope_manifest_count": len(manifests),
                 "native_selection_evidence": ("versioned compiler manifest; transformed-call coverage unverified"
                                                if native else None),
                 "source": "successful local CUDA runtime events",
-                "offload_decisions": offload_decisions(log, regions, scope_manifest=scope_manifest)}
+                "offload_decisions": offload_decisions(log, regions, scope_manifest=scope_manifest,
+                                                      scope_packages=scope_packages)}
     if tool not in {"loki", "psyclone"}:
         raise ValueError("GPU trace tool must be local, loki or psyclone")
     proof_names = {r["transformation"]["bridge"]["proof_entry"].lower() for r in regions}

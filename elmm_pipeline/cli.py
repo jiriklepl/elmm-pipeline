@@ -111,6 +111,7 @@ def prepare_build(tool, args, setup_state, compilers):
         key_data["scope"] = {"entry": scope_options["entry"], "source": scope_options["source"],
                              "source_files": scope_options["source_files"],
                              "transfers": scope_options["transfers"],
+                             "execution": scope_options["execution"],
                              "capture_facts_sha256": hashlib.sha256(scope_options["capture_facts"].read_bytes()).hexdigest(),
                              "effect_contracts_sha256": (hashlib.sha256(scope_options["effect_contracts"].read_bytes()).hexdigest()
                                                           if scope_options["effect_contracts"] else None)}
@@ -369,7 +370,8 @@ def run(args):
                     log, adapter["regions"], enabled=adapter["coverage_enabled"])
                 if trace:
                     timings["gpu_activity"] = gpu_activity(log, tool, adapter["regions"],
-                                                            scope_manifest=adapter.get("scope_manifest"))
+                                                            scope_manifest=adapter.get("scope_manifest"),
+                                                            scope_packages=adapter.get("scope_packages"))
                     if profile is not None:
                         timings["gpu_profile"] = profile
             vtk = read_vtk(output / "out.vtk")

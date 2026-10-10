@@ -3,6 +3,7 @@ import unittest
 
 from elmm_pipeline.gpu_validation import (
     gpu_activity,
+    offload_decisions,
     native_policy_exercised,
     scoped_modeled_decisions,
     scoped_modeled_evidence,
@@ -74,6 +75,44 @@ class GPUValidationTests(unittest.TestCase):
         self.assertEqual(activity["offload_decisions"]["native_reasons"], {"native-scoped-resource": 1})
         with self.assertRaisesRegex(ValueError, "absent"):
             gpu_activity(log.replace("normalized_leaf", "unknown"), "local", [region], scope_manifest=manifest)
+
+    def test_composed_native_and_gpu_packages_union_approved_entries(self):
+        packages = [scope_package("native_leaf"), scope_package("gpu_leaf", available=True)]
+        before = json.dumps(packages, sort_keys=True)
+        log = ("FORT_OFFLOAD entry=native_leaf mode=native-scoped-unestimated gpu_units=0 cpu_units=1\n"
+               "FORT_OFFLOAD entry=gpu_leaf mode=scoped-scheduled gpu_units=1 cpu_units=0\n"
+               "FORT_SCOPED launch bytes=0\n")
+        activity = gpu_activity(log, "local", [], scope_packages=packages)
+        self.assertTrue(activity["verified"])
+        self.assertFalse(activity["compiler_native_selection"])
+        self.assertFalse(native_policy_exercised(activity, []))
+        self.assertEqual(activity["scope_manifest_count"], 2)
+        self.assertEqual(set(activity["offload_decisions"]["entries"]), {"native_leaf", "gpu_leaf"})
+        self.assertEqual(offload_decisions(log, [], scope_packages=packages)["calls"], 2)
+        self.assertEqual(json.dumps(packages, sort_keys=True), before)
+        with self.assertRaisesRegex(ValueError, "absent"):
+            gpu_activity(log.replace("gpu_leaf", "foreign_leaf"), "local", [], scope_packages=packages)
+
+    def test_composed_all_native_contract_needs_every_package(self):
+        packages = [scope_package("first"), scope_package("second")]
+        activity = gpu_activity("", "local", [], scope_packages=packages)
+        self.assertTrue(activity["compiler_native_selection"])
+        self.assertTrue(native_policy_exercised(activity, []))
+        self.assertFalse(activity["verified"])
+        self.assertEqual(activity["offload_decisions"]["calls"], 0)
+        with self.assertRaisesRegex(ValueError, "contradicts"):
+            gpu_activity("FORT_SCOPED launch bytes=0\n", "local", [], scope_packages=packages)
+
+    def test_single_manifest_and_packages_remain_separate_diagnostic_inputs(self):
+        first, second = scope_package("first"), scope_package("second", available=True)
+        log = "FORT_OFFLOAD entry=second mode=native-scoped-scheduled gpu_units=0 cpu_units=1\n"
+        activity = gpu_activity(log, "local", [], scope_manifest=first["scope_manifest"], scope_packages=[second])
+        self.assertFalse(activity["compiler_native_selection"])
+        self.assertTrue(native_policy_exercised(activity, []))
+        self.assertEqual(activity["scope_manifest_count"], 2)
+        for packages in ({}, [{}], [{"scope_manifest": None}]):
+            with self.subTest(packages=packages), self.assertRaises(ValueError):
+                gpu_activity("", "local", [], scope_packages=packages)
 
     def test_scheduled_scopes_keep_policy_counts_and_cost_estimates_separate(self):
         region = {"entry": "scope_owner", "transformation": {"memory_model": "scoped"}}
@@ -238,6 +277,12 @@ class GPUValidationTests(unittest.TestCase):
                        {"terminal_delta_seconds": float("inf")}, {"owner_cost_reason": ""}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 scoped_modeled_evidence("FORT_SCOPED evidence " + json.dumps({**record, **change}) + "\n")
+
+
+def scope_package(entry, *, available=False):
+    return {"scope_manifest": {
+        "schema_version": 1, "scope_count": 1, "automatic_estimate_available": available,
+        "scopes": [{"mode": "auto", "estimate_available": available, "gpu_leaves": [f"renamed::{entry}"]}]}}
 
 
 def scoped_decision(**changes):

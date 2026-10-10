@@ -75,7 +75,8 @@ def run_one(root, state, case, mode, directory, *, traced):
     if traced:
         adapter = read(root / mode["adapter"]) if "adapter" in mode else {}
         record["activity"] = gpu_activity(result.stdout + result.stderr, "local", adapter.get("regions", []),
-                                           scope_manifest=adapter.get("scope_manifest"))
+                                           scope_manifest=adapter.get("scope_manifest"),
+                                           scope_packages=adapter.get("scope_packages"))
         record["planning_diagnostics"] = planning_diagnostics(result.stderr)
         events = record["activity"].get("scoped_runtime", {}).get("modeled_evidence", [])
         if any(row["status"] != 0 for row in events if row["event"] == "definition_validation"):

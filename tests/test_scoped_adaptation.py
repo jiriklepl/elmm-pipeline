@@ -141,6 +141,7 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
     def adapt(_tool, project_root, _python, _output, **kwargs):
         assert kwargs["memory_model"] == "scoped"
         assert kwargs["gpu_options"]["scope_transfers"] == getattr(args, "scope_transfers", "direct")
+        assert kwargs["gpu_options"]["scope_execution"] == getattr(args, "scope_execution", "bounded")
         copied = kwargs["scope_options"]["capture_facts"]
         assert copied != facts
         body = json.loads(copied.read_text())
@@ -166,8 +167,14 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         third, _ = prepare_build("local", args, setup, {})
         args.scope_transfers = "pinned"
         fourth, _ = prepare_build("local", args, setup, {})
-    assert len(seen) == 4
-    assert len({first.parent, second.parent, third.parent, fourth.parent}) == 4
+        args.scope_execution = "reached"
+        fifth, reached_metadata = prepare_build("local", args, setup, {})
+        reached_cached, _ = prepare_build("local", args, setup, {})
+        assert reached_cached == fifth
+    assert len(seen) == 5
+    assert len({first.parent, second.parent, third.parent, fourth.parent, fifth.parent}) == 5
+    assert metadata["identity"]["scope"]["execution"] == "bounded"
+    assert reached_metadata["identity"]["scope"]["execution"] == "reached"
     assert metadata["identity"]["memory_model"] == "scoped"
     assert "scope_extraction.py" in metadata["identity"]["implementation"]
 

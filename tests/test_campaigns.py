@@ -10,7 +10,7 @@ import pytest
 
 from elmm_pipeline.campaigns.identity import digest, guard_passed, read, repository, write
 from elmm_pipeline.campaigns.prepare import check, prepare, validate
-from elmm_pipeline.campaigns.run import borderline, environment, gates, planning_diagnostics, summaries
+from elmm_pipeline.campaigns.run import borderline, environment, gates, planning_diagnostics, run_one, summaries
 from elmm_pipeline.campaigns.profile import command as profile_command
 
 
@@ -104,6 +104,36 @@ def test_planning_phases_remain_separate_and_reject_nan():
     assert not result["timing_sample"]
     with pytest.raises(ValueError, match="finite"):
         planning_diagnostics(log.replace(".001", "nan"))
+
+
+def test_campaign_diagnostics_transport_separate_scope_packages(tmp_path, monkeypatch):
+    (tmp_path / "config").mkdir()
+    packages = [{"scope_manifest": {
+        "schema_version": 1, "scope_count": 1, "automatic_estimate_available": False,
+        "scopes": [{"mode": "auto", "estimate_available": False, "gpu_leaves": ["renamed::leaf"]}]}},
+        {"scope_manifest": {"schema_version": 1, "scope_count": 0, "scopes": []}}]
+    write(tmp_path / "adapter.json", {"scope_packages": packages, "regions": []})
+    monkeypatch.setattr("elmm_pipeline.campaigns.run.available", lambda: 4 * 2**30)
+    monkeypatch.setattr("elmm_pipeline.campaigns.run.read_vtk", lambda path: None)
+    monkeypatch.setattr("elmm_pipeline.campaigns.run.compare_vtk", lambda *args: {"passed": True})
+    monkeypatch.setattr("elmm_pipeline.campaigns.run.validate_log", lambda *args, **kwargs: {})
+
+    def execute(command, **kwargs):
+        rss = next(argument.split("=", 1)[1] for argument in command if argument.startswith("--output="))
+        Path(rss).write_text("1024\n")
+        log = "FORT_OFFLOAD entry=leaf mode=native-scoped-unestimated gpu_units=0 cpu_units=1\n"
+        return subprocess.CompletedProcess(command, 0, stdout=log, stderr="")
+
+    monkeypatch.setattr("elmm_pipeline.campaigns.run.subprocess.run", execute)
+    state = {"threads": 4, "selected_gpu_uuid": "GPU-fixture", "tools": {"time": {"path": "/fixture/time"}}}
+    case = {"name": "fixture", "config": "config", "reference": "reference.vtk", "completed_steps": 1,
+            "configuration": {"runtime_arguments": [], "expected_max_steps": 1}}
+    mode = {"name": "candidate", "binary": "candidate", "adapter": "adapter.json"}
+    record = run_one(tmp_path, state, case, mode, tmp_path / "run", traced=True)
+    assert record["activity"]["scope_manifest_count"] == 2
+    assert record["activity"]["compiler_native_selection"]
+    assert record["activity"]["offload_decisions"]["calls"] == 1
+    assert "wall_seconds" not in record
 
 
 def test_bounded_profile_continues_application_and_disables_sampling():
