@@ -546,6 +546,21 @@ retain their existing environment behavior and have no derived contract.
 Configured external phases enforce the same placement and four-thread budget;
 explicit conflicting environment overrides are rejected before execution.
 
+New campaigns also freeze `OMP_WAIT_POLICY` and `GOMP_SPINCOUNT` at preparation.
+Compatible optional CPU calibration identities supply their exact launch values,
+including unset values, independently of whether their cost families passed.
+The two identities must agree when both are present. Without those identities,
+the configuration may supply `openmp_launch_environment`, for example
+`{"OMP_WAIT_POLICY": "PASSIVE", "GOMP_SPINCOUNT": null}`; unspecified values come
+from the preparation environment. Conflicting overrides or incompatible profile
+identities reject preparation. Every application, field driver, profiler target
+and external phase receives the frozen settings in its fresh process environment,
+and its receipt records them together with the raw `OMP_THREAD_LIMIT` value.
+New campaigns reject malformed thread caps and caps below four before launch.
+This does not change an initialized OpenMP runtime
+inside the application. Existing sealed campaigns without this contract retain
+their prior environment behavior.
+
 An application validation driver can set `application_case` to a configured case
 name. It then runs its diagnostic main with that case's original inputs and
 step/VTK checks; these runs never contribute timing samples. The explicit linker

@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 from .identity import read, write
+from .launch_environment import apply_launch_environment, launch_environment_values
 from .prepare import check, prepare, validate_cpu_placement
 
 
@@ -32,9 +33,11 @@ def external(root, phase):
         env.pop("OMP_PLACES", None)
         env.pop("GOMP_CPU_AFFINITY", None)
         env.update(placement_environment)
+    apply_launch_environment(env, state.get("openmp_launch_environment"), overrides=overrides)
     env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     write(root / (phase + "-command.json"), {"argv": argv, "cwd": expand(spec.get("cwd", "{campaign}")),
           "explicit_environment": spec.get("environment", {}),
+          "openmp_launch_environment": launch_environment_values(env),
           "placement_environment": placement_environment, "timings_reused": False})
     subprocess.run(argv, cwd=expand(spec.get("cwd", "{campaign}")), env=env, check=True)
     check(root)

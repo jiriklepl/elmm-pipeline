@@ -18,6 +18,7 @@ import time
 from ..gpu_profiling import parse_nsys_sqlite
 from ..validation import compare_vtk, read_vtk, validate_log
 from .identity import digest, write
+from .launch_environment import launch_environment_values
 from .prepare import check
 from .run import environment
 
@@ -95,7 +96,8 @@ def profile(root, output, *, case, mode, profiler, seconds=2):
     if any(path.exists() for path in (target, completion, application_log)):
         raise ValueError("configuration collides with profiler target completion files")
     target.write_text(TARGET_WRAPPER)
-    env = environment(state["threads"], traced=False, cpu_placement=state.get("cpu_placement"))
+    env = environment(state["threads"], traced=False, cpu_placement=state.get("cpu_placement"),
+                      openmp_launch_environment=state.get("openmp_launch_environment"))
     env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     record = {"schema_version": 1, "status": "in_progress", "case": case, "mode": mode,
               "argv": argv, "cwd": str(output), "campaign_sha256": digest(root / "campaign.json"),
@@ -106,6 +108,7 @@ def profile(root, output, *, case, mode, profiler, seconds=2):
               "binary_sha256": digest(root / selected_mode["binary"]), "maximum_capture_seconds": seconds,
               "phase_timer_enabled": False, "runtime_trace_enabled": False, "timing_sample": False,
               "threads": state["threads"], "gpu_uuid": state["selected_gpu_uuid"],
+              "openmp_launch_environment": launch_environment_values(env),
               "coverage": "bounded trace; full-run device totals require independent count/byte agreement",
               "overlap_claimed": False, "durations_are_additive_application_budget": False}
     write(output / "report.json", record)

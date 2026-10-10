@@ -16,6 +16,7 @@ from ..validation import compare_vtk, read_vtk, validate_log
 from .batches import batch_summary
 from .guard import available
 from .identity import digest, read, write
+from .launch_environment import apply_launch_environment, launch_environment_values
 from .prepare import check, validate_cpu_placement
 from .transfers import aggregate_final_statistics
 
@@ -35,7 +36,7 @@ def planning_diagnostics(log):
     return {"phases": totals, "timing_sample": False, "trace_overhead_present": True}
 
 
-def environment(threads, *, traced, cpu_placement=None):
+def environment(threads, *, traced, cpu_placement=None, openmp_launch_environment=None):
     validate_cpu_placement(cpu_placement)
     env = trace_environment(clean_environment(threads), "local", enabled=traced)
     for name in list(env):
@@ -45,6 +46,7 @@ def environment(threads, *, traced, cpu_placement=None):
         env.pop("OMP_PLACES", None)
         env.pop("GOMP_CPU_AFFINITY", None)
         env.update(cpu_placement["environment"])
+    apply_launch_environment(env, openmp_launch_environment)
     return env
 
 
@@ -52,7 +54,8 @@ def run_one(root, state, case, mode, directory, *, traced):
     if available() < 3 * 2**30:
         raise RuntimeError("less than 3 GiB available; no workload started")
     env = environment(state["threads"], traced=traced and mode["name"] != "native",
-                      cpu_placement=state.get("cpu_placement"))
+                      cpu_placement=state.get("cpu_placement"),
+                      openmp_launch_environment=state.get("openmp_launch_environment"))
     if directory.exists():
         raise ValueError("existing run evidence is immutable: " + str(directory))
     shutil.copytree(root / case["config"], directory)
@@ -77,6 +80,7 @@ def run_one(root, state, case, mode, directory, *, traced):
               "peak_host_rss_bytes": int(rss.read_text().strip()) * 1024, "traced": traced,
               "environment": {key: env.get(key) for key in ("OMP_NUM_THREADS", "OMP_DYNAMIC", "OMP_PLACES",
                   "OMP_PROC_BIND", "GOMP_CPU_AFFINITY", "CUDA_VISIBLE_DEVICES")},
+              "openmp_launch_environment": launch_environment_values(env),
               "diagnostic_wall_seconds" if traced else "wall_seconds": wall}
     if traced:
         adapter = read(root / mode["adapter"]) if "adapter" in mode else {}

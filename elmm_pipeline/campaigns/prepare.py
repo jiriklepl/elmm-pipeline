@@ -9,6 +9,7 @@ import shutil
 import subprocess
 
 from .identity import check_files, digest, read, repository, tree_hashes, write
+from .launch_environment import freeze_launch_environment
 
 
 def slug(value):
@@ -144,6 +145,8 @@ def prepare(config_path, output):
     state.pop("cpu_placement", None)  # Derived from frozen evidence, not user overrides.
     if placement is not None:
         state["cpu_placement"] = placement
+    state["openmp_launch_environment"] = freeze_launch_environment(
+        profile, config.get("openmp_launch_environment"))
     state["profile_sha256"] = digest(output / state["profile"])
     state["selected_gpu_uuid"] = profile.get("hardware", {}).get("gpu_uuid")
     if not isinstance(state["selected_gpu_uuid"], str) or not state["selected_gpu_uuid"].startswith("GPU-"):

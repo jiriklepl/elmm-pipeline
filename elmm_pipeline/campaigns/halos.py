@@ -8,6 +8,7 @@ import subprocess
 import numpy as np
 
 from .identity import read, write
+from .launch_environment import launch_environment_values
 from .prepare import check
 from .run import environment, run_one
 
@@ -73,6 +74,10 @@ def run(root):
         if "native" not in modes:
             raise ValueError("each validation driver requires an original native reference")
         for mode in modes:
+            env = environment(state["threads"], traced=mode != "native",
+                              cpu_placement=state.get("cpu_placement"),
+                              openmp_launch_environment=state.get("openmp_launch_environment"))
+            env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
             directory = output / driver["name"] / mode
             directory.mkdir(parents=True)
             binary = directory / "driver"
@@ -91,9 +96,6 @@ def run(root):
                 dump_directory = directory / 'run'
                 run_one(root, state, case, {**original_mode, 'binary': str(binary)}, dump_directory, traced=True)
             else:
-                env = environment(state["threads"], traced=mode != "native",
-                                  cpu_placement=state.get("cpu_placement"))
-                env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
                 result = subprocess.run([str(binary)], cwd=directory, env=env,
                     text=True, capture_output=True, check=False, timeout=120)
                 (directory / "stdout.log").write_text(result.stdout)
@@ -105,7 +107,8 @@ def run(root):
             if reference is None:
                 reference = observed
             comparisons = compare_fields(observed, reference, driver)
-            entry["runs"].append({"mode": mode, "comparisons": comparisons})
+            entry["runs"].append({"mode": mode, "comparisons": comparisons,
+                                  "openmp_launch_environment": launch_environment_values(env)})
             write(output / "report.json", report)
             if not all(row["passed"] for row in comparisons.values()):
                 raise RuntimeError("complete-array or halo disagreement")
