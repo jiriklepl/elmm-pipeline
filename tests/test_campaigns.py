@@ -66,6 +66,79 @@ def test_prepare_freezes_explicit_inputs_and_rejects_later_mutation(tmp_path, mo
         prepare(source, output)
 
 
+def field_campaign():
+    modes = ['native', 'frozen', 'candidate']
+    return {'schema_version': 1, 'threads': 4, 'repositories': {'compiler': {}, 'pipeline': {}},
+            'baseline_modes': ['native', 'frozen'], 'candidate_mode': 'candidate',
+            'modes': [{'name': mode} for mode in modes],
+            'cases': [{'name': case} for case in ('first', 'second')],
+            'halo_drivers': [
+                {'name': 'application-' + case, 'application_case': case,
+                 'sources': {mode: mode + '.f90' for mode in modes},
+                 'link': {mode: {} for mode in modes}} for case in ('first', 'second')]}
+
+
+@pytest.mark.parametrize('missing_mode', ['candidate', 'frozen'])
+def test_application_fields_require_candidate_and_other_configured_modes(missing_mode):
+    config = field_campaign()
+    config['halo_drivers'][0]['sources'].pop(missing_mode)
+    config['halo_drivers'][0]['link'].pop(missing_mode)
+    with pytest.raises(ValueError, match='every configured case and mode'):
+        validate(config)
+
+
+def test_application_fields_require_every_configured_case():
+    config = field_campaign()
+    config['halo_drivers'].pop()
+    with pytest.raises(ValueError, match='every configured case and mode'):
+        validate(config)
+
+
+def test_application_fields_require_native_reference_and_matching_links():
+    config = field_campaign()
+    config['halo_drivers'][0]['sources'].pop('native')
+    with pytest.raises(ValueError, match='native reference'):
+        validate(config)
+    config = field_campaign()
+    config['halo_drivers'][0]['link'].pop('candidate')
+    with pytest.raises(ValueError, match='sources and link modes'):
+        validate(config)
+
+
+@pytest.mark.parametrize('application', [False, True])
+def test_duplicate_halo_driver_names_reject_before_freezing(tmp_path, application):
+    config = field_campaign()
+    config['halo_drivers'][1]['name'] = config['halo_drivers'][0]['name']
+    if not application:
+        for driver in config['halo_drivers']:
+            driver.pop('application_case')
+    path, output = tmp_path / 'config.json', tmp_path / 'campaign'
+    write(path, config)
+    with pytest.raises(ValueError, match='unique halo driver names'):
+        prepare(path, output)
+    assert not output.exists()
+
+
+def test_complete_application_fields_and_joint_coverage_are_valid():
+    config = field_campaign()
+    validate(config)
+    first = config['halo_drivers'][0]
+    first['sources'].pop('candidate')
+    first['link'].pop('candidate')
+    config['halo_drivers'].append({'name': 'additional-first', 'application_case': 'first',
+                                  'sources': {'native': 'native.f90', 'candidate': 'candidate.f90'},
+                                  'link': {'native': {}, 'candidate': {}}})
+    validate(config)
+
+
+def test_generic_fixture_campaign_does_not_require_application_case_coverage():
+    config = field_campaign()
+    config['halo_drivers'] = [{'name': 'generic-fixture', 'sources': {'native': 'native.f90'}}]
+    validate(config)
+    config['halo_drivers'] = []
+    validate(config)
+
+
 def test_untraced_environment_clears_diagnostics_and_failure_injection(monkeypatch):
     for name in ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE", "FORT_PHASE_TIMING", "FORT_PROFILE",
                  "CUDA_LAUNCH_BLOCKING", "FORT_SCOPE_TEST_FAIL_ALLOC", "ELMM_SOMETHING"):

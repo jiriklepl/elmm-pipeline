@@ -538,7 +538,11 @@ artifacts to their reviewed hashes.
 An application validation driver can set `application_case` to a configured case
 name. It then runs its diagnostic main with that case's original inputs and
 step/VTK checks; these runs never contribute timing samples. The explicit linker
-inputs retain the original numerical objects. Set `metadata_format` to
+inputs retain the original numerical objects. Driver names must be unique. When
+application drivers are present, they must jointly cover every configured case
+and mode; each driver includes an original `native` reference and matching source
+and linker mode keys. Fixture-only campaigns do not require application drivers.
+Preparation checks this coverage before freezing inputs. Set `metadata_format` to
 `storage-shape-bounds-v1` to require a `fields-NAME.shape` companion to each
 binary dump: element bits, extents, lower bounds and upper bounds, in that order.
 Validation checks precision, exact original bounds, file size and every element,

@@ -39,11 +39,25 @@ def validate(config):
         slug(name)
     if set(config.get("commands", {})) & {"verification", "halos", "timings"}:
         raise ValueError("additional commands cannot replace required correctness/timing phases")
-    for driver in config.get('halo_drivers', []):
-        if 'application_case' in driver and (
-                driver['application_case'] not in {row['name'] for row in config['cases']}
-                or not set(driver['sources']) <= modes):
-            raise ValueError('application field driver requires configured case and modes')
+    drivers = config.get('halo_drivers', [])
+    names = [slug(driver['name']) for driver in drivers]
+    if len(names) != len(set(names)):
+        raise ValueError('unique halo driver names required')
+    application_drivers = [driver for driver in drivers if 'application_case' in driver]
+    if application_drivers:
+        coverage = {row['name']: set() for row in config['cases']}
+        for driver in application_drivers:
+            case, selected = driver['application_case'], set(driver['sources'])
+            if case not in coverage or not selected <= modes:
+                raise ValueError('application field driver requires configured case and modes')
+            if 'native' not in selected:
+                raise ValueError('application field driver requires an original native reference')
+            if set(driver.get('link', {})) != selected:
+                raise ValueError('application field driver sources and link modes must match')
+            coverage[case].update(selected)
+        missing = [(case, sorted(modes - selected)) for case, selected in coverage.items() if selected != modes]
+        if missing:
+            raise ValueError('application field drivers must cover every configured case and mode: ' + str(missing))
 
 
 def prepare(config_path, output):
