@@ -662,3 +662,22 @@ nonzero exit codes are preserved; a sampler failure makes an otherwise successfu
 run fail. Use the campaign memory guard and a command timeout for heavy scripts,
 including bounds on filesystem waits during shutdown. These samples are
 diagnostics, not application timing measurements.
+
+For a complete-field diagnostic main, derive its compile and link arguments from
+the fresh application's own `build-command.json` and `build.log`:
+
+```python
+from elmm_pipeline.campaigns.driver_link import derive_driver_link
+
+commands = derive_driver_link(
+    binary, fortran=fortran, source=diagnostic_main,
+    object_path=new_object, output=new_executable,
+)
+```
+
+Run `compile_argv` and then `link_argv` in the returned `cwd`, keeping the recorded
+inputs unchanged. The helper preserves the original numerical flags, module
+paths, generated objects and library order. It replaces only the application
+main; PoisFFT's separate `P/main.o` remains linked. New diagnostic outputs must
+not already exist. Derivation records input and command provenance and does not
+execute a compiler or select an offload policy.
