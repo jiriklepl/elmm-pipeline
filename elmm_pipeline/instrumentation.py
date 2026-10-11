@@ -42,6 +42,23 @@ def offload_contract(region):
     return contract
 
 
+def _wrap_fortran_expr(expr: str, limit: int = 90) -> str:
+    """Break a long logical expression into Fortran free-form continuation lines (&)."""
+    if len(expr) <= limit:
+        return expr
+    tokens = re.split(r"(\s+\.(?:and|or)\.\s+)", expr)
+    lines, current = [], ""
+    for token in tokens:
+        if len(current) + len(token) > limit and current:
+            lines.append(current.rstrip() + " &")
+            current = "  " + token.lstrip()
+        else:
+            current += token
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
 def _policy_call(region, call, scope, contract, guard):
     """Query a compiler-owned policy only after native preconditions are safe."""
     query = contract["native_fallback_query"]
@@ -65,7 +82,7 @@ def _policy_call(region, call, scope, contract, guard):
         call = "!$omp single\n" + call + "!$omp end single\n"
     conditions = [" .and. ".join(f"allocated({name})" for name in allocated)] if allocated else []
     conditions.append(guard)
-    checks = "".join(f"if ({condition}) then\n" for condition in conditions)
+    checks = "".join(f"if ({_wrap_fortran_expr(condition)}) then\n" for condition in conditions)
     checks += f"{ready} = {expression}\n" + "end if\n" * len(conditions)
     return (before + f"block\nlogical :: {ready}\n{ready} = .false.\n" + checks
             + f"if ({ready}) then\n" + call + "else\n"
@@ -105,7 +122,7 @@ def region_call(region, *, coverage=True):
             before = "!$omp barrier\n"
             call = "!$omp single\n" + call + "!$omp end single\n"
         return (before + f"block\nlogical :: {ready}\n{ready} = .false.\n"
-                + f"if ({checks}) then\n{ready} = {guard}\nend if\n"
+                + f"if ({_wrap_fortran_expr(checks)}) then\n{ready} = {_wrap_fortran_expr(guard)}\nend if\n"
                 + f"if ({ready}) then\n" + call + "else\n"
                 + region["original_text"].rstrip() + "\nend if\nend block\n")
     if dispatch == "collective_single":
@@ -113,7 +130,7 @@ def region_call(region, *, coverage=True):
         # before one thread transfers complete arrays; publish results before
         # any team member continues. The fallback remains collective too.
         call = "!$omp barrier\n!$omp single\n" + call + "!$omp end single\n"
-    return (f"if ({guard}) then\n" + call + "else\n" +
+    return (f"if ({_wrap_fortran_expr(guard)}) then\n" + call + "else\n" +
             region["original_text"].rstrip() + "\nend if\n")
 
 

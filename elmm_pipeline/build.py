@@ -239,6 +239,8 @@ def build(
         "  env.Replace(LINK=os.environ['FC'])",
         "env.Replace(LIBPATH=[p for p in os.environ.get('LIBRARY_PATH', '').split(os.pathsep) if p])",
         "env.Append(CXXFLAGS=['-std=c++17'])",
+        "env.Append(F90FLAGS=['-ffree-line-length-none'])",
+        "env.Append(FORTRANFLAGS=['-ffree-line-length-none'])",
         "pipeline_extra = []",
         "pipeline_interfaces = []",
         f"pipeline_patched_sources = set({sorted({str(path) for path in patched})!r})",
