@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -104,6 +105,42 @@ def _architecture(value: object) -> str:
     return architecture
 
 
+def _cuda_runtime_directory(cuda_root: Path, compiler: str, explicit: str | Path | None) -> tuple[Path, dict]:
+    if explicit is not None:
+        directory = Path(explicit).resolve()
+        if not (directory / "libcudart.so").is_file():
+            raise RuntimeError("Explicit CUDA runtime directory has no libcudart.so: " + str(directory))
+        return directory, {"method": "explicit", "directory": str(directory)}
+    argv = [compiler, "-dumpmachine"]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError("Could not query CUDA host compiler target; supply cuda_runtime_dir explicitly") from error
+    target = result.stdout.strip()
+    if (result.returncode or len(target) > 128
+            or not re.fullmatch(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+)+", target)):
+        raise RuntimeError("Invalid CUDA host compiler target; supply cuda_runtime_dir explicitly")
+    parts = target.lower().split("-")
+    linux_gnu = "linux" in parts and parts[-1] == "gnu"
+    targets = cuda_root / "targets"
+    candidates = [targets / target / "lib"]
+    # Architecture-only CUDA directories do not distinguish x32/musl ABIs.
+    if linux_gnu:
+        candidates.append(targets / (parts[0] + "-linux") / "lib")
+    for directory in candidates:
+        if (directory / "libcudart.so").is_file():
+            return directory.resolve(), {"method": "host_target", "target": target, "argv": argv}
+    # Older native toolkits have only lib64/lib. A cross compiler must not
+    # silently pick the running host's runtime, nor a symlink to another target.
+    if linux_gnu and parts[0] == platform.machine().lower() and platform.system() == "Linux":
+        for directory in (cuda_root / "lib64", cuda_root / "lib"):
+            resolved = directory.resolve()
+            if not resolved.is_relative_to(targets.resolve()) and (resolved / "libcudart.so").is_file():
+                return resolved, {"method": "native_flat_layout", "target": target, "argv": argv}
+    raise RuntimeError(f"CUDA runtime libcudart.so for host target {target!r} was not found beneath "
+                       f"{cuda_root}; supply cuda_runtime_dir explicitly")
+
+
 def discover_toolchain(
     options: dict | None = None,
     languages: tuple[str, ...] | list[str] = ("cuda", "openacc"),
@@ -112,12 +149,15 @@ def discover_toolchain(
     nvfortran: str | Path | None = None,
     cuda_host: str | Path | None = None,
     arch: str | None = None,
+    cuda_runtime_dir: str | Path | None = None,
 ) -> dict:
     """Return JSON-serializable paths, versions, architecture and device status.
 
     CUDA defaults to g++-14 when installed, because a newer system GNU compiler
     may exceed nvcc's supported host range. Supply ``cuda_host`` to override it.
     If device visibility is restricted, callers must provide ``arch`` explicitly.
+    ``cuda_runtime_dir`` (also accepted in options) selects a custom runtime
+    directory; otherwise the selected CUDA host compiler determines the target.
     """
     options = dict(options or {})
     unsupported = set(languages) - {"cuda", "openacc"}
@@ -140,11 +180,11 @@ def discover_toolchain(
         config["versions"]["nvcc"] = _version(config["nvcc"])
         config["versions"]["cuda_host_cxx"] = _version(config["cuda_host_cxx"])
         cuda_root = Path(config["nvcc"]).parent.parent
-        runtime_dirs = [cuda_root / "lib64", cuda_root / "targets" / "x86_64-linux" / "lib", cuda_root / "lib"]
-        runtime_dir = next((path for path in runtime_dirs if (path / "libcudart.so").is_file()), None)
-        if runtime_dir is None:
-            raise RuntimeError(f"CUDA runtime libcudart.so was not found beneath {cuda_root}")
-        config["cuda_library_dir"] = str(runtime_dir.resolve())
+        override = cuda_runtime_dir if cuda_runtime_dir is not None else options.get(
+            "cuda_runtime_dir", options.get("cuda_library_dir"))
+        runtime_dir, discovery = _cuda_runtime_directory(cuda_root, config["cuda_host_cxx"], override)
+        config["cuda_library_dir"] = str(runtime_dir)
+        config["cuda_runtime_discovery"] = discovery
     if "openacc" in languages:
         installations = sorted(Path("/opt/nvidia/hpc_sdk").glob("*/*/compilers/bin/nvfortran"),
                                key=lambda path: tuple(int(number) for number in re.findall(r"\d+", path.parts[-4])), reverse=True)

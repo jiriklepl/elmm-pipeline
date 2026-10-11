@@ -20,6 +20,127 @@ from elmm_pipeline.gpu_toolchain import (
 
 
 class GPUConfigurationTests(unittest.TestCase):
+    def discover_cuda(self, root, target="x86_64-linux-gnu", query_result=None, query_error=None, **kwargs):
+        result = query_result or subprocess.CompletedProcess([], 0, target + "\n", "")
+        with patch("elmm_pipeline.gpu_toolchain.probe_gpu", return_value={"devices": [], "error": "hidden"}), \
+             patch("elmm_pipeline.gpu_toolchain._executable", side_effect=lambda explicit, *args: str(explicit)), \
+             patch("elmm_pipeline.gpu_toolchain._version", return_value="mock compiler"), \
+             patch("elmm_pipeline.gpu_toolchain.platform.machine", return_value="x86_64"), \
+             patch("elmm_pipeline.gpu_toolchain.platform.system", return_value="Linux"), \
+             patch("elmm_pipeline.gpu_toolchain.subprocess.run", return_value=result,
+                   side_effect=query_error) as query:
+            config = discover_toolchain(languages=("cuda",), nvcc=root / "bin/nvcc",
+                                        cuda_host=root / "bin/host-c++", arch="90", **kwargs)
+        return config, query
+
+    def test_cuda_runtime_matches_selected_host_target_and_preserves_native_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "targets/x86_64-linux/lib"
+            directory.mkdir(parents=True)
+            (directory / "libcudart.so").touch()
+            (root / "lib64").symlink_to(directory, target_is_directory=True)
+            config, query = self.discover_cuda(root, "x86_64-pc-linux-gnu")
+            self.assertEqual(config["cuda_library_dir"], str((root / "lib64").resolve()))
+            self.assertEqual(config["cuda_runtime_discovery"]["target"], "x86_64-pc-linux-gnu")
+            query.assert_called_once_with([str(root / "bin/host-c++"), "-dumpmachine"],
+                                          capture_output=True, text=True, check=False, timeout=15)
+
+    def test_cross_host_target_uses_its_runtime_instead_of_native_lib64(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            native = root / "lib64"
+            native.mkdir()
+            (native / "libcudart.so").touch()
+            cross = root / "targets/aarch64-linux/lib"
+            cross.mkdir(parents=True)
+            (cross / "libcudart.so").touch()
+            config, _ = self.discover_cuda(root, "aarch64-unknown-linux-gnu")
+            self.assertEqual(config["cuda_library_dir"], str(cross))
+            self.assertEqual(config["cuda_runtime_discovery"]["method"], "host_target")
+
+    def test_explicit_cuda_runtime_override_requires_library_and_skips_target_query(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "custom runtime"
+            directory.mkdir()
+            (directory / "libcudart.so").touch()
+            for kwargs in ({"cuda_runtime_dir": directory}, {"options": {"cuda_runtime_dir": str(directory)}},
+                           {"options": {"cuda_library_dir": str(directory)}}):
+                with self.subTest(kwargs=kwargs):
+                    config, query = self.discover_cuda(root, target="unsupported", **kwargs)
+                    self.assertEqual(config["cuda_library_dir"], str(directory))
+                    self.assertEqual(config["cuda_runtime_discovery"]["method"], "explicit")
+                    query.assert_not_called()
+            # The compiler triple does not distinguish SBSA from other ARM platforms.
+            sbsa = root / "targets/sbsa-linux/lib"
+            sbsa.mkdir(parents=True)
+            (sbsa / "libcudart.so").touch()
+            config, query = self.discover_cuda(root, target="aarch64-linux-gnu", cuda_runtime_dir=sbsa)
+            self.assertEqual(config["cuda_library_dir"], str(sbsa))
+            query.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, "Explicit CUDA runtime directory"):
+                self.discover_cuda(root, cuda_runtime_dir=root / "missing")
+
+    def test_flat_runtime_is_native_only_and_foreign_target_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "lib64"
+            directory.mkdir()
+            (directory / "libcudart.so").touch()
+            config, _ = self.discover_cuda(root)
+            self.assertEqual(config["cuda_runtime_discovery"]["method"], "native_flat_layout")
+            with self.assertRaisesRegex(RuntimeError, "host target 'aarch64-linux-gnu'"):
+                self.discover_cuda(root, target="aarch64-linux-gnu")
+            (directory / "libcudart.so").unlink()
+            directory.rmdir()
+            foreign = root / "targets/aarch64-linux/lib"
+            foreign.mkdir(parents=True)
+            (foreign / "libcudart.so").touch()
+            directory.symlink_to(foreign, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "host target 'x86_64-linux-gnu'"):
+                self.discover_cuda(root)
+
+    def test_missing_and_invalid_host_targets_require_explicit_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(RuntimeError, "supply cuda_runtime_dir"):
+                self.discover_cuda(root)
+            with self.assertRaisesRegex(RuntimeError, "Invalid CUDA host compiler target"):
+                self.discover_cuda(root, target="../../another-target")
+
+    def test_host_target_query_failures_do_not_select_an_available_native_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "lib64").mkdir()
+            (root / "lib64/libcudart.so").touch()
+            for result in (subprocess.CompletedProcess([], 1, "x86_64-linux-gnu", "failed"),
+                           subprocess.CompletedProcess([], 0, "", "")):
+                with self.subTest(result=result), self.assertRaisesRegex(RuntimeError, "Invalid CUDA host compiler target"):
+                    self.discover_cuda(root, query_result=result)
+            for error in (subprocess.TimeoutExpired("host-c++", 15), OSError("unavailable")):
+                with self.subTest(error=error), self.assertRaisesRegex(RuntimeError, "Could not query CUDA host compiler target"):
+                    self.discover_cuda(root, query_error=error)
+
+    def test_nonstandard_abi_requires_exact_target_directory_or_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            conventional = root / "targets/x86_64-linux/lib"
+            conventional.mkdir(parents=True)
+            (conventional / "libcudart.so").touch()
+            # Neither a target directory nor a native flat layout proves ABI compatibility.
+            (root / "lib64").mkdir()
+            (root / "lib64/libcudart.so").touch()
+            for target in ("x86_64-linux-gnux32", "x86_64-linux-musl"):
+                with self.subTest(target=target):
+                    with self.assertRaisesRegex(RuntimeError, "supply cuda_runtime_dir"):
+                        self.discover_cuda(root, target=target)
+                    exact = root / "targets" / target / "lib"
+                    exact.mkdir(parents=True)
+                    (exact / "libcudart.so").touch()
+                    config, _ = self.discover_cuda(root, target=target)
+                    self.assertEqual(config["cuda_library_dir"], str(exact))
+
     def test_compute_capability_normalization_rejects_compiler_flags(self):
         for value in ("86", "8.6", "sm_86", "cc86"):
             self.assertEqual(_architecture(value), "86")

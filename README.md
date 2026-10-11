@@ -89,6 +89,14 @@ GPU's compute capability. It does not bypass the GPU availability check.
 `--tools` selects the same variants as CPU runs, always including the native
 baseline. GPU source discovery also supports `analyze --target gpu`.
 
+CUDA runtime discovery uses the selected host C++ compiler's target, rather
+than a fixed host architecture. The Python `discover_toolchain` API also accepts
+`cuda_runtime_dir` directly or in its options for custom layouts, including
+ARM SBSA installations. That directory must contain `libcudart.so`; a cross
+compiler cannot silently select the running host's flat `lib64` directory.
+This discovers build inputs; execution on another architecture still requires
+its own hardware validation and calibration.
+
 
 ### Local runtime policies and hardware calibration
 
