@@ -643,3 +643,22 @@ their diagnostic receipt and never rerun numerical work.
 CPU sampling and synchronizing phase timers are disabled. Recorded device
 durations remain separate from application wall time; a short trace is never
 extrapolated into a full-run speedup or overlap claim.
+
+For a long Python analysis or generation script, periodic main-thread stack
+samples can run separately from timing:
+
+```sh
+python -m elmm_pipeline.campaigns.python_stacks \
+  --script /explicit/probe.py --script-sha256 "$SCRIPT_SHA256" \
+  --output /new/python-stacks.jsonl --interval 120 -- original arguments
+```
+
+The runner verifies and executes the same Python source bytes once, preserving
+the script's arguments, `__main__` namespace and sibling imports. The new JSONL
+log contains at most 100 frames per sample (filename, line and function), without
+source lines or local values, and is capped at 16 MiB. A Python worker samples the
+main thread and joins before the regular log file closes. Original failures and
+nonzero exit codes are preserved; a sampler failure makes an otherwise successful
+run fail. Use the campaign memory guard and a command timeout for heavy scripts,
+including bounds on filesystem waits during shutdown. These samples are
+diagnostics, not application timing measurements.
