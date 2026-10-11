@@ -16,7 +16,19 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Literal, NotRequired, TypedDict
+try:
+    from typing import Literal, NotRequired, TypedDict  # type: ignore
+except ImportError:
+    try:
+        from typing_extensions import Literal, NotRequired, TypedDict  # type: ignore
+    except ImportError:
+        from typing import Literal, TypedDict  # type: ignore
+
+        class _NotRequired:
+            def __getitem__(self, item):
+                return item
+
+        NotRequired = _NotRequired()  # type: ignore
 
 
 class GPUSource(TypedDict):
