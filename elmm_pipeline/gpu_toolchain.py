@@ -287,6 +287,25 @@ def compile_gpu_sources(
         manifest["library_dirs"].append(config["cuda_library_dir"])
         manifest["rpaths"].append(config["cuda_library_dir"])
         manifest["libraries"].extend(["cudart", "stdc++"])
+        cuda_host_cxx = config.get("cuda_host_cxx")
+        if cuda_host_cxx:
+            try:
+                stdcxx_link = subprocess.check_output(
+                    [cuda_host_cxx, "-print-file-name=libstdc++.so"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+                if os.path.isabs(stdcxx_link) and os.path.isfile(stdcxx_link):
+                    stdcxx_real = os.path.realpath(stdcxx_link)
+                    manifest["cuda_stdcxx_library"] = stdcxx_real
+                    manifest["cuda_stdcxx_link_dir"] = os.path.dirname(stdcxx_link)
+                    for d in (os.path.dirname(stdcxx_real), os.path.dirname(stdcxx_link)):
+                        if d not in manifest["library_dirs"]:
+                            manifest["library_dirs"].insert(0, d)
+                        if d not in manifest["rpaths"]:
+                            manifest["rpaths"].insert(0, d)
+            except Exception:
+                pass
     if "openacc" in languages:
         acc_object = Path(objects[next(index for index, unit in enumerate(units) if unit["language"] == "openacc")])
         runtime = _openacc_link_configuration(config, acc_object, directory)

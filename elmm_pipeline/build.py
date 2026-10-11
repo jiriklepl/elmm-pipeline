@@ -268,6 +268,18 @@ def build(
     # competing acc_* API, while GNU's GOMP_* API must precede libnvomp.
     openacc_library = gpu_build.get("openacc_library") if gpu_build else None
     openacc_notify_library = gpu_build.get("openacc_notify_library") if gpu_build else None
+    cuda_stdcxx_library = gpu_build.get("cuda_stdcxx_library") if gpu_build else None
+    cuda_stdcxx_link_dir = gpu_build.get("cuda_stdcxx_link_dir") if gpu_build else None
+    cuda_host_cxx = None
+    if gpu_build and ("cuda" in [u.get("language") for u in gpu_units] or "stdc++" in gpu_build.get("libraries", [])):
+        cuda_host_cxx = (
+            gpu_build.get("toolchain", {}).get("cuda_host_cxx")
+            or (gpu_options or {}).get("cuda_host_cxx")
+            or (gpu_options or {}).get("cuda_host")
+            or os.environ.get("CUDAHOSTCXX")
+            or os.environ.get("CXX")
+            or "g++"
+        )
     injection.extend([
         "import subprocess as pipeline_subprocess, json as pipeline_json",
         "pipeline_host_fc = os.environ.get('FC', 'gfortran')",
@@ -279,11 +291,29 @@ def build(
         "  raise RuntimeError('GNU OpenMP runtime lookup resolved NVIDIA libnvomp; fix the GNU compiler configuration')",
         f"pipeline_openacc = {openacc_library!r}",
         f"pipeline_openacc_notify = {openacc_notify_library!r}",
+        f"pipeline_cuda_stdcxx = {cuda_stdcxx_library!r}",
+        f"pipeline_cuda_link_dir = {cuda_stdcxx_link_dir!r}",
+        f"pipeline_cuda_cxx = {cuda_host_cxx!r}",
+        "if not pipeline_cuda_stdcxx and pipeline_cuda_cxx:",
+        "  try:",
+        "    link_target = pipeline_subprocess.check_output([pipeline_cuda_cxx, '-print-file-name=libstdc++.so'], text=True).strip()",
+        "    if os.path.isabs(link_target) and os.path.isfile(link_target):",
+        "      pipeline_cuda_stdcxx = os.path.realpath(link_target)",
+        "      pipeline_cuda_link_dir = os.path.dirname(link_target)",
+        "  except Exception:",
+        "    pass",
         "pipeline_runtime_prefix = ([pipeline_openacc, pipeline_openacc_notify] if pipeline_openacc else []) + [pipeline_gomp]",
         "pipeline_runtime_flags = []",
         "if pipeline_openacc:",
         "  pipeline_runtime_flags = [env.File(pipeline_openacc), '-Wl,--push-state,--no-as-needed', env.File(pipeline_openacc_notify), '-Wl,--pop-state']",
         "pipeline_runtime_flags += [env.File(pipeline_gomp)]",
+        "if pipeline_cuda_stdcxx:",
+        "  pipeline_runtime_prefix.append(pipeline_cuda_stdcxx)",
+        "  pipeline_stdcxx_dir = os.path.dirname(pipeline_cuda_stdcxx)",
+        "  dirs_to_prepend = [pipeline_stdcxx_dir] + ([pipeline_cuda_link_dir] if pipeline_cuda_link_dir else [])",
+        "  env.PrependUnique(LIBPATH=dirs_to_prepend)",
+        "  env.PrependUnique(RPATH=[pipeline_stdcxx_dir])",
+        "  pipeline_runtime_flags += [env.File(pipeline_cuda_stdcxx)]",
         "env.Replace(PIPELINE_RUNTIME_LIBFLAGS=pipeline_runtime_flags)",
         "env.Replace(_LIBFLAGS='$PIPELINE_RUNTIME_LIBFLAGS ' + env['_LIBFLAGS'])",
         "env.PrependUnique(LIBPATH=[os.path.dirname(pipeline_gomp_link)])",

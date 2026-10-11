@@ -129,6 +129,8 @@ class GPUConfigurationTests(unittest.TestCase):
             self.assertIn("env.File(p)", script)
             self.assertIn("env.AppendUnique(RPATH=['/cuda/lib64'])", script)
             self.assertIn("env.AppendUnique(LIBS=['cudart'])", script)
+            self.assertIn("pipeline_cuda_stdcxx", script)
+            self.assertIn("env.File(pipeline_cuda_stdcxx)", script)
             self.assertNotIn("source=" + repr(str(source)), script)
             self.assertEqual(json.loads((root / "build/build-command.json").read_text())["gpu"], manifest)
 
