@@ -182,9 +182,9 @@ def scoped_modeled_evidence(log):
             durations = ("packing_seconds", "unpacking_seconds", "event_wait_seconds")
             if (type(record.get("stats_version")) is not int or record["stats_version"] != 1
                     or record.get("complete") is not True
-                    or any(type(record.get(field)) is not int or not 0 <= record[field] <= 3
+                    or any(type(record.get(field)) is not int or not 0 <= record[field] <= 4
                            for field in ("requested_mode", "effective_mode"))
-                    or type(record.get("fallback_reason")) is not int or not 0 <= record["fallback_reason"] <= 4
+                    or type(record.get("fallback_reason")) is not int or not 0 <= record["fallback_reason"] <= 5
                     or not isinstance(record.get("reason"), str) or not record["reason"]
                     or any(type(record.get(field)) is not int or not 0 <= record[field] < 2**64 for field in counts)
                     or any(type(record.get(field)) not in (int, float) or record[field] < 0 for field in durations)):

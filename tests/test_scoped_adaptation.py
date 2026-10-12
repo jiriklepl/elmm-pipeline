@@ -179,7 +179,8 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
     assert "scope_extraction.py" in metadata["identity"]["implementation"]
 
 
-def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_path):
+@pytest.mark.parametrize("transfers", ["pinned", "coalesced"])
+def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_path, transfers):
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps(FACTS))
     args = SimpleNamespace(memory_model="call", scope_entry="step", scope_source="application.f90",
@@ -188,8 +189,8 @@ def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_
         scoped_configuration(args)
     args.memory_model = "scoped"
     assert scoped_configuration(args)["capture_facts"] == facts
-    args.scope_transfers = "pinned"
-    assert scoped_configuration(args)["transfers"] == "pinned"
+    args.scope_transfers = transfers
+    assert scoped_configuration(args)["transfers"] == transfers
     args.scope_execution = "reached"
     assert scoped_configuration(args)["execution"] == "reached"
     args.memory_model = "call"

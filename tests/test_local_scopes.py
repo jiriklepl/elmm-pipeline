@@ -147,7 +147,7 @@ def test_independent_compiler_packages_compose_without_ir_or_source_merging(inde
     assert len(bundle["gpu_sources"]) == 5
 
 
-@pytest.mark.parametrize("transfers", ["pinned", "pipelined"])
+@pytest.mark.parametrize("transfers", ["pinned", "pipelined", "coalesced"])
 def test_independent_adapter_transports_transfer_choice_and_compiler_reason(independent, tmp_path, transfers):
     _, _, compiler, source, _, _ = independent
     metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "generated", entry="step",
@@ -157,8 +157,11 @@ def test_independent_adapter_transports_transfer_choice_and_compiler_reason(inde
     scope, = metadata["scope_manifest"]["scopes"]
     configuration = scope["transfer_configuration"]
     assert configuration["requested"] == transfers
-    assert configuration["selected"] == ("pinned" if transfers == "pinned" else "direct")
-    assert configuration["reason"] == (None if transfers == "pinned" else "pipelined_not_available")
+    assert configuration["selected"] == {"pinned": "pinned", "pipelined": "direct", "coalesced": "runtime"}[transfers]
+    assert configuration["reason"] == ("pipelined_not_available" if transfers == "pipelined" else None)
+    if transfers == "coalesced":
+        assert configuration["coalesced"]["fallback_reason"] == "coalesced_upload_ineligible"
+        assert "exact direct" in configuration["coalesced"]["placement"]
     assert metadata["compiler_report"]["scopes"] == metadata["scope_manifest"]
 
 

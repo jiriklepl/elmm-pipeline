@@ -156,6 +156,15 @@ python3 pipeline.py run --tools local --target gpu --gpu-policy sections \
   --config /path/to/case --threads 4 --repeats 3 --warmups 1
 ```
 
+`--scope-transfers {direct,pinned,pipelined,auto,coalesced}` passes the explicit
+transfer choice through the compiler's public interface; `direct` remains the
+default. Experimental `coalesced` uploads may copy a dense physical span with
+at most 12.5% extra bytes only when the whole canonical source resource is
+defined and host current.
+The compiler owns eligibility and exact direct fallback; output sections stay
+exact. Cost-selected plans use calibrated exact direct transfers until coalesced
+costs are available. The adapter makes no transfer or placement decisions.
+
 Source paths are relative to the selected application's `src/` tree. Repeat
 `--scope-source-file` for the original modules available to the compiler, including
 imports needed for capture and effect analysis. Call-region selection filters

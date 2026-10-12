@@ -88,8 +88,11 @@ def plot_snapshot(snapshot, output, *, gpu_label="Scoped GPU", native_label="Nat
             or state.get("kind") != "verified_current_compiler_complete_application"
             or state["resources"]["runtime_threads"] != 4
             or state["selection"]["gpu_policy"] != "sections"
-            or state["selection"]["scope_transfers"] != "direct"):
-        raise ValueError("verified four-thread SGS sections/direct snapshot required")
+            or state["selection"]["scope_transfers"] not in {"direct", "coalesced"}):
+        raise ValueError("verified four-thread SGS sections with direct/coalesced transfers required")
+    transfers = state["selection"]["scope_transfers"]
+    if transfers == "coalesced" and gpu_label == "Scoped GPU":
+        gpu_label += " coalesced"
     if not gpu_label.strip() or not native_label.strip():
         raise ValueError("nonempty plot labels required")
     hashes = state["receipt_sha256"]
@@ -175,7 +178,7 @@ def plot_snapshot(snapshot, output, *, gpu_label="Scoped GPU", native_label="Nat
             if relative:
                 fig.legend(*axes[0, 0].get_legend_handles_labels(), loc="upper center", bbox_to_anchor=(.5, .925), frameon=False)
             fig.text(.5, .055, "Dots: measured runs; bars: medians; whiskers: sample min–max. One excluded warmup per case.\n"
-                     "Current compiler SGS only · forced sections/direct · four host threads · automatic policy not promoted.\n"
+                     f"Current compiler SGS only · forced sections/{transfers} · four host threads · automatic policy not promoted.\n"
                      "Complete process wall time includes startup, solver, transfers, output and teardown.", ha="center", fontsize=12, linespacing=1.5)
             fig.subplots_adjust(left=.075, right=.985, bottom=.235, top=.80, wspace=.16)
             name = "complete-wall-relative" if relative else "complete-wall-absolute"

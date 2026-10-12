@@ -59,7 +59,7 @@ def scoped_configuration(args):
     model = getattr(args, "memory_model", "call")
     transfers = getattr(args, "scope_transfers", "direct")
     execution = getattr(args, "scope_execution", "bounded")
-    if transfers not in {"direct", "pinned", "pipelined", "auto"}:
+    if transfers not in {"direct", "pinned", "pipelined", "auto", "coalesced"}:
         raise ValueError("Unknown scope transfer mode")
     if execution not in {"bounded", "reached"}:
         raise ValueError("Unknown scope execution mode")
@@ -463,7 +463,7 @@ def main():
                          help="Local compiler runtime policy; always preserves the existing forced GPU path")
     measure.add_argument("--memory-model", choices=("call", "scoped"), default="call",
                          help="Local CUDA memory ownership; scoped uses compiler-owned source scopes")
-    measure.add_argument("--scope-transfers", choices=("direct", "pinned", "pipelined", "auto"), default="direct",
+    measure.add_argument("--scope-transfers", choices=("direct", "pinned", "pipelined", "auto", "coalesced"), default="direct",
                          help="Pass the scoped transfer mode to the compiler; independent of GPU placement")
     measure.add_argument("--scope-execution", choices=("bounded", "reached"), default="bounded",
                          help="Pass the opt-in reached source execution mode to the compiler")

@@ -40,6 +40,20 @@ def test_repository_identity_rejects_changed_committed_input(tmp_path):
         repository(tmp_path, ["code.py"])
 
 
+@pytest.mark.parametrize("transfers", ["direct", "coalesced"])
+def test_snapshot_plot_transfer_controls_still_require_correctness_receipts(tmp_path, transfers):
+    from elmm_pipeline.campaigns.report import plot_snapshot
+
+    snapshot = tmp_path / "snapshot.json"
+    write(snapshot, {"schema_version": 1, "kind": "verified_current_compiler_complete_application",
+                     "resources": {"runtime_threads": 4},
+                     "selection": {"gpu_policy": "sections", "scope_transfers": transfers},
+                     "receipt_sha256": {}})
+    with pytest.raises(ValueError, match="snapshot timing and validation receipt hashes required"):
+        plot_snapshot(snapshot, tmp_path / "figures")
+    assert not (tmp_path / "figures").exists()
+
+
 def test_prepare_freezes_explicit_inputs_and_rejects_later_mutation(tmp_path, monkeypatch):
     repo = tmp_path / "independent-checkout"
     repo.mkdir()

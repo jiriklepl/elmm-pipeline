@@ -250,7 +250,27 @@ class GPUValidationTests(unittest.TestCase):
         self.assertEqual(activity["scoped_runtime"]["modeled_evidence"], [record])
         self.assertEqual(activity["upload_bytes"], 0)
         self.assertFalse(activity["verified"])
-        for change in ({"stats_version": True}, {"complete": False}, {"effective_mode": 4},
+        for effective_mode, fallback_reason, reason in (
+                (4, 0, "none"),
+                (4, 5, "coalesced_upload_ineligible"),
+                (0, 5, "coalesced_upload_ineligible"),
+                (0, 1, "transfer_estimates_unavailable")):
+            coalesced = {**record, "requested_mode": 4, "effective_mode": effective_mode,
+                         "fallback_reason": fallback_reason, "reason": reason,
+                         "pinned_upload_bytes": 0}
+            log = ("FORT_SCOPED evidence " + json.dumps(coalesced) + "\n"
+                   "FORT_SCOPED upload buffer=12 generation=3 bytes=288\n"
+                   "FORT_SCOPED upload_coalesced buffer=12 generation=3 bytes=288\n"
+                   "FORT_SCOPED upload_requested buffer=12 generation=3 bytes=256\n"
+                   "FORT_SCOPED launch bytes=0\n")
+            with self.subTest(effective_mode=effective_mode, fallback_reason=fallback_reason):
+                parsed = gpu_activity(log, "local", [])
+                self.assertEqual(parsed["scoped_runtime"]["modeled_evidence"], [coalesced])
+                self.assertEqual(parsed["upload_bytes"], 288)
+                self.assertEqual(parsed["kernel_launches"], 1)
+                self.assertTrue(parsed["verified"])
+        for change in ({"stats_version": True}, {"complete": False}, {"effective_mode": 5},
+                       {"requested_mode": 5}, {"fallback_reason": 6},
                        {"pinned_upload_bytes": -1}, {"process_peak_bytes": 2**64}, {"packing_seconds": -1},
                        {"event_wait_seconds": float("nan")}):
             with self.subTest(change=change), self.assertRaises(ValueError):
