@@ -49,6 +49,11 @@ def main():
     prepare_parser = sub.add_parser("prepare")
     prepare_parser.add_argument("--config", type=Path, required=True)
     prepare_parser.add_argument("--output", type=Path, required=True)
+    snapshot_parser = sub.add_parser("plot-snapshot")
+    snapshot_parser.add_argument("--snapshot", type=Path, required=True)
+    snapshot_parser.add_argument("--output", type=Path, required=True)
+    snapshot_parser.add_argument("--native-label", default="Native")
+    snapshot_parser.add_argument("--gpu-label", default="Scoped GPU")
     for name in ("run", "worker", "plot", "seal"):
         child = sub.add_parser(name)
         child.add_argument("--campaign", type=Path, required=True)
@@ -56,9 +61,15 @@ def main():
             child.add_argument("phase")
         if name in ("plot", "seal"):
             child.add_argument("--output", type=Path, required=name == "seal")
+        if name == "plot":
+            child.add_argument("--historical", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         print(prepare(args.config, args.output))
+        return
+    if args.command == "plot-snapshot":
+        from .report import plot_snapshot
+        print(plot_snapshot(args.snapshot, args.output, gpu_label=args.gpu_label, native_label=args.native_label))
         return
     root = args.campaign.resolve(strict=True)
     state = check(root)
@@ -84,7 +95,7 @@ def main():
             external(root, args.phase)
     elif args.command == "plot":
         from .report import plot
-        plot(root, args.output)
+        plot(root, args.output, historical=args.historical)
     elif args.command == "seal":
         from .report import seal
         print(seal(root, args.output))

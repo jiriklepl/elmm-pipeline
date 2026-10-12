@@ -566,6 +566,23 @@ To redraw existing measurements without replacing an immutable chart, use
 The new plot receipt identifies the original timing and verification reports;
 this renders recorded data and does not run benchmarks. Plot height reserves
 space for the numerical axes before accommodating long policy labels.
+Add `--historical` to label a redraw as retained historical measurements.
+
+Verified SGS snapshots with `primary` and `supplementary_cases` summaries can be
+redrawn without preparing or running a campaign:
+
+```sh
+python -m elmm_pipeline.campaigns plot-snapshot --snapshot /path/to/snapshot.json --output /path/to/new-figures --gpu-label 'SGS direct'
+```
+
+This checks hashed receipts and measured samples, then writes absolute and
+native-relative complete-wall PNG/SVG/PDF charts and a `source.json` receipt.
+Labels default to `Native` and `Scoped GPU` and accept `--native-label` /
+`--gpu-label`. Dots show measured runs, bars show medians, and whiskers show
+sample min–max: seven runs for the primary case and three for each supplementary
+case, with one excluded warmup and four host threads. Notes identify the SGS-only
+forced sections/direct implementation; the relative chart marks an approximate
+15% reduction reference. Output directories are immutable.
 
 Configuration schema 1 requires `threads: 4`, `runtime_id`, `profile`, `title`,
 `previous_snapshot`, `repositories` (explicit paths and selected tracked files),
