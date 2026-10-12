@@ -94,7 +94,8 @@ def _validate(configuration):
     _require(application_receipt["compatible_commits"] == config["previous_application_commits"]
              and application_receipt["full_application_gate_passed"] is True,
              "Last full-application proof must retain its original commit pair")
-    _require(commits["compiler"] != config["previous_checkpoint_commits"]["compiler"],
+    _require(any(commits[name] != config["previous_checkpoint_commits"][name]
+                 for name in ("compiler", "pipeline")),
              "A new component checkpoint must not relabel the previous component proof")
     historical = Path(config["historical_campaign"])
     for path in (Path(config["ordinary_renderer"]), *(historical / name for name in (
@@ -153,7 +154,7 @@ def seal(configuration, *, verify_only=False):
 
 [Historical scoped comparison](figures/complete-wall-relative.png) · [Historical six-policy comparison](ordinary-figures/complete-wall-relative.png) · [Previous component checkpoint]({os.path.relpath(previous.parent / 'report.md', output)}) · [Last full-application checkpoint]({os.path.relpath(application.parent / 'report.md', output)}).
 
-Both charts redraw unchanged historical results with their original readable labels. **Zero new performance samples** were collected. This component checkpoint adds no whole-application execution or performance proof for compiler `{commits['compiler']}`. The previous three-case proof belongs to compiler `{config['previous_application_commits']['compiler']}` and pipeline `{config['previous_application_commits']['pipeline']}`; it is not attributed to this newer compiler. No automatic-placement, speedup or whole-stage residency promotion is claimed.
+Both charts redraw unchanged historical results with their original readable labels. **Zero new performance samples** were collected. This component checkpoint adds no whole-application execution or performance proof for compiler `{commits['compiler']}`. The previous three-case proof belongs to compiler `{config['previous_application_commits']['compiler']}` and pipeline `{config['previous_application_commits']['pipeline']}`; it does not validate the current commit pair. No automatic-placement, speedup or whole-stage residency promotion is claimed.
 """
     with (output / "report.md").open("x") as stream:
         stream.write(report)

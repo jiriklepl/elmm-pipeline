@@ -648,7 +648,9 @@ requires successful guards, complete fields, halo checks, configured reports
 and current plots. A sealed snapshot is evidence, not automatic promotion.
 
 Unmeasured construction has separate resource controls. `pipeline.py run --jobs`
-sets SCons build concurrency; it does not parallelize source analysis. `--timeout`
+limits independent CUDA compilations and the subsequent SCons build. Those
+phases run in sequence; OpenACC compilation remains serial because units can
+share Fortran module outputs. This does not parallelize source analysis. `--timeout`
 limits each application process, not generation or compilation. Source generation
 currently runs serially and has no internal worker-count option; select its
 process affinity and deadline explicitly when launching it. Builds and generation

@@ -170,6 +170,28 @@ def test_draft_or_fresh_claims_reject_before_output(component, change):
     assert not Path(config["output"]).exists()
 
 
+def test_pipeline_only_milestone_retains_unchanged_compiler_identity(component, renderers):
+    path, config = component
+    current = {name: row["commit"] for name, row in config["repositories"].items()}
+    previous_pair = {**current, "pipeline": "c" * 40}
+    previous = Path(config["previous_snapshot"])
+    previous_receipt = json.loads(previous.read_text())
+    previous_receipt["compatible_commits"] = previous_pair
+    write(previous, previous_receipt)
+    config["previous_checkpoint_commits"] = previous_pair
+    config["input_sha256"][str(previous)] = digest(previous)
+    write(path, config)
+
+    output = checkpoint.seal(path)
+    receipt = json.loads((output / "snapshot.json").read_text())
+    assert receipt["compatible_commits"] == current
+    assert receipt["previous_full_application_commits"] == config["previous_application_commits"]
+    assert receipt["new_application_observations"] == receipt["new_performance_samples"] == 0
+    assert receipt["policy_promoted"] is False
+    assert json.loads(previous.read_text())["compatible_commits"] == previous_pair
+    assert len(renderers) == 2
+
+
 @pytest.mark.parametrize("role", ["input", "history", "committed_source"])
 def test_changed_evidence_history_or_committed_source_reject(component, role):
     path, config = component

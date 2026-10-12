@@ -16,7 +16,9 @@ import re
 import shlex
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
 try:
     from typing import Literal, NotRequired, TypedDict  # type: ignore
 except ImportError:
@@ -271,12 +273,16 @@ def compile_gpu_sources(
     *,
     defines: list[str] | None = None,
     toolchain: dict | None = None,
+    jobs: int = 1,
 ) -> dict:
     """Compile self-contained GPU objects and return GNU linker inputs.
 
     NVIDIA module output goes into its own directory, isolated from GNU module
     files. Compiler diagnostics and exact commands are saved beside the objects.
+    Independent CUDA units use at most ``jobs`` workers; OpenACC stays serial.
     """
+    if type(jobs) is not int or jobs < 1:
+        raise ValueError("jobs must be a positive integer")
     units = validate_gpu_sources(sources)
     if not units:
         return {"objects": [], "library_dirs": [], "libraries": [], "rpaths": [], "link_flags": [], "sources": []}
@@ -292,37 +298,96 @@ def compile_gpu_sources(
     commands = []
     objects = []
     manifest: dict = {"toolchain": config, "sources": units, "commands": commands, "objects": objects,
+                      "jobs": jobs,
                       "compiler_environment": compiler_environment,
                       "library_dirs": [], "libraries": [], "rpaths": [], "link_flags": []}
     log_path = directory / "gpu-build.log"
+    plans = []
+    macros = ["-D" + macro for macro in (defines or [])]
+    for index, unit in enumerate(units):
+        source = Path(unit["source"])
+        target = directory / f"{index:03d}_{source.stem}.o"
+        unit_log = directory / f"{index:03d}_{source.stem}.log"
+        if unit["language"] == "cuda":
+            contract = unit.get("numerical_contract")
+            numerical_options = (contract or {}).get("required_cuda_options", [])
+            host_options = (contract or {}).get("required_host_options", [])
+            command = [config["nvcc"], "-O3", "-std=c++17", "-arch=sm_" + config["architecture"],
+                       "-ccbin", config["cuda_host_cxx"], "-Xcompiler=-fPIC,-fopenmp", *macros,
+                       *numerical_options, *["-Xcompiler=" + option for option in host_options],
+                       "-c", str(source), "-o", str(target)]
+            unit["resolved_numerical_options"] = {"cuda": numerical_options, "host": host_options}
+        else:
+            command = [config["nvfortran"], "-O3", "-fPIC", "-acc=gpu", "-gpu=cc" + config["architecture"] + ",nordc",
+                       "-Mfreeform", "-Mextend", "-Mpreprocess", "-module", str(module_dir), *macros,
+                       "-c", str(source), "-o", str(target)]
+        unit["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+        unit["build_log"] = str(unit_log)
+        commands.append(command)
+        plans.append((index, command, target, unit_log))
+
+    def compile_one(plan):
+        _, command, target, unit_log = plan
+        try:
+            with unit_log.open("w", encoding="utf-8") as log:
+                log.write(shlex.join(command) + "\n")
+                log.flush()
+                result = subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=False)
+                if result.returncode or not target.is_file():
+                    return "failed", f"compiler exit {result.returncode}; object exists: {target.is_file()}"
+        except Exception as error:  # noqa: BLE001 - retain worker failures after joining the entire batch
+            return "failed", f"{type(error).__name__}: {error}"
+        return "compiled", None
+
+    outcomes = {}
+    index = 0
+    while index < len(plans):
+        if units[index]["language"] == "openacc" or jobs == 1:
+            outcomes[index] = compile_one(plans[index])
+            index += 1
+        else:
+            end = index + 1
+            while end < len(plans) and units[end]["language"] == "cuda":
+                end += 1
+            # OpenACC units remain serial and in source order: their shared
+            # module directory can carry dependencies between compilations.
+            with ThreadPoolExecutor(max_workers=min(jobs, end - index)) as executor:
+                futures = {executor.submit(compile_one, plan): plan[0] for plan in plans[index:end]}
+                for future in as_completed(futures):
+                    position = futures[future]
+                    if future.cancelled():
+                        outcomes[position] = ("cancelled", None)
+                    else:
+                        outcomes[position] = future.result()
+                        if outcomes[position][0] == "failed":
+                            for pending in futures:
+                                pending.cancel()
+            index = end
+        if any(status == "failed" for status, _ in outcomes.values()):
+            break
+
+    # Workers have all joined. Only this parent assembles the public inventory
+    # and aggregate diagnostics, in the original source order.
     with log_path.open("w", encoding="utf-8") as log:
-        for index, unit in enumerate(units):
-            source = Path(unit["source"])
-            target = directory / f"{index:03d}_{source.stem}.o"
-            macros = ["-D" + macro for macro in (defines or [])]
-            if unit["language"] == "cuda":
-                contract = unit.get("numerical_contract")
-                numerical_options = (contract or {}).get("required_cuda_options", [])
-                host_options = (contract or {}).get("required_host_options", [])
-                command = [config["nvcc"], "-O3", "-std=c++17", "-arch=sm_" + config["architecture"],
-                           "-ccbin", config["cuda_host_cxx"], "-Xcompiler=-fPIC,-fopenmp", *macros,
-                           *numerical_options, *["-Xcompiler=" + option for option in host_options],
-                           "-c", str(source), "-o", str(target)]
-                unit["resolved_numerical_options"] = {"cuda": numerical_options, "host": host_options}
+        for position, command, target, unit_log in plans:
+            status, error = outcomes.get(position, ("not_started", None))
+            units[position]["build_status"] = status
+            if error is not None:
+                units[position]["build_error"] = error
+            if status == "compiled":
+                objects.append(str(target))
+            if position in outcomes and status != "cancelled" and unit_log.is_file():
+                with unit_log.open(encoding="utf-8", errors="replace") as diagnostics:
+                    shutil.copyfileobj(diagnostics, log)
+                if error is not None:
+                    log.write(error + "\n")
             else:
-                command = [config["nvfortran"], "-O3", "-fPIC", "-acc=gpu", "-gpu=cc" + config["architecture"] + ",nordc",
-                           "-Mfreeform", "-Mextend", "-Mpreprocess", "-module", str(module_dir), *macros,
-                           "-c", str(source), "-o", str(target)]
-            unit["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
-            commands.append(command)
-            log.write(shlex.join(command) + "\n")
-            log.flush()
-            result = subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=False)
-            if result.returncode or not target.is_file():
-                (directory / "gpu-build-command.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-                raise RuntimeError(f"GPU compilation failed; inspect {log_path}")
-            objects.append(str(target))
-            unit["build_status"] = "compiled"
+                log.write(shlex.join(command) + f"\n{status}\n")
+                if error is not None:
+                    log.write(error + "\n")
+    if any(unit["build_status"] != "compiled" for unit in units):
+        (directory / "gpu-build-command.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        raise RuntimeError(f"GPU compilation failed; inspect {log_path}")
     if "cuda" in languages:
         manifest["library_dirs"].append(config["cuda_library_dir"])
         manifest["rpaths"].append(config["cuda_library_dir"])

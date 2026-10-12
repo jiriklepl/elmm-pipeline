@@ -232,7 +232,7 @@ def build(
     anchor = "t = env.Program("
     if original.count(anchor) != 1:
         raise RuntimeError("Unsupported ELMM SConstruct: program insertion point changed")
-    gpu_build = compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines) if gpu_units else None
+    gpu_build = compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines, jobs=jobs) if gpu_units else None
     injection = [
         "# Additional sources supplied by elmm-pipeline.",
         "if os.environ.get('FC'):",
