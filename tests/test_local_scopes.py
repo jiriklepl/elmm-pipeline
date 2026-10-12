@@ -106,6 +106,7 @@ def test_independent_checkouts_form_and_apply_public_scope(independent,tmp_path)
     assert len(expected) == len(set(expected))
     assert os.path.normpath(metadata["command"][0]) == os.path.normpath(sys.executable)
     assert "--form-scopes" in metadata["command"]
+    assert "--summary-cache" not in metadata["command"]
     destination=tmp_path/"application-copy.f90"
     destination.write_bytes(source.read_bytes())
     mappings=tmp_path/"destinations.json"
@@ -172,6 +173,64 @@ def test_independent_adapter_transports_reached_execution_without_choosing_segme
     assert manifest['scope_count'] == 1
     assert manifest['scopes'][0]['native_continuation'].startswith('original lexical scope')
     assert metadata['compiler_report']['scopes'] == manifest
+
+
+def test_independent_adapter_reuses_summary_cache_and_invalidates_changed_sources(independent, tmp_path):
+    _, _, compiler, _, _, _ = independent
+    source = tmp_path / "cached_application.f90"
+    source.write_text(PROGRAM)
+    cache = tmp_path / "new summary cache"
+    packages = [transform_scopes(source, compiler, Path(sys.executable), tmp_path / f"generated_{index}",
+                                 entry="step", capture_facts=FACTS, summary_cache=cache)
+                for index in range(2)]
+    cold, warm = (package["scope_manifest"] for package in packages)
+    for package in packages:
+        command = package["command"]
+        assert command[command.index("--summary-cache") + 1] == str(cache.resolve())
+        assert package["compiler_report"]["scopes"] == package["scope_manifest"]
+    assert cold["scope_count"] == warm["scope_count"] == 1
+    assert cold["scopes"][0]["gpu_leaves"] == warm["scopes"][0]["gpu_leaves"]
+    assert warm["native_effects"]["summary_cache"]["disk_hits"] > 0
+    kernels = [{unit["path"]: manifest["artifacts_sha256"][unit["path"]]
+                for unit in manifest["build_sources"] if unit["language"] == "cuda"}
+               for manifest in (cold, warm)]
+    assert kernels[0] == kernels[1]
+    records = set(cache.glob("*.json"))
+    assert records
+    changed = PROGRAM.replace("b(i)=2*a(i)", "b(i)=5*a(i)")
+    source.write_text(changed)
+    refreshed = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "changed",
+                                 entry="step", capture_facts=FACTS, summary_cache=cache)["scope_manifest"]
+    assert refreshed["scope_count"] == 1
+    assert refreshed["source_inputs"] == {str(source): hashlib.sha256(changed.encode()).hexdigest()}
+    assert refreshed["source_inputs"] != warm["source_inputs"]
+    refreshed_kernels = {unit["path"]: refreshed["artifacts_sha256"][unit["path"]]
+                         for unit in refreshed["build_sources"] if unit["language"] == "cuda"}
+    assert refreshed_kernels != kernels[1]
+    assert records < set(cache.glob("*.json"))
+    assert source.read_text() == changed
+
+
+def test_independent_adapter_accepts_original_descriptor_guards(independent, tmp_path):
+    _, _, compiler, source, _, _ = independent
+    expected = {"lower_bounds": [1], "extents": [8]}
+    facts = {**FACTS, "captures": {**FACTS["captures"],
+             "argument::a": {**FACTS["captures"]["argument::a"], "expected_descriptor": expected}}}
+    metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "guarded",
+                                entry="step", capture_facts=facts,
+                                gpu_options={"scope_execution": "reached"})
+    manifest = metadata["scope_manifest"]
+    assert manifest["scope_count"] == 1
+    assert manifest["capture_descriptor_expectations"]["schema_version"] == 1
+    resource = next(row for row in manifest["scopes"][0]["resource_bindings"]["resources"]
+                    if row["resource"] == "argument::a")
+    assert resource["expected_descriptor"] == expected
+    assert resource["descriptor_expectation_guard"]["definition_authority"] is False
+    assert source.read_text() == PROGRAM
+    destination = tmp_path / "guarded-application.f90"
+    destination.write_text(PROGRAM)
+    assert apply_scope_sources(metadata, {str(source): destination}) == [destination]
+    assert source.read_text() == PROGRAM
 
 
 def test_stale_application_source_is_rejected_before_any_edit(independent,tmp_path):

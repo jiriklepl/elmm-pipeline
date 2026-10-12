@@ -129,6 +129,8 @@ manifest={'schema_version':1,'scope_count':0 if native else 1,
   'runtime_id':digest('\n'.join(f'{name}:{value}' for name,value in sorted(runtime_hashes.items())))},
  'build_sources':[] if native else [{'path':'scoped_runtime.cu','language':'cuda','role':'common_runtime'},
  {'path':'sources/replacement.f90','language':'fortran','role':'original_source'}]}
+if 'descriptor_contract' in mode:
+ manifest['capture_descriptor_expectations']=mode['descriptor_contract']
 if collective:
  proof={**facts['participation'],'schema_version':2,'other_callers':'unchanged'}
  proof=json.loads(json.dumps(proof))
@@ -175,6 +177,70 @@ def test_serial_facts_never_enable_collective_from_options(fixture, tmp_path):
                                 entry="application::step", capture_facts=facts,
                                 gpu_options={"gpu_collective": True})
     assert "--gpu-collective" not in metadata["command"]
+
+
+DESCRIPTOR_CONTRACT = {
+    "schema_version": 1, "enforcement": "original_descriptor_before_registration",
+    "definition_authority": False,
+    "supported_consumers": ["original_lexical", "original_module_companion"],
+    "unsupported_consumers": ["synthetic_owner", "qualified_collective_owner"],
+}
+
+
+@pytest.mark.parametrize("change", ["missing", "boolean_version", "new_version", "enforcement",
+                                    "definition_authority", "supported_consumers", "unsupported_consumers"])
+def test_descriptor_expectations_require_public_enforcement_before_application_edit(fixture, tmp_path, change):
+    compiler, source, facts = fixture
+    facts = {**facts, "schema_version": 1, "participation": "serial"}
+    facts["captures"]["argument::a"]["expected_descriptor"] = {"lower_bounds": [-3], "extents": [8]}
+    contract = {**DESCRIPTOR_CONTRACT}
+    if change == "boolean_version":
+        contract["schema_version"] = True
+    elif change == "new_version":
+        contract["schema_version"] = 2
+    elif change == "enforcement":
+        contract["enforcement"] = "unchecked"
+    elif change == "definition_authority":
+        contract["definition_authority"] = True
+    elif change == "supported_consumers":
+        contract["supported_consumers"] = ["original_lexical"]
+    elif change == "unsupported_consumers":
+        contract["unsupported_consumers"] = []
+    mode = {} if change == "missing" else {"descriptor_contract": contract}
+    (compiler / "compiler/mode.json").write_text(json.dumps(mode))
+    output = tmp_path / change
+    with pytest.raises(LocalAdapterError, match="descriptor expectation enforcement"):
+        transform_scopes(source, compiler, Path(sys.executable), output,
+                         entry="application::step", capture_facts=facts)
+    assert source.read_text() == SOURCE
+    assert not (output / "scope-transformation.json").exists()
+
+
+def test_descriptor_expectations_transport_only_with_confirmed_public_enforcement(fixture, tmp_path):
+    compiler, source, facts = fixture
+    facts = {**facts, "schema_version": 1, "participation": "serial"}
+    facts["captures"]["argument::a"]["expected_descriptor"] = {"lower_bounds": [-3], "extents": [8]}
+    (compiler / "compiler/mode.json").write_text(json.dumps({"descriptor_contract": DESCRIPTOR_CONTRACT}))
+    output = tmp_path / "descriptor"
+    metadata = transform_scopes(source, compiler, Path(sys.executable), output,
+                                entry="application::step", capture_facts=facts)
+    assert metadata["scope_manifest"]["capture_descriptor_expectations"] == DESCRIPTOR_CONTRACT
+    assert json.loads((output / "scope-captures.json").read_text()) == facts
+    assert source.read_text() == SOURCE
+    assert apply_scope_sources(metadata, {str(source): source}) == [source]
+
+
+def test_native_report_needs_no_descriptor_enforcement_capability(fixture, tmp_path):
+    compiler, source, facts = fixture
+    facts = {**facts, "schema_version": 1, "participation": "serial"}
+    facts["captures"]["argument::a"]["expected_descriptor"] = {"lower_bounds": [-3], "extents": [8]}
+    (compiler / "compiler/mode.json").write_text(json.dumps({"native": True}))
+    metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "native-descriptor",
+                                entry="application::step", capture_facts=facts)
+    assert not metadata["changed"]
+    assert metadata["scope_manifest"]["scope_count"] == 0
+    assert apply_scope_sources(metadata, {str(source): source}) == []
+    assert source.read_text() == SOURCE
 
 
 @pytest.mark.parametrize("change", ["threads", "conditional", "missing_sites", "unknown_source", "bad_span", "unqualified", "bad_native_source"])

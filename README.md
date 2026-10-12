@@ -175,6 +175,10 @@ invent these facts. Optional `sources` hashes may use paths relative to `src/`,
 or absolute paths inside the cached original `src/` tree; hashes remain exact
 when paths are rebound to an isolated build copy. Optional
 `--scope-effect-contracts` passes a public compiler effect-contract file.
+Optional per-capture `expected_descriptor` bounds and extents require public
+compiler enforcement metadata before the adapter accepts generated scopes;
+older compilers that only echo the capture-facts hash are rejected. These
+descriptor checks grant no payload initialization authority.
 
 Collective source companions additionally require explicit capture schema 2:
 `participation.kind=omp_full_team`, `dispatch=qualified_companion`, a qualified
@@ -199,7 +203,12 @@ inspection is used.
 Independent compiler-approved roots can share one application build through
 `elmm_pipeline.local_adapter.compose_scope_packages(packages, destinations)`.
 Prepare each package with `transform_scopes` against pristine sources and use a
-separate artifact directory for each root. `destinations` maps original source
+separate artifact directory for each root. Optional `summary_cache=Path(...)`
+forwards a shared directory to the compiler's public `--summary-cache` option;
+the directory may be new. The compiler validates cached summaries against current
+source/configuration authority and treats corrupt records or write failures as
+cache misses. Cache-directory cleanup belongs to the caller. Omitting the option
+preserves the default behavior. `destinations` maps original source
 identities to the application copy. The helper validates every package before
 applying replacements, rejects conflicting replacements of the same file, and
 links exactly one matching common runtime. Shared build artifacts deduplicate

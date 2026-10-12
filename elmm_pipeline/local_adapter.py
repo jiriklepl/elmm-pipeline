@@ -187,6 +187,23 @@ def _check_collective_scope_report(manifest, requested):
             raise LocalAdapterError("Compiler collective scope report differs from original caller evidence")
 
 
+def _check_descriptor_expectation_contract(manifest, facts):
+    """Require public enforcement metadata before using requested descriptor guards."""
+    captures = facts.get("captures", {})
+    requested = isinstance(captures, dict) and any(
+        isinstance(fact, dict) and "expected_descriptor" in fact for fact in captures.values())
+    if not requested or not manifest["scope_count"]:
+        return
+    contract = manifest.get("capture_descriptor_expectations")
+    if (not isinstance(contract, dict) or type(contract.get("schema_version")) is not int
+            or contract["schema_version"] != 1
+            or contract.get("enforcement") != "original_descriptor_before_registration"
+            or contract.get("definition_authority") is not False
+            or contract.get("supported_consumers") != ["original_lexical", "original_module_companion"]
+            or contract.get("unsupported_consumers") != ["synthetic_owner", "qualified_collective_owner"]):
+        raise LocalAdapterError("Compiler source scopes lack versioned capture descriptor expectation enforcement")
+
+
 def _invoke(source_path, compiler_root, python, output_dir, entry, arguments, log_name):
     """Use only the selected snapshot's public CLI and JSON response."""
     source_path = Path(source_path).resolve(strict=True)
@@ -318,7 +335,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
                      entry: str, source_files=(), capture_facts: dict, gpu_options=None,
                      effect_contracts: Path | None = None,
                      numerical_sources: Path | None = None,
-                     analysis_sources: Path | None = None) -> dict:
+                     analysis_sources: Path | None = None,
+                     summary_cache: Path | None = None) -> dict:
     """Request approved source scopes; consume only versioned public artifacts.
 
     Capture facts belong to extraction/capture safety. This adapter does not
@@ -356,6 +374,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         arguments+=["--calibration-profile",str(Path(options["calibration_profile"]).resolve(strict=True))]
     if effect_contracts:
         arguments+=["--effect-contracts",str(Path(effect_contracts).resolve(strict=True))]
+    if summary_cache is not None:
+        arguments+=["--summary-cache",str(Path(summary_cache).resolve())]
     analysis=None
     if analysis_sources:
         analysis_sources=Path(analysis_sources).resolve(strict=True)
@@ -386,6 +406,7 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             or not isinstance(manifest.get("artifacts_sha256"),dict)
             or not isinstance(report.get("outputs"),list)):
         raise LocalAdapterError("Compiler source-scope report is missing versioned scope/capture/artifact facts")
+    _check_descriptor_expectation_contract(manifest, facts)
     if collective is not None:
         _check_collective_scope_report(manifest, collective)
     _scope_numerical_contracts(manifest)
