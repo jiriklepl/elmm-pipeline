@@ -12,16 +12,6 @@ from elmm_pipeline.gpu_validation import (
 
 
 class GPUValidationTests(unittest.TestCase):
-    def test_device_probe_alone_is_not_compute_execution(self):
-        region = {"entry": "outline_example", "transformation": {"bridge": {"proof_entry": "device_probe"}}}
-        log = "launch CUDA kernel device=0 name=device_probe\nELMM_PIPELINE_GPU_DEVICE outline_example NVIDIA\n"
-        self.assertFalse(gpu_activity(log, "loki", [region])["verified"])
-        result = gpu_activity(log + "launch CUDA kernel device=0 name=real_work\nupload CUDA data bytes=80\ndownload CUDA data bytes=40\n", "psyclone", [region])
-        self.assertTrue(result["verified"])
-        self.assertEqual((result["kernel_launches"], result["probe_kernel_launches"]), (1, 1))
-        self.assertEqual((result["upload_bytes"], result["download_bytes"]), (80, 40))
-        with self.assertRaisesRegex(ValueError, "in-device NVIDIA"):
-            gpu_activity("launch CUDA kernel name=real_work\n", "loki", [region])
 
     def test_local_trace_needs_a_successful_kernel_event(self):
         log = "FORT_RUNTIME upload bytes=80\nFORT_RUNTIME download bytes=40\n"

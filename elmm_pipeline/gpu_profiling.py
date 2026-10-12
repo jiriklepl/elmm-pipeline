@@ -1,10 +1,9 @@
 """Collect GPU execution evidence separately from application timing samples.
 
 Nsight Systems CUDA activity timestamps measure device kernel and copy work.
-OpenACC launch/data callbacks are deliberately not added to those totals: they
-describe the same work on the host and would double count it. Duration totals
-are sums of recorded activities, not elapsed critical-path time when work
-overlaps. Profiling wall time includes tracing and export overhead.
+Duration totals are sums of recorded CUDA activities, not elapsed
+critical-path time when work overlaps. Profiling wall time includes tracing
+and export overhead.
 """
 
 from __future__ import annotations
@@ -137,11 +136,11 @@ def profile_command(
         return metrics["reason"] + "\n", 0.0, metrics
     prefix = directory / ("gpu-profile-" + uuid.uuid4().hex[:8])
     log_path = prefix.with_suffix(".log")
-    command = [profiler, "profile", "--trace=cuda,openacc", "--sample=none", "--cpuctxsw=none",
+    command = [profiler, "profile", "--trace=cuda", "--sample=none", "--cpuctxsw=none",
                "--export=sqlite", "--force-overwrite=true", "--output=" + str(prefix), *map(str, binary_args)]
     (directory / "gpu-profile-command.json").write_text(
         json.dumps({"argv": command, "cwd": str(cwd.resolve()), "timeout_seconds": timeout,
-                    "tracing_environment": {key: env[key] for key in ("NVCOMPILER_ACC_NOTIFY", "FORT_RUNTIME_TRACE") if key in env}}, indent=2) + "\n",
+                    "tracing_environment": {key: env[key] for key in ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE") if key in env}}, indent=2) + "\n",
         encoding="utf-8")
     started = time.perf_counter()
     error = None

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
 from elmm_pipeline.local_adapter import (
     LocalAdapterError,
     apply_scope_sources,
@@ -125,7 +126,8 @@ manifest={'schema_version':1,'scope_count':0 if native else 1,
  'numerical_sources':sorted([{key:item[key] for key in ('procedure','path','entry','sha256')} for item in normalized['entries']],key=lambda item:item['procedure']),
  'capture_facts_sha256':digest(json.dumps(facts,sort_keys=True)),
  'artifacts_sha256':hashes,'sources':{} if native else {str(source):{'sha256':facts['sources'][str(source)],'replacement':'sources/replacement.f90'}},
- 'runtime':None if native else {'abi_version':1,'link_once':True,'source_sha256':runtime_hashes,
+ 'runtime':None if native else {'schema_version':1,'abi_version':1,'link_once':True,'source_sha256':runtime_hashes,
+  'sources':[{'path':'scoped_runtime.cu','language':'cuda'}],
   'runtime_id':digest('\n'.join(f'{name}:{value}' for name,value in sorted(runtime_hashes.items())))},
  'build_sources':[] if native else [{'path':'scoped_runtime.cu','language':'cuda','role':'common_runtime'},
  {'path':'sources/replacement.f90','language':'fortran','role':'original_source'}]}

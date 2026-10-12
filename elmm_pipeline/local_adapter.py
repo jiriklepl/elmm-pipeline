@@ -304,18 +304,12 @@ def transform(source_path: Path, compiler_root: Path, python: Path,
         if not (output_dir / filename).is_file():
             raise LocalAdapterError(f"Compiler did not emit required file: {output_dir / filename}")
     (output_dir / "compiler-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    suffix = hashlib.sha256(entry.encode()).hexdigest()[:16]
-    for filename in ("region.cpp", "region.cu", "interface.f90"):
-        path = output_dir / filename
-        if not path.is_file():
-            raise LocalAdapterError(f"Compiler did not emit required file: {path}")
-        text = path.read_text()
-        for name in ("cpp_start_hot", "cpp_finish_hot"):
-            text = re.sub(rf"\b{name}\b", f"{name}_{suffix}", text)
-        # Enclosing native OpenMP loops already distribute these calls.
-        if filename == "region.cpp" and (context or {}).get("nested_parallel"):
-            text = "\n".join(line for line in text.splitlines()
-                              if not re.match(r"\s*#\s*pragma\s+omp\b", line)) + "\n"
+    # Enclosing native OpenMP loops already distribute these calls. Symbol
+    # isolation belongs to the compiler; other emitted artifacts stay intact.
+    if (context or {}).get("nested_parallel"):
+        path = output_dir / "region.cpp"
+        text = "\n".join(line for line in path.read_text().splitlines()
+                          if not re.match(r"\s*#\s*pragma\s+omp\b", line)) + "\n"
         path.write_text(text)
     metadata = {
         "tool": "local", "target": "cpp", "entry": entry, "changed": True,
@@ -514,6 +508,7 @@ def apply_scope_sources(metadata: dict, destinations: dict[str, Path]) -> list[P
     partially applied transformation. Unchanged application sources stay under
     the build system's existing ownership.
     """
+    _scope_package_build(metadata)
     prepared = _prepare_scope_sources(metadata, destinations)
     for destination, content in prepared:
         destination.write_bytes(content)

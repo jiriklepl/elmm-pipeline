@@ -15,12 +15,9 @@ def trace_environment(environment, tool, *, enabled=False):
     result = dict(environment)
     for name in TRACE_VARIABLES:
         result.pop(name, None)
-    if enabled:
-        if tool == "local":
-            result["FORT_RUNTIME_TRACE"] = "1"
-            result["FORT_OFFLOAD_TRACE"] = "1"
-        elif tool in {"loki", "psyclone"}:
-            result["NVCOMPILER_ACC_NOTIFY"] = "31"
+    if enabled and tool == "local":
+        result["FORT_RUNTIME_TRACE"] = "1"
+        result["FORT_OFFLOAD_TRACE"] = "1"
     return result
 
 
@@ -286,20 +283,4 @@ def gpu_activity(log, tool, regions, *, scope_manifest=None, scope_packages=None
                 "source": "successful local CUDA runtime events",
                 "offload_decisions": offload_decisions(log, regions, scope_manifest=scope_manifest,
                                                       scope_packages=scope_packages)}
-    if tool not in {"loki", "psyclone"}:
-        raise ValueError("GPU trace tool must be local, loki or psyclone")
-    proof_names = {r["transformation"]["bridge"]["proof_entry"].lower() for r in regions}
-    launches = re.findall(r"(?m)^launch CUDA kernel[^\n]*", log)
-    probes = sum(any(name in line.lower() for name in proof_names) for line in launches)
-    entries = {r["entry"].lower() for r in regions}
-    proof_entries = set(re.findall(r"(?m)^\s*ELMM_PIPELINE_GPU_DEVICE\s+(\w+)\s+NVIDIA\s*$", log.lower(), re.IGNORECASE))
-    if proof_entries - entries:
-        raise ValueError("OpenACC device evidence contains an entry absent from the build manifest")
-    kernels = len(launches) - probes
-    if kernels and not proof_entries:
-        raise ValueError("OpenACC kernels launched without the required in-device NVIDIA proof")
-    return {"verified": kernels > 0 and bool(proof_entries), "kernel_launches": kernels,
-            "probe_kernel_launches": probes, "device_proof_entries": sorted(proof_entries),
-            "upload_bytes": sum(map(int, re.findall(r"(?m)^upload CUDA data[^\n]*\bbytes=(\d+)", log))),
-            "download_bytes": sum(map(int, re.findall(r"(?m)^download CUDA data[^\n]*\bbytes=(\d+)", log))),
-            "source": "NVIDIA OpenACC launch/transfer trace and acc_on_device proof"}
+    raise ValueError("GPU trace tool must be local")

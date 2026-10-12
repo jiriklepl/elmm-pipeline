@@ -25,13 +25,13 @@ from .instrumentation import execution_coverage
 from .report import render, summary
 from .validation import compare_vtk, read_vtk, validate_log
 
-TOOLS = ("baseline", "loki", "psyclone", "local")
+TOOLS = ("baseline", "local")
 
 
 def tool_list(value):
     values = list(dict.fromkeys(value.split(",")))
     if not values or any(v not in TOOLS for v in values):
-        raise argparse.ArgumentTypeError("Choose comma-separated baseline,loki,psyclone,local")
+        raise argparse.ArgumentTypeError("Choose comma-separated baseline,local")
     # Validation always requires a native reference.
     return ["baseline", *[v for v in values if v != "baseline"]]
 
@@ -118,7 +118,7 @@ def prepare_build(tool, args, setup_state, compilers):
     if tool != "baseline":
         key_data["target"] = args.target
         paths += [ROOT / "elmm_pipeline" / name for name in (
-            "adaptation.py", "discovery.py", "structural.py", "local_adapter.py", "recipes.py",
+            "adaptation.py", "discovery.py", "structural.py", "local_adapter.py",
             "instrumentation.py", "common.py")]
         if args.target == "gpu":
             paths += [ROOT / "elmm_pipeline" / name for name in ("gpu_discovery.py", "gpu_calls.py", "gpu_backend.py")]
@@ -224,10 +224,9 @@ def run(args):
     args.gpu_toolchain = None
     if args.target == "gpu":
         from .gpu_toolchain import discover_toolchain
-        languages = [name for name, enabled in (("cuda", "local" in args.tools),
-                     ("openacc", any(tool in args.tools for tool in ("loki", "psyclone")))) if enabled]
+        languages = ["cuda"] if "local" in args.tools else []
         args.gpu_toolchain = discover_toolchain(languages=languages, nvcc=args.nvcc,
-                                              nvfortran=args.nvfortran, cuda_host=args.cuda_host,
+                                              cuda_host=args.cuda_host,
                                               arch=args.gpu_arch)
         if not args.gpu_toolchain["device"]["available"]:
             raise ValueError("GPU execution is unavailable in this environment: " +
@@ -454,9 +453,8 @@ def main():
     select.add_argument("--config", help="Any configuration directory, or a .conf file in it")
     measure.add_argument("--tools", type=tool_list, default=list(TOOLS))
     measure.add_argument("--target", choices=("cpu", "gpu"), default="cpu",
-                         help="GPU uses local CUDA and Loki/PSyclone OpenACC; baseline remains CPU/OpenMP")
+                         help="GPU uses local CUDA; baseline remains CPU/OpenMP")
     measure.add_argument("--nvcc", help="CUDA compiler path")
-    measure.add_argument("--nvfortran", help="NVIDIA Fortran/OpenACC compiler path")
     measure.add_argument("--cuda-host", help="Host C++ compiler supported by nvcc")
     measure.add_argument("--gpu-arch", help="NVIDIA compute capability, e.g. 86; default queries GPU")
     measure.add_argument("--gpu-policy", choices=("always", "sections", "auto", "chunked", "hybrid"), default="always",

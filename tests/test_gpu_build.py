@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from elmm_pipeline.build import build
 from elmm_pipeline.gpu_toolchain import (
-    _architecture, _openacc_link_configuration, compile_gpu_sources,
+    _architecture, compile_gpu_sources,
     discover_toolchain, probe_gpu, validate_gpu_sources,
 )
 
@@ -215,25 +215,6 @@ class GPUConfigurationTests(unittest.TestCase):
                 with self.subTest(units=units), self.assertRaises(ValueError):
                     validate_gpu_sources(units)
 
-    def test_nvidia_link_recipe_preserves_runtime_but_excludes_nvidia_main(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            library = root / "compiler/lib"
-            library.mkdir(parents=True)
-            output = (f"/opt/nv/bin/tools/acclnk -nvidia /usr/bin/ld /usr/lib/crt1.o "
-                      f"-L{library} {root}/kernel.o -rpath {library} "
-                      f"{library}/acc_init_link_cuda.o {library}/acc_init_link_acc.o "
-                      f"-T {library}/nvhpc.ld --dynamic-list={library}/nvhpc.syms "
-                      "-lacchost -laccdevice -lnvf -lnvomp -lm -lgcc -lc /usr/lib/crtn.o\n")
-            result = subprocess.CompletedProcess([], 0, "", output)
-            with patch("elmm_pipeline.gpu_toolchain.subprocess.run", return_value=result):
-                config = _openacc_link_configuration(
-                    {"nvfortran": "/opt/nv/bin/nvfortran", "architecture": "86", "nvfortran_library_dir": str(library)},
-                    root / "kernel.o", root)
-            self.assertEqual(config["objects"], [str(library / "acc_init_link_cuda.o"), str(library / "acc_init_link_acc.o")])
-            self.assertEqual(config["libraries"], ["acchost", "accdevice", "nvf", "nvomp", "m"])
-            self.assertEqual(config["rpaths"], [str(library)])
-            self.assertIn("-Wl,-T," + str(library / "nvhpc.ld"), config["link_flags"])
 
     def test_cuda_compilation_records_selected_host_architecture_and_defines(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -293,19 +274,18 @@ class GPUConfigurationTests(unittest.TestCase):
 class NativeGPUInteropTests(unittest.TestCase):
     """Exercise the actual public build API, GNU modules, GPU runtime and device."""
 
-    def test_gnu_main_and_generated_wrapper_call_both_gpu_toolchains(self):
+    def test_gnu_main_and_generated_wrapper_call_cuda(self):
         python = Path(__file__).resolve().parents[1] / ".cache/envs/build/bin/python"
         compiler = shutil.which("gfortran-15") or shutil.which("gfortran")
         if not python.is_file() or not compiler:
             self.skipTest("Run pipeline setup and install GNU Fortran first")
-        for language in ("cuda", "openacc"):
-            with self.subTest(language=language), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                elmm, poisfft = root / "ELMM", root / "PoisFFT"
-                (elmm / "src").mkdir(parents=True)
-                (poisfft / "src").mkdir(parents=True)
-                (poisfft / "src/poisfft.f90").touch()
-                (elmm / "src/SConstruct").write_text("""import os
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            elmm, poisfft = root / "ELMM", root / "PoisFFT"
+            (elmm / "src").mkdir(parents=True)
+            (poisfft / "src").mkdir(parents=True)
+            (poisfft / "src/poisfft.f90").touch()
+            (elmm / "src/SConstruct").write_text("""import os
 env = Environment(ENV=os.environ, FORTRAN=os.environ['FC'], F90=os.environ['FC'], LINK=os.environ['FC'])
 target_dir = ARGUMENTS['dir']
 env.Append(FORTRANMODDIR=target_dir, F90PATH=[target_dir], F90FLAGS=['-fopenmp'], LIBS=['stdc++'], LINKFLAGS=['-fopenmp'])
@@ -313,7 +293,7 @@ objs = env.Object(target=target_dir + '/main', source='main.f90')
 t = env.Program(target=target_dir + '/ELMM', source=objs)
 Default(t)
 """)
-                (elmm / "src/main.f90").write_text("""program check
+            (elmm / "src/main.f90").write_text("""program check
 use host_wrapper
 use omp_lib
 implicit none
@@ -344,8 +324,8 @@ if(any(a/=6)) stop 1
 print *, 'GPU execution passed'
 end program
 """)
-                wrapper = root / "wrapper.f90"
-                wrapper.write_text("""module host_wrapper
+            wrapper = root / "wrapper.f90"
+            wrapper.write_text("""module host_wrapper
 use iso_c_binding
 interface
 subroutine gpu_add(a,n) bind(c)
@@ -361,9 +341,8 @@ call gpu_add(a,size(a))
 end subroutine
 end module
 """)
-                source = root / ("kernel.cu" if language == "cuda" else "kernel.f90")
-                if language == "cuda":
-                    source.write_text("""#include <cuda_runtime.h>
+            source = root / "kernel.cu"
+            source.write_text("""#include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
 static void check(cudaError_t code) { if (code != cudaSuccess) { std::fprintf(stderr, "%s\\n", cudaGetErrorString(code)); std::exit(1); } }
@@ -376,47 +355,18 @@ check(cudaMemcpy(a,d,n*sizeof(double),cudaMemcpyDeviceToHost)); check(cudaFree(d
 std::fprintf(stderr,"native CUDA kernel completed\\n");
 }
 """)
-                else:
-                    source.write_text("""subroutine gpu_add(a,n) bind(c)
-use iso_c_binding
-use openacc
-implicit none
-integer(c_int),value::n
-real(c_double)::a(n)
-integer::i,on_gpu
-call acc_set_device_type(acc_device_nvidia)
-on_gpu=0
-!$acc parallel loop copy(a,on_gpu)
-do i=1,n
-a(i)=a(i)+2
-if(i==1) on_gpu=acc_on_device(acc_device_nvidia)
-end do
-!$acc end parallel loop
-if(on_gpu==0) stop 2
-end subroutine
-""")
-                with patch.dict(os.environ, {"FC": compiler, "NVCOMPILER_ACC_NOTIFY": "3"}):
-                    binary = build(elmm, poisfft, root / "build", python, root / "lib", 4, 1, [],
-                                   extra_sources=[wrapper], patched_sources=[elmm / "src/main.f90"],
-                                   gpu_sources=[{"source": source, "language": language}], gpu_options={"architecture": "86"})
-                    run = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
-                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-                self.assertNotIn("Another OpenMP runtime", run.stderr)
-                self.assertIn("GPU execution passed", run.stdout)
-                self.assertIn("native CUDA kernel completed" if language == "cuda" else "launch CUDA kernel", run.stderr)
-                self.assertTrue((root / "build/host_wrapper.mod").is_file())
-                self.assertFalse((root / "build/gpu/nvfortran-modules/host_wrapper.mod").exists())
-                manifest = json.loads((root / "build/build-command.json").read_text())
-                self.assertNotIn("nvomp", manifest["host_runtime"]["gnu_openmp"])
-                if language == "openacc" and shutil.which("nsys"):
-                    from elmm_pipeline.gpu_profiling import profile_command
-                    profile_log, _, metrics = profile_command(
-                        [str(binary)], root / "profile", dict(os.environ, NVCOMPILER_ACC_NOTIFY="3"), root, timeout=60)
-                    self.assertTrue(metrics["available"], profile_log + str(metrics))
-                    self.assertIn("GPU execution passed", profile_log)
-                    self.assertNotIn("Another OpenMP runtime", profile_log)
-                    self.assertGreaterEqual(metrics["kernel_count"], 2)
-
+            with patch.dict(os.environ, {"FC": compiler}):
+                binary = build(elmm, poisfft, root / "build", python, root / "lib", 4, 1, [],
+                               extra_sources=[wrapper], patched_sources=[elmm / "src/main.f90"],
+                               gpu_sources=[{"source": source, "language": "cuda"}], gpu_options={"architecture": "86"})
+                run = subprocess.run([str(binary)], capture_output=True, text=True, check=False)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertNotIn("Another OpenMP runtime", run.stderr)
+            self.assertIn("GPU execution passed", run.stdout)
+            self.assertIn("native CUDA kernel completed", run.stderr)
+            self.assertTrue((root / "build/host_wrapper.mod").is_file())
+            manifest = json.loads((root / "build/build-command.json").read_text())
+            self.assertNotIn("nvomp", manifest["host_runtime"]["gnu_openmp"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 """Generic GPU contract tests; native runs require explicit GPU opt-in.
 
-ELMM_{LOCAL,LOKI,PSYCLONE}_PYTHON selects isolated interpreters.
+ELMM_LOCAL_PYTHON selects the compiler interpreter.
 ELMM_COMPILER_ROOT selects the local compiler. ELMM_GPU_TEST=1 enables native
 GPU compilation/execution and checks the runtime's transfer/kernel evidence.
 """
@@ -146,11 +146,11 @@ end program
 
 class GPUBackendTests(unittest.TestCase):
     def tools(self):
-        result = [(name, Path(os.environ[f"ELMM_{name.upper()}_PYTHON"])) for name in ("local", "loki", "psyclone")
+        result = [(name, Path(os.environ[f"ELMM_{name.upper()}_PYTHON"])) for name in ("local",)
                   if os.environ.get(f"ELMM_{name.upper()}_PYTHON")]
         result = [(name, python) for name, python in result if name != "local" or os.environ.get("ELMM_COMPILER_ROOT")]
         if not result:
-            self.skipTest("Set explicit tool Python paths (and ELMM_COMPILER_ROOT for local)")
+            self.skipTest("Set ELMM_LOCAL_PYTHON and ELMM_COMPILER_ROOT")
         return result
 
     def generate(self, directory, tool, python, source, entry="flux"):
@@ -158,7 +158,7 @@ class GPUBackendTests(unittest.TestCase):
         path = directory / "input.f90"
         path.write_text(source)
         result = transform(tool, path, python, directory / "generated", entry=entry,
-                           compiler_root=Path(os.environ["ELMM_COMPILER_ROOT"]) if tool == "local" else None)
+                           compiler_root=Path(os.environ["ELMM_COMPILER_ROOT"]))
         self.assertEqual(path.read_text(), source)
         self.assertEqual(result["extra_sources"], [result["generated_path"]])
         self.assertEqual(result["gpu"]["data_regions"], 1)
@@ -167,7 +167,7 @@ class GPUBackendTests(unittest.TestCase):
     def compile_run(self, directory, metadata, driver):
         from elmm_pipeline.gpu_toolchain import compile_gpu_sources
         options = {key: os.environ[env] for key, env in
-                   (("nvcc", "ELMM_NVCC"), ("nvfortran", "ELMM_NVFORTRAN"),
+                   (("nvcc", "ELMM_NVCC"),
                     ("cuda_host_cxx", "ELMM_CUDA_HOST_CXX"), ("architecture", "ELMM_GPU_ARCH")) if os.environ.get(env)}
         try:
             native = compile_gpu_sources(metadata["gpu_sources"], directory / "build", options=options)
@@ -183,7 +183,7 @@ class GPUBackendTests(unittest.TestCase):
         compiled = subprocess.run(command, cwd=directory, capture_output=True, text=True, check=False)
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
         executed = subprocess.run([str(directory / "check")], cwd=directory,
-                                  env=dict(os.environ, FORT_RUNTIME_TRACE="1", NVCOMPILER_ACC_NOTIFY="31"),
+                                  env=dict(os.environ, FORT_RUNTIME_TRACE="1"),
                                   capture_output=True, text=True, check=False)
         (directory / "execution.log").write_text(executed.stdout + executed.stderr)
         self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
@@ -196,29 +196,10 @@ class GPUBackendTests(unittest.TestCase):
                 with self.subTest(tool=tool, case=name), tempfile.TemporaryDirectory() as temporary:
                     result = self.generate(Path(temporary), tool, python, source)
                     generated = Path(result["gpu_sources"][0]["source"]).read_text().lower()
-                    if tool == "local":
-                        self.assertIn("__global__", generated)
-                        self.assertNotRegex(generated, r"\bcpp_start_hot\s*\(")
-                        self.assertNotRegex(generated, r"\bkernel_region_\d+_device\s*\(")
-                    else:
-                        self.assertIn("!$acc data", generated)
-                        self.assertIn("!$acc parallel", generated)
-                        self.assertEqual(generated.count("!$acc end data"), 1)
-                        self.assertIn("acc_on_device(acc_device_nvidia)", generated)
-                        self.assertIn("bind(c", generated)
-                        host = Path(result["generated_path"]).read_text().lower()
-                        self.assertIn("!$omp critical", host)
-                        self.assertIn("size(field, 1, kind=8)", host)
+                    self.assertIn("__global__", generated)
+                    self.assertNotRegex(generated, r"\bcpp_start_hot\s*\(")
+                    self.assertRegex(generated, r"static\s+__global__\s+void\s+kernel_region_\d+_device\s*\(")
 
-    def test_long_normalized_expressions_are_continued_for_nvfortran(self):
-        source = FLOAT64.replace("field(cell)*alpha", "(" + "+".join(["field(cell)"] * 90) + ")*alpha")
-        for tool, python in self.tools():
-            if tool == "local":
-                continue
-            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as temporary:
-                result = self.generate(Path(temporary), tool, python, source)
-                for path in (result["generated_path"], result["gpu_sources"][0]["source"]):
-                    self.assertLessEqual(max(map(len, Path(path).read_text().splitlines())), 120)
 
     def test_optional_markers_and_equal_loop_bounds_use_real_fusion(self):
         source = FLOAT64.replace("do cell=2,n-1", "do cell=1,n")
@@ -227,28 +208,7 @@ class GPUBackendTests(unittest.TestCase):
             with self.subTest(tool=tool), tempfile.TemporaryDirectory() as temporary:
                 result = self.generate(Path(temporary), tool, python, source)
                 self.assertEqual(result["gpu"]["kernel_regions"], 1)
-                if tool != "local":
-                    self.assertEqual(result["loop_fusions"], 1)
 
-    def test_openacc_observed_private_scalar_is_rejected(self):
-        source = FLOAT64.replace("integer, intent(in) :: n", "integer, intent(in) :: n\ninteger, intent(out) :: observed")
-        source = source.replace("subroutine flux(n, field, result)", "subroutine flux(n, field, result, observed)")
-        source = source.replace("end subroutine", "observed=cell\nend subroutine")
-        for tool, python in self.tools():
-            if tool == "local":
-                continue
-            with (self.subTest(tool=tool), tempfile.TemporaryDirectory() as temporary,
-                  self.assertRaisesRegex(RuntimeError, "observed outside")):
-                self.generate(Path(temporary), tool, python, source)
-
-    def test_openacc_recurrence_is_rejected(self):
-        source = FLOAT64.replace("field(cell)*alpha", "result(cell-1)*alpha").replace("do cell=1,n", "do cell=2,n")
-        for tool, python in self.tools():
-            if tool == "local":
-                continue
-            with (self.subTest(tool=tool), tempfile.TemporaryDirectory() as temporary,
-                  self.assertRaisesRegex(RuntimeError, "Unsafe GPU parallelism")):
-                self.generate(Path(temporary), tool, python, source)
 
     @unittest.skipUnless(os.environ.get("ELMM_GPU_TEST") == "1", "Set ELMM_GPU_TEST=1 for actual NVIDIA execution")
     def test_real_gpu_numeric_kinds_ranks_bounds_halos_and_fresh_inputs(self):
@@ -259,16 +219,9 @@ class GPUBackendTests(unittest.TestCase):
                     directory = Path(temporary)
                     metadata = self.generate(directory, tool, python, source)
                     result = self.compile_run(directory, metadata, driver)
-                    if tool == "local":
-                        self.assertEqual(result.stderr.count("FORT_RUNTIME upload bytes="), 4)
-                        self.assertEqual(result.stderr.count("FORT_RUNTIME download bytes="), 2)
-                        self.assertEqual(result.stderr.count("FORT_RUNTIME kernel"), 2 * metadata["gpu"]["kernel_regions"])
-                    else:
-                        self.assertEqual(result.stdout.count("ELMM_PIPELINE_GPU_DEVICE"), 1)
-                        trace = "\n".join(line for line in result.stderr.splitlines() if "_entry " in line)
-                        self.assertEqual(trace.count("upload CUDA data"), 4)
-                        self.assertEqual(trace.count("download CUDA data"), 2)
-                        self.assertEqual(trace.count("launch CUDA kernel"), 2 * metadata["gpu"]["kernel_regions"])
+                    self.assertEqual(result.stderr.count("FORT_RUNTIME upload bytes="), 4)
+                    self.assertEqual(result.stderr.count("FORT_RUNTIME download bytes="), 2)
+                    self.assertEqual(result.stderr.count("FORT_RUNTIME kernel"), 2 * metadata["gpu"]["kernel_regions"])
 
     @unittest.skipUnless(os.environ.get("ELMM_GPU_TEST") == "1", "Set ELMM_GPU_TEST=1 for actual NVIDIA execution")
     def test_output_only_partial_and_empty_regions_preserve_halos(self):

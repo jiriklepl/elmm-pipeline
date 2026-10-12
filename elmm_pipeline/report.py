@@ -16,7 +16,7 @@ def render(report):
     configuration = report["configuration"]
     settings = report["settings"]
     gpu = settings.get("target", "cpu") == "gpu"
-    execution = ("CPU/OpenMP baseline; local CUDA and Loki/PSyclone OpenACC offload"
+    execution = ("CPU/OpenMP baseline; local CUDA offload"
                  if gpu else "CPU/OpenMP")
     lines = ["# ELMM application benchmark", "",
              f"Configuration: `{configuration['source']}`; effective advection method **{configuration['advection_method']}**.", "",
@@ -73,7 +73,7 @@ def render(report):
         if devices:
             lines.extend(["GPU: " + "; ".join(str(device.get("name", device)) for device in devices) + ".", ""])
         lines.extend([
-            "GPU evidence comes from separate, numerically validated runs with runtime tracing. These runs and their profiler overhead are excluded from the timing samples above. OpenACC device probes are excluded from the computation-launch count. Nsight totals include the probes and sum device activity durations; they are not elapsed critical-path time and should not be subtracted from the unprofiled application timer.", "",
+            "GPU evidence comes from separate, numerically validated runs with runtime tracing. These runs and their profiler overhead are excluded from the timing samples above. Nsight totals sum device activity durations; they are not elapsed critical-path time and should not be subtracted from the unprofiled application timer.", "",
             "| Variant | GPU computation verified | Compute launches | Device kernel time (s) | Device transfer time (s) | Host→device (GiB) | Device→host (GiB) |",
             "|---|---|---:|---:|---:|---:|---:|"])
         for name, variant in report["variants"].items():

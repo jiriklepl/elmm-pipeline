@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from elmm_pipeline.local_adapter import (
     LocalAdapterError,
     apply_scope_sources,
@@ -255,7 +256,7 @@ def test_modified_replacement_is_rejected_before_any_edit(independent,tmp_path):
     replacement.write_text(replacement.read_text()+"! modified\n")
     destination=tmp_path/"application.f90"
     destination.write_text(PROGRAM)
-    with pytest.raises(LocalAdapterError,match="Approved source replacement changed"):
+    with pytest.raises(LocalAdapterError,match="Approved scope artifact changed"):
         apply_scope_sources(metadata,{str(source):destination})
     assert destination.read_text()==PROGRAM
 

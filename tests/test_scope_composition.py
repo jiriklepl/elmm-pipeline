@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from elmm_pipeline.local_adapter import LocalAdapterError, compose_scope_packages
+from elmm_pipeline.local_adapter import (
+    LocalAdapterError,
+    apply_scope_sources,
+    compose_scope_packages,
+)
 
 
 def numerical_contract():
@@ -310,10 +314,59 @@ def test_duplicate_runtime_declaration_cannot_hide_additional_requirements(tmp_p
 
 
 def test_single_package_apply_checks_runtime_required_metadata_first(tmp_path, sources):
-    from elmm_pipeline.local_adapter import apply_scope_sources
     first = package(tmp_path, sources, "one")
     first["scope_manifest"]["runtime"]["sources"][0]["numerical_contract"] = numerical_contract()
     save(first)
     with pytest.raises(LocalAdapterError, match="runtime numerical build contract differs"):
         apply_scope_sources(first, sources[1])
     unchanged(sources)
+
+
+def test_single_package_applies_approved_replacement_and_keeps_other_sources(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    original = next(path for path in sources[0] if Path(path).name == "producer.f90")
+    destination = sources[1][original]
+    assert apply_scope_sources(metadata, sources[1]) == [destination]
+    assert destination.read_text() == "! approved replacement one\n"
+    assert digest(Path(original).read_bytes()) == sources[0][original]
+    assert all(digest(path.read_bytes()) == sources[0][source]
+               for source, path in sources[1].items() if source != original)
+
+
+@pytest.mark.parametrize("path", ["runtime.h", "runtime.cu", "entries/one.cu", "sources/one.f90"])
+def test_single_package_stale_artifact_rejects_before_source_changes(tmp_path, sources, path):
+    metadata = package(tmp_path, sources, "one")
+    (Path(metadata["artifact_root"]) / path).write_text("! changed artifact\n")
+    with pytest.raises(LocalAdapterError, match="Approved scope artifact changed"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+def test_single_package_saved_manifest_mismatch_rejects_before_source_changes(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    metadata["scope_manifest"]["entry"] = "different"
+    with pytest.raises(LocalAdapterError, match="Saved compiler scope manifest differs"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+@pytest.mark.parametrize("failure", ["replacement", "destination"])
+def test_single_package_later_replacement_failure_never_partially_applies(tmp_path, sources, failure):
+    metadata = package(tmp_path, sources, "one")
+    manifest = metadata["scope_manifest"]
+    consumer = next(path for path in sources[0] if Path(path).name == "consumer.f90")
+    replacement = "sources/consumer.f90"
+    replacement_path = Path(metadata["artifact_root"]) / replacement
+    replacement_path.write_bytes(b"! approved consumer replacement\n")
+    manifest["artifacts_sha256"][replacement] = digest(replacement_path.read_bytes())
+    manifest["sources"][consumer] = {"sha256": sources[0][consumer], "replacement": replacement}
+    manifest["build_sources"].append({"path": replacement, "language": "fortran", "role": "original_source"})
+    save(metadata)
+    if failure == "replacement":
+        replacement_path.write_text("! stale second replacement\n")
+    else:
+        sources[1][consumer].write_text("! independently changed consumer\n")
+    before = {source: path.read_bytes() for source, path in sources[1].items()}
+    with pytest.raises(LocalAdapterError, match="changed"):
+        apply_scope_sources(metadata, sources[1])
+    assert all(path.read_bytes() == before[source] for source, path in sources[1].items())

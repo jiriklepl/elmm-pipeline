@@ -1,6 +1,6 @@
 """Opt-in public discovery/build regression for GPU loop grouping.
 
-Set ELMM_GPU_NATIVE_TESTS=1 after pipeline setup. ELMM_{TOOL}_PYTHON,
+Set ELMM_GPU_NATIVE_TESTS=1 after pipeline setup. ELMM_LOCAL_PYTHON,
 ELMM_BUILD_PYTHON and ELMM_COMPILER_ROOT can override the private environments.
 ELMM_GPU_TEST_ARTIFACTS retains generated sources, manifests and execution logs.
 """
@@ -129,7 +129,7 @@ class GroupedGPUBackendTests(unittest.TestCase):
         self.assertTrue(self.host_compiler, "Install GNU Fortran before enabling native tests")
         self.assertTrue(self.build_python.is_file(), "Run pipeline setup before enabling native tests")
         self.gpu_options = {key: os.environ[variable] for key, variable in (
-            ("nvcc", "ELMM_NVCC"), ("nvfortran", "ELMM_NVFORTRAN"),
+            ("nvcc", "ELMM_NVCC"),
             ("cuda_host_cxx", "ELMM_CUDA_HOST_CXX"), ("architecture", "ELMM_GPU_ARCH"))
             if os.environ.get(variable)}
         if os.environ.get("ELMM_GPU_TEST_ARTIFACTS"):
@@ -177,20 +177,8 @@ class GroupedGPUBackendTests(unittest.TestCase):
         return root, binary, metadata
 
     def assert_transfers(self, log, tool, metadata):
-        if tool == "local":
-            uploads = [int(value) for value in re.findall(r"(?m)^FORT_RUNTIME upload bytes=(\d+)", log)]
-            downloads = [int(value) for value in re.findall(r"(?m)^FORT_RUNTIME download bytes=(\d+)", log)]
-        else:
-            entry = metadata["regions"][0]["transformation"]["bridge"]["c_entry"]
-            # Exclude the separate four-byte acc_on_device proof scalar.
-            lines = [line for line in log.splitlines() if f"function={entry} " in line]
-            uploads = [int(re.search(r"\bbytes=(\d+)", line)[1]) for line in lines
-                       if line.startswith("upload CUDA data")]
-            downloads = [int(re.search(r"\bbytes=(\d+)", line)[1]) for line in lines
-                         if line.startswith("download CUDA data")]
-            shared_uploads = [line for line in lines
-                              if line.startswith("upload CUDA data") and "variable=field(" in line]
-            self.assertEqual(len(shared_uploads), 2, "The shared input must be uploaded once per call")
+        uploads = [int(value) for value in re.findall(r"(?m)^FORT_RUNTIME upload bytes=(\d+)", log)]
+        downloads = [int(value) for value in re.findall(r"(?m)^FORT_RUNTIME download bytes=(\d+)", log)]
         field_bytes = east_bytes = 23 * 11 * 8
         north_bytes = 26 * 13 * 8
         self.assertCountEqual(uploads, [field_bytes, east_bytes, north_bytes] * 2)
@@ -198,8 +186,8 @@ class GroupedGPUBackendTests(unittest.TestCase):
         self.assertEqual(sum(uploads), 2 * (field_bytes + east_bytes + north_bytes))
         self.assertEqual(sum(downloads), 2 * (east_bytes + north_bytes))
 
-    def test_adjacent_unequal_domains_share_transfers_on_all_backends(self):
-        for tool in ("local", "loki", "psyclone"):
+    def test_adjacent_unequal_domains_share_transfers(self):
+        for tool in ("local",):
             with self.subTest(tool=tool):
                 root, binary, metadata = self.generate(tool)
                 for scenario in ("regular", "empty_first", "empty_both"):

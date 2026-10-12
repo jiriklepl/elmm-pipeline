@@ -37,7 +37,7 @@ python3 /path/to/elmm-pipeline/pipeline.py run \
 The compiler checkout must contain `compiler/__main__.py`. Setup snapshots it in
 `.cache/repos/local-compiler`, including its content hash and Git dirty state.
 Subsequent runs use that snapshot. Repeat setup with the explicit source path to
-update it. `--tools baseline,loki,psyclone` omits this dependency; the same option
+update it. `--tools baseline` omits this dependency; the same option
 must be used at setup and run. Every comparison includes the native baseline.
 
 The complete configuration directory and relative assets are copied. Each run
@@ -64,21 +64,18 @@ analysis cannot silently describe a different program from the native build.
 ### GPU execution
 
 `--target cpu` remains the default. Select `--target gpu` to compare the original
-GNU Fortran/OpenMP application with generated local CUDA and Loki/PSyclone
-OpenACC variants. The host application and interface modules still compile with
-GNU Fortran; `nvcc` compiles CUDA, and NVIDIA HPC SDK `nvfortran` compiles OpenACC.
-The compiler boundary uses C bindings with explicit array extents, so NVIDIA
-Fortran modules and descriptors do not enter the GNU host build.
+GNU Fortran/OpenMP application with generated local CUDA. The host application
+and interface modules still compile with GNU Fortran; `nvcc` compiles CUDA.
+The compiler boundary uses C bindings with explicit array extents.
 
-GPU runs additionally require a visible NVIDIA GPU/driver, CUDA for the local
-backend, and NVIDIA HPC SDK for Loki/PSyclone. Compilers are discovered on PATH
-or in standard system installations, with explicit overrides available:
+GPU runs additionally require a visible NVIDIA GPU/driver and CUDA. Compilers
+are discovered on PATH or in standard system installations, with explicit
+overrides available:
 
 ```sh
 python3 pipeline.py run --target gpu --example channel --steps 10 \
   --threads 4 --repeats 3 --warmups 1 --fc gfortran-15 \
   --nvcc /usr/local/cuda/bin/nvcc --cuda-host g++-14 \
-  --nvfortran /opt/nvidia/hpc_sdk/Linux_x86_64/26.1/compilers/bin/nvfortran \
   --gpu-arch 86
 ```
 
@@ -107,8 +104,7 @@ its own hardware validation and calibration.
 The local backend accepts `--gpu-policy always|sections|auto|chunked|hybrid`.
 `always` preserves the existing forced-offload path. The other policies use the
 selected compiler's public placement and transfer implementation; unsupported
-cases can execute the original native region. Loki and PSyclone currently use
-`always` only.
+cases can execute the original native region.
 
 Create reusable calibration in the explicit compiler checkout, then supply it
 to the pipeline. Calibration measures hardware without an application workload:
@@ -362,8 +358,6 @@ The compiler owns numerical legality, per-kernel independence, fusion, and the
 ordered execution/memory plan. Candidate checks participate in grouping, so a
 rejected group can still leave eligible smaller regions. The pipeline retains
 source-span, capture-lifetime, native OpenMP dispatch, and interface checks.
-Loki and PSyclone retain the conservative discovery path, which does not require
-the local compiler.
 
 Local GPU discovery also proposes adjacent direct calls to leaf module
 subroutines from a serial caller. Helpers remain calls in the normalized source;
@@ -400,8 +394,6 @@ Loops required by existing worksharing/collapse directives are preserved.
 | Backend | CPU target | GPU target |
 |---|---|---|
 | baseline | Original application source. | Same original GNU Fortran/OpenMP application. |
-| Loki | Eligible helper inlining, invariant scalar motion, and checked loop fusion using Loki's IR/transforms. | OpenACC parallel loops and an enclosing data region generated through Loki's IR. |
-| PSyclone | Eligible helper inlining, scalar motion, and loop fusion with dependence checks enabled. | OpenACC parallel loops and an enclosing data region generated through PSyclone's IR. |
 | local | General compiler lowering, dependence checks, optimization, and C++ generation with a Fortran interface. | CUDA kernels and a shared per-entry device allocation plan. |
 
 GPU discovery can lift a proved strip-mined loop nest into its complete logical
@@ -432,11 +424,10 @@ preserves dependencies by keeping kernels ordered when fusion is unsafe. One inv
 storage across those kernels. The original source remains the fallback for
 unsupported dynamic calling contexts.
 
-Backends report actual pass activity. Parsing/printing a module is not counted as
-optimization. A single outlined loop can require no additional Loki/PSyclone
-transformation; the report distinguishes discovery, outlining, backend changes,
-and executed regions. Generated C++ is serial within a preserved native parallel
-context to avoid creating a team per tile.
+Reports distinguish discovery, outlining, code generation and executed regions.
+Parsing or printing a module does not establish an optimization. Generated C++
+is serial within a preserved native parallel context to avoid creating a team
+per tile.
 Inside such contexts, the local backend also requires proved contiguous array
 captures: its interface must not create per-thread array temporaries whose
 copyback could overwrite another thread's updates.
@@ -475,9 +466,7 @@ output; the baseline has no coverage instrumentation.
 coverage unverified. This control is separate from optional `!kernel` hints.
 
 GPU runs first execute a separate, numerically checked `gpu-validation` case.
-Local CUDA uses `FORT_RUNTIME_TRACE=1`; OpenACC uses
-`NVCOMPILER_ACC_NOTIFY=31` plus an in-device NVIDIA check. Reports distinguish
-computation launches from OpenACC proof kernels. An offload variant needs actual
+Local CUDA uses `FORT_RUNTIME_TRACE=1`. An offload variant needs actual
 computation on the GPU to claim GPU execution; intentional native policy decisions
 are reported separately and remain valid. Compilation or a host entry
 marker alone is insufficient, including with `--no-coverage`.
@@ -524,30 +513,33 @@ The compiler and this pipeline can live in separate repositories. The pipeline
 never imports compiler implementation modules: it invokes the explicitly chosen
 snapshot through `python -m compiler` and consumes its JSON decisions and emitted
 sources. The compiler runs independently on standalone entries and has no
-dependency on this pipeline, ELMM, Loki, or PSyclone. Normal generation with
+dependency on this pipeline or ELMM. Normal generation with
 `--json` reports the execution/memory plans and actual parallel-region count;
 the adapter uses that report instead of inferring kernel counts from CUDA text.
+Single-package source replacement and package composition validate the saved
+public manifest, build/runtime roles and all declared artifacts before modifying
+application sources.
 
 Pinned repository URLs/revisions are in `dependencies.json`. Private Python
-requirements pin the tool environments, including older versions required by
-Loki and PSyclone. After changing a repository pin, repeat setup; it fetches and
-checks out the requested revision only in a clean cache and preserves local
-edits. Builds are cached by source, compiler,
-backend, selection, and adapter identity. Upstream sources retain their licenses.
+requirements pin the build and local compiler environments. After changing a
+repository pin, repeat setup; it fetches and checks out the requested revision
+only in a clean cache and preserves local edits. Builds are cached by source,
+compiler, backend, selection, and adapter identity. Upstream sources retain
+their licenses.
 
 ```sh
 python3 -m pytest -q tests
 ```
 
-Parser tests require fparser in the test interpreter; backend integration tests
-use explicit `ELMM_LOKI_PYTHON` and `ELMM_PSYCLONE_PYTHON` paths. End-to-end generic
-adaptation tests additionally use `ELMM_TEST_COMPILER` and `ELMM_TEST_PYTHON`.
+Parser tests require fparser in the test interpreter. Backend integration tests
+use explicit `ELMM_LOCAL_PYTHON` and `ELMM_COMPILER_ROOT` paths. End-to-end generic
+adaptation tests use `ELMM_TEST_COMPILER` and `ELMM_TEST_PYTHON`.
 Tests exercise unrelated unannotated programs, renamed symbols, varying ranks
 and lower bounds, preserved native context, actual numerical equivalence, and
 rejection of unsafe transformations.
 
 `ELMM_GPU_NATIVE_TESTS=1 python3 -m unittest tests.test_gpu_build -v` additionally
-builds and executes small GNU-host CUDA/OpenACC interoperability tests on a
+builds and executes small GNU-host CUDA interoperability tests on a
 visible GPU. GPU tooling and profiler parsers have separate tests that run
 without GPU access.
 
@@ -680,8 +672,7 @@ and current plots. A sealed snapshot is evidence, not automatic promotion.
 
 Unmeasured construction has separate resource controls. `pipeline.py run --jobs`
 limits independent CUDA compilations and the subsequent SCons build. Those
-phases run in sequence; OpenACC compilation remains serial because units can
-share Fortran module outputs. This does not parallelize source analysis. `--timeout`
+phases run in sequence. This does not parallelize source analysis. `--timeout`
 limits each application process, not generation or compilation. Source generation
 currently runs serially and has no internal worker-count option; select its
 process affinity and deadline explicitly when launching it. Builds and generation

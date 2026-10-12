@@ -190,12 +190,10 @@ end module
         compilers = (shutil.which(os.environ.get("FC", "gfortran")), shutil.which("g++"))
         if not all(compilers):
             self.skipTest("GNU Fortran and C++ required")
-        configured = {name: os.environ.get(variable) for name, variable in (
-            ("loki", "ELMM_LOKI_PYTHON"), ("psyclone", "ELMM_PSYCLONE_PYTHON"),
-            ("local", "ELMM_TEST_PYTHON"))}
+        configured = {"local": os.environ.get("ELMM_TEST_PYTHON")}
         compiler_root = os.environ.get("ELMM_TEST_COMPILER")
         if not all(configured.values()) or not compiler_root:
-            self.skipTest("Set all three explicit backend Python paths and ELMM_TEST_COMPILER")
+            self.skipTest("Set ELMM_TEST_PYTHON and ELMM_TEST_COMPILER")
         for tool, python in configured.items():
             with self.subTest(tool=tool), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)

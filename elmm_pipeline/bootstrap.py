@@ -33,6 +33,8 @@ def ensure_repo(name, spec):
 
 
 def ensure_environment(tool):
+    if tool != "local":
+        raise ValueError(f"Unknown transformation tool: {tool}; expected local")
     destination = ROOT / ".cache" / "envs" / tool
     python = destination / "bin" / "python"
     requirements = ROOT / f"requirements-{tool}.txt"
@@ -48,12 +50,14 @@ def ensure_environment(tool):
 
 
 def setup(tools, local_source=None):
+    if any(tool not in {"baseline", "local"} for tool in tools):
+        raise ValueError("Setup tools must be baseline or local")
     pins = json.loads((ROOT / "dependencies.json").read_text())
     for name, spec in pins.items():
         print(f"Fetching/verifying {name}", flush=True)
         ensure_repo(name, spec)
     print("Checking native build dependencies", flush=True)
-    native = bootstrap_native(ROOT)
+    bootstrap_native(ROOT)
     if "local" in tools:
         destination = ROOT / ".cache" / "repos" / "local-compiler"
         if local_source:

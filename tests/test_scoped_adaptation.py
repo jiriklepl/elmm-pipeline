@@ -106,7 +106,7 @@ def test_invalid_scoped_options_do_not_change_source(tmp_path, change):
     if change == "target":
         kwargs["target"] = "cpu"
     elif change == "tool":
-        tool = "loki"
+        tool = "unsupported"
     elif change == "filters":
         kwargs["include"] = ["*::step"]
     elif change == "missing_facts":

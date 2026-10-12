@@ -28,8 +28,7 @@ def sources(tmp_path, languages):
 
 def toolchain():
     return {"architecture": "90", "nvcc": "/mock/nvcc", "cuda_host_cxx": "/mock/c++",
-            "cuda_library_dir": "/mock/cuda/lib", "nvfortran": "/mock/nvfortran",
-            "nvfortran_library_dir": "/mock/nvhpc/lib"}
+            "cuda_library_dir": "/mock/cuda/lib"}
 
 
 def position(command):
@@ -178,46 +177,6 @@ def test_failed_unit_retains_diagnostics_without_runtime_discovery(tmp_path, fai
     assert saved["objects"] == []
 
 
-def test_openacc_stays_serial_in_source_order_and_separates_cuda_batches(tmp_path):
-    units = sources(tmp_path, ["cuda", "cuda", "openacc", "openacc", "cuda", "cuda"])
-    barrier = threading.Barrier(2)
-    lock = threading.Lock()
-    active = 0
-    completed = []
-
-    def compiled(command, **kwargs):
-        nonlocal active
-        index = position(command)
-        with lock:
-            active += 1
-            if command[0] == "/mock/nvfortran":
-                assert active == 1
-                assert completed == ([0, 1] if index == 2 else [0, 1, 2])
-        if command[0] == "/mock/nvcc":
-            barrier.wait(timeout=5)
-        Path(command[command.index("-o") + 1]).touch()
-        with lock:
-            completed.append(index)
-            if index in {0, 1} and len(completed) == 2:
-                completed.sort()
-            active -= 1
-        return subprocess.CompletedProcess(command, 0)
-
-    runtime = {"objects": [], "library_dirs": [], "libraries": [], "rpaths": [],
-               "link_flags": [], "runtime_discovery_argv": ["mock", "-dryrun"]}
-
-    def discover(*args):
-        assert active == 0
-        assert set(completed) == set(range(6))
-        return runtime
-
-    with patch("elmm_pipeline.gpu_toolchain.subprocess.run", side_effect=compiled), \
-            patch("elmm_pipeline.gpu_toolchain.subprocess.check_output", return_value="libstdc++.so"), \
-            patch("elmm_pipeline.gpu_toolchain._openacc_link_configuration", side_effect=discover):
-        result = compile_gpu_sources(units, tmp_path / "build", toolchain=toolchain(), jobs=3)
-    assert [position(command) for command in result["commands"]] == list(range(6))
-    acc_commands = result["commands"][2:4]
-    assert acc_commands[0][acc_commands[0].index("-module") + 1] == acc_commands[1][acc_commands[1].index("-module") + 1]
 
 
 @pytest.mark.parametrize("jobs", [0, -1, True, 1.5])

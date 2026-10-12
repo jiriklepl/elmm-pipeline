@@ -114,10 +114,10 @@ def test_hidden_compiler_options_cannot_override_public_requirements(source, tmp
     assert not (tmp_path / "build").exists()
 
 
-def test_contract_does_not_claim_openacc_support(tmp_path):
+def test_contract_does_not_admit_an_unsupported_gpu_language(tmp_path):
     source = tmp_path / "kernel.f90"
     source.touch()
-    with pytest.raises(ValueError, match="require a CUDA source"):
+    with pytest.raises(ValueError, match="unsupported GPU source"):
         validate_gpu_sources([{"source": source, "language": "openacc", "numerical_contract": contract()}])
 
 

@@ -193,8 +193,8 @@ def build(
     build file. Fortran module dependencies are scanned by SCons; an explicit
     dependency also protects every changed native source's generated interface
     modules. Matching uses source paths, so upstream object names can differ.
-    Optional CUDA/OpenACC units are compiled separately and linked into the GNU
-    host through C entry points; their NVIDIA module files remain isolated.
+    Optional CUDA units are compiled separately and linked into the GNU
+    host through C entry points.
     """
     if jobs < 1 or threads < 1:
         raise ValueError("jobs and threads must be positive")
@@ -264,10 +264,7 @@ def build(
     # NVHPC ships libgomp.so -> libnvomp.so. Selecting that alias through an
     # inherited -L path replaces GNU host OpenMP with NVIDIA's compatibility
     # layer. Resolve GNU's own runtime explicitly for every build, including
-    # the baseline. With OpenACC, NVIDIA's acc_* API must precede GNU libgomp's
-    # competing acc_* API, while GNU's GOMP_* API must precede libnvomp.
-    openacc_library = gpu_build.get("openacc_library") if gpu_build else None
-    openacc_notify_library = gpu_build.get("openacc_notify_library") if gpu_build else None
+    # the baseline.
     cuda_stdcxx_library = gpu_build.get("cuda_stdcxx_library") if gpu_build else None
     cuda_stdcxx_link_dir = gpu_build.get("cuda_stdcxx_link_dir") if gpu_build else None
     cuda_host_cxx = None
@@ -289,8 +286,6 @@ def build(
         "pipeline_gomp = os.path.realpath(pipeline_gomp_link)",
         "if 'nvomp' in os.path.basename(pipeline_gomp):",
         "  raise RuntimeError('GNU OpenMP runtime lookup resolved NVIDIA libnvomp; fix the GNU compiler configuration')",
-        f"pipeline_openacc = {openacc_library!r}",
-        f"pipeline_openacc_notify = {openacc_notify_library!r}",
         f"pipeline_cuda_stdcxx = {cuda_stdcxx_library!r}",
         f"pipeline_cuda_link_dir = {cuda_stdcxx_link_dir!r}",
         f"pipeline_cuda_cxx = {cuda_host_cxx!r}",
@@ -302,11 +297,8 @@ def build(
         "      pipeline_cuda_link_dir = os.path.dirname(link_target)",
         "  except Exception:",
         "    pass",
-        "pipeline_runtime_prefix = ([pipeline_openacc, pipeline_openacc_notify] if pipeline_openacc else []) + [pipeline_gomp]",
-        "pipeline_runtime_flags = []",
-        "if pipeline_openacc:",
-        "  pipeline_runtime_flags = [env.File(pipeline_openacc), '-Wl,--push-state,--no-as-needed', env.File(pipeline_openacc_notify), '-Wl,--pop-state']",
-        "pipeline_runtime_flags += [env.File(pipeline_gomp)]",
+        "pipeline_runtime_prefix = [pipeline_gomp]",
+        "pipeline_runtime_flags = [env.File(pipeline_gomp)]",
         "if pipeline_cuda_stdcxx:",
         "  pipeline_runtime_prefix.append(pipeline_cuda_stdcxx)",
         "  pipeline_stdcxx_dir = os.path.dirname(pipeline_cuda_stdcxx)",

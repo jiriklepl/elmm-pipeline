@@ -1,7 +1,7 @@
-"""Discover and compile CUDA/OpenACC objects for a GNU Fortran host program.
+"""Discover and compile CUDA objects for a GNU Fortran host program.
 
 GPU entry points must use the C ABI (BIND(C), explicit-shape or assumed-size
-arrays). NVIDIA Fortran module files and descriptors never enter the GNU build.
+arrays). Generated CUDA objects link into the original GNU host build.
 Compiler installations are discovered on PATH or in normal system locations;
 no sibling checkout or globally installed Python package is used.
 """
@@ -36,7 +36,7 @@ except ImportError:
 
 class GPUSource(TypedDict):
     source: str | Path
-    language: Literal["cuda", "openacc"]
+    language: Literal["cuda"]
     tool: str
     numerical_contract: NotRequired[dict]
 
@@ -149,10 +149,9 @@ def _cuda_runtime_directory(cuda_root: Path, compiler: str, explicit: str | Path
 
 def discover_toolchain(
     options: dict | None = None,
-    languages: tuple[str, ...] | list[str] = ("cuda", "openacc"),
+    languages: tuple[str, ...] | list[str] = ("cuda",),
     *,
     nvcc: str | Path | None = None,
-    nvfortran: str | Path | None = None,
     cuda_host: str | Path | None = None,
     arch: str | None = None,
     cuda_runtime_dir: str | Path | None = None,
@@ -166,7 +165,7 @@ def discover_toolchain(
     directory; otherwise the selected CUDA host compiler determines the target.
     """
     options = dict(options or {})
-    unsupported = set(languages) - {"cuda", "openacc"}
+    unsupported = set(languages) - {"cuda"}
     if unsupported:
         raise ValueError(f"Unsupported GPU languages: {sorted(unsupported)}")
     device = probe_gpu(options.get("nvidia_smi"))
@@ -191,13 +190,6 @@ def discover_toolchain(
         runtime_dir, discovery = _cuda_runtime_directory(cuda_root, config["cuda_host_cxx"], override)
         config["cuda_library_dir"] = str(runtime_dir)
         config["cuda_runtime_discovery"] = discovery
-    if "openacc" in languages:
-        installations = sorted(Path("/opt/nvidia/hpc_sdk").glob("*/*/compilers/bin/nvfortran"),
-                               key=lambda path: tuple(int(number) for number in re.findall(r"\d+", path.parts[-4])), reverse=True)
-        config["nvfortran"] = _executable(nvfortran or options.get("nvfortran") or os.environ.get("NVFORTRAN"),
-                                           ["nvfortran"], installations)
-        config["versions"]["nvfortran"] = _version(config["nvfortran"])
-        config["nvfortran_library_dir"] = str(Path(config["nvfortran"]).parent.parent / "lib")
     return config
 
 
@@ -209,7 +201,7 @@ def validate_gpu_sources(sources: list[GPUSource] | list[dict]) -> list[dict]:
             raise ValueError("GPU sources must be descriptors containing source and language")
         source = Path(entry["source"]).resolve()
         language = entry["language"]
-        suffixes = {"cuda": {".cu"}, "openacc": {".f90", ".f"}}
+        suffixes = {"cuda": {".cu"}}
         if language not in suffixes or source.suffix.lower() not in suffixes[language] or not source.is_file():
             raise ValueError(f"Missing or unsupported GPU source ({language}): {source}")
         if source in seen:
@@ -226,50 +218,6 @@ def validate_gpu_sources(sources: list[GPUSource] | list[dict]) -> list[dict]:
     return normalized
 
 
-def _openacc_link_configuration(config: dict, object_path: Path, directory: Path) -> dict:
-    """Read the installed NVIDIA driver's link recipe, excluding its main/CRT.
-
-    ``nordc`` embeds complete device images in each object, avoiding a second
-    compiler's device-link step. Compiler-owned initialization objects remain
-    necessary to select the GPU runtime. The final link is always GNU Fortran.
-    """
-    command = [config["nvfortran"], "-dryrun", "-Mnomain", "-acc=gpu",
-               f"-gpu=cc{config['architecture']},nordc", str(object_path), "-o", str(directory / "link-probe")]
-    result = subprocess.run(command, text=True, capture_output=True, check=False)
-    output = result.stdout + result.stderr
-    (directory / "nvfortran-link-dryrun.log").write_text(output, encoding="utf-8")
-    if result.returncode:
-        raise RuntimeError(f"NVFortran runtime discovery failed; inspect {directory / 'nvfortran-link-dryrun.log'}")
-    lines = [shlex.split(line) for line in output.splitlines() if " -lacchost" in line]
-    if len(lines) != 1:
-        raise RuntimeError("NVFortran did not report an unambiguous OpenACC runtime link recipe")
-    tokens = lines[0]
-    compiler_lib = Path(config["nvfortran_library_dir"]).resolve()
-    library_dirs = []
-    libraries = []
-    objects = []
-    rpaths = []
-    link_flags = []
-    for index, token in enumerate(tokens):
-        if token.startswith("-L") and len(token) > 2:
-            library_dirs.append(token[2:])
-        elif token.startswith("-l") and len(token) > 2 and token not in {"-lgcc", "-lgcc_s", "-lc"}:
-            libraries.append(token[2:])
-        elif token == "-rpath" and index + 1 < len(tokens):
-            rpaths.append(tokens[index + 1])
-        elif token.endswith(".o") and Path(token).is_absolute() and Path(token).parent.resolve() == compiler_lib:
-            objects.append(token)
-        elif token == "-T" and index + 1 < len(tokens):
-            link_flags.append("-Wl,-T," + tokens[index + 1])
-        elif token.startswith("--dynamic-list="):
-            link_flags.append("-Wl," + token)
-    if not objects or "acchost" not in libraries:
-        raise RuntimeError("NVFortran link recipe is missing OpenACC initialization objects or runtime")
-    return {"objects": list(dict.fromkeys(objects)), "library_dirs": list(dict.fromkeys(library_dirs)),
-            "libraries": list(dict.fromkeys(libraries)), "rpaths": list(dict.fromkeys(rpaths)), "link_flags": link_flags,
-            "runtime_discovery_argv": command}
-
-
 def compile_gpu_sources(
     sources: list[GPUSource] | list[dict],
     build_dir: Path,
@@ -281,9 +229,8 @@ def compile_gpu_sources(
 ) -> dict:
     """Compile self-contained GPU objects and return GNU linker inputs.
 
-    NVIDIA module output goes into its own directory, isolated from GNU module
-    files. Compiler diagnostics and exact commands are saved beside the objects.
-    Independent CUDA units use at most ``jobs`` workers; OpenACC stays serial.
+    Compiler diagnostics and exact commands are saved beside the objects.
+    Independent CUDA units use at most ``jobs`` workers.
     """
     if type(jobs) is not int or jobs < 1:
         raise ValueError("jobs must be a positive integer")
@@ -297,8 +244,6 @@ def compile_gpu_sources(
     config = toolchain or discover_toolchain(options, languages=languages)
     directory = build_dir.resolve() / "gpu"
     directory.mkdir(parents=True, exist_ok=True)
-    module_dir = directory / "nvfortran-modules"
-    module_dir.mkdir(exist_ok=True)
     commands = []
     objects = []
     manifest: dict = {"toolchain": config, "sources": units, "commands": commands, "objects": objects,
@@ -312,19 +257,14 @@ def compile_gpu_sources(
         source = Path(unit["source"])
         target = directory / f"{index:03d}_{source.stem}.o"
         unit_log = directory / f"{index:03d}_{source.stem}.log"
-        if unit["language"] == "cuda":
-            contract = unit.get("numerical_contract")
-            numerical_options = (contract or {}).get("required_cuda_options", [])
-            host_options = (contract or {}).get("required_host_options", [])
-            command = [config["nvcc"], "-O3", "-std=c++17", "-arch=sm_" + config["architecture"],
-                       "-ccbin", config["cuda_host_cxx"], "-Xcompiler=-fPIC,-fopenmp", *macros,
-                       *numerical_options, *["-Xcompiler=" + option for option in host_options],
-                       "-c", str(source), "-o", str(target)]
-            unit["resolved_numerical_options"] = {"cuda": numerical_options, "host": host_options}
-        else:
-            command = [config["nvfortran"], "-O3", "-fPIC", "-acc=gpu", "-gpu=cc" + config["architecture"] + ",nordc",
-                       "-Mfreeform", "-Mextend", "-Mpreprocess", "-module", str(module_dir), *macros,
-                       "-c", str(source), "-o", str(target)]
+        contract = unit.get("numerical_contract")
+        numerical_options = (contract or {}).get("required_cuda_options", [])
+        host_options = (contract or {}).get("required_host_options", [])
+        command = [config["nvcc"], "-O3", "-std=c++17", "-arch=sm_" + config["architecture"],
+                   "-ccbin", config["cuda_host_cxx"], "-Xcompiler=-fPIC,-fopenmp", *macros,
+                   *numerical_options, *["-Xcompiler=" + option for option in host_options],
+                   "-c", str(source), "-o", str(target)]
+        unit["resolved_numerical_options"] = {"cuda": numerical_options, "host": host_options}
         unit["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
         unit["build_log"] = str(unit_log)
         commands.append(command)
@@ -344,31 +284,23 @@ def compile_gpu_sources(
         return "compiled", None
 
     outcomes = {}
-    index = 0
-    while index < len(plans):
-        if units[index]["language"] == "openacc" or jobs == 1:
-            outcomes[index] = compile_one(plans[index])
-            index += 1
-        else:
-            end = index + 1
-            while end < len(plans) and units[end]["language"] == "cuda":
-                end += 1
-            # OpenACC units remain serial and in source order: their shared
-            # module directory can carry dependencies between compilations.
-            with ThreadPoolExecutor(max_workers=min(jobs, end - index)) as executor:
-                futures = {executor.submit(compile_one, plan): plan[0] for plan in plans[index:end]}
-                for future in as_completed(futures):
-                    position = futures[future]
-                    if future.cancelled():
-                        outcomes[position] = ("cancelled", None)
-                    else:
-                        outcomes[position] = future.result()
-                        if outcomes[position][0] == "failed":
-                            for pending in futures:
-                                pending.cancel()
-            index = end
-        if any(status == "failed" for status, _ in outcomes.values()):
-            break
+    if jobs == 1:
+        for plan in plans:
+            outcomes[plan[0]] = compile_one(plan)
+            if outcomes[plan[0]][0] == "failed":
+                break
+    else:
+        with ThreadPoolExecutor(max_workers=min(jobs, len(plans))) as executor:
+            futures = {executor.submit(compile_one, plan): plan[0] for plan in plans}
+            for future in as_completed(futures):
+                position = futures[future]
+                if future.cancelled():
+                    outcomes[position] = ("cancelled", None)
+                else:
+                    outcomes[position] = future.result()
+                    if outcomes[position][0] == "failed":
+                        for pending in futures:
+                            pending.cancel()
 
     # Workers have all joined. Only this parent assembles the public inventory
     # and aggregate diagnostics, in the original source order.
@@ -415,21 +347,6 @@ def compile_gpu_sources(
                             manifest["rpaths"].insert(0, d)
             except Exception:
                 pass
-    if "openacc" in languages:
-        acc_object = Path(objects[next(index for index, unit in enumerate(units) if unit["language"] == "openacc")])
-        runtime = _openacc_link_configuration(config, acc_object, directory)
-        for key in ("objects", "library_dirs", "libraries", "rpaths", "link_flags"):
-            manifest[key].extend(runtime[key])
-        manifest["runtime_discovery_argv"] = runtime["runtime_discovery_argv"]
-        # The public OpenACC API must precede GNU libgomp, which also exports
-        # acc_* symbols. GNU libgomp must in turn precede NVIDIA libnvomp so
-        # host GOMP_* calls use the compiler's own runtime. build() supplies
-        # that ordered library prefix for the complete host application.
-        manifest["openacc_library"] = str(Path(config["nvfortran_library_dir"]) / "libacchost.so")
-        # libacchost references acc_register_library weakly. GNU libgomp's
-        # implementation is an unsupported profiling stub; retain NVIDIA's
-        # actual notification provider before GNU to satisfy that hook.
-        manifest["openacc_notify_library"] = str(Path(config["nvfortran_library_dir"]) / "libaccnotify.so")
     for key in ("objects", "library_dirs", "libraries", "rpaths", "link_flags"):
         manifest[key] = list(dict.fromkeys(manifest[key]))
     (directory / "gpu-build-command.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

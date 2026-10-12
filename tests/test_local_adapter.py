@@ -64,14 +64,14 @@ class LocalCompilerProtocolTests(unittest.TestCase):
             report = check(self.source, self.snapshot, self.python, "UNRELATED::ADVANCE", self.output)
         self.assertEqual(report["qualified_name"], "unrelated::advance")
 
-    def test_generation_retains_authoritative_report_and_namespaces_symbols(self):
+    def test_generation_retains_authoritative_report_and_compiler_artifacts(self):
         outputs = ["region.cpp", "region.cu", "interface.f90", "runtime.hpp"]
         report = {"kernel": "advance", "supported": True, "reason": None, "parallel_regions": 2,
                   "execution_plan": "ordered dependence proofs", "memory_plan": "one owned workspace", "outputs": outputs}
 
         def run_compiler(command, **kwargs):
             for name in outputs:
-                (self.output / name).write_text("cpp_start_hot cpp_finish_hot\n")
+                (self.output / name).write_text("cpp_advance_start_hot cpp_advance_finish_hot\n")
             return self.completed(report)
 
         with patch("elmm_pipeline.local_adapter.subprocess.run", side_effect=run_compiler):
@@ -80,7 +80,9 @@ class LocalCompilerProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads((self.output / "compiler-report.json").read_text()), report)
         self.assertIn("--json", metadata["command"])
         self.assertNotIn("--verbose", metadata["command"])
-        self.assertIn("cpp_start_hot_", (self.output / "region.cu").read_text())
+        for name in outputs:
+            self.assertEqual((self.output / name).read_text(),
+                             "cpp_advance_start_hot cpp_advance_finish_hot\n")
 
     def test_generation_reports_rejection_and_incompatible_snapshot(self):
         rejection = self.completed({"kernel": "advance", "supported": False, "reason": "unsafe RAW", "outputs": []}, 1)
@@ -107,6 +109,8 @@ class LocalCompilerProtocolTests(unittest.TestCase):
                     metadata = gpu_transform("local", self.source, self.python, self.output,
                                              compiler_root=self.snapshot, entry="advance")
                     self.assertEqual(metadata["gpu"]["kernel_regions"], 2)
+                    self.assertEqual((self.output / "region.cu").read_text(),
+                                     "kernel_region_0_device\n")
 
 
 if __name__ == "__main__":

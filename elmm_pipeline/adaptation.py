@@ -99,12 +99,14 @@ def adapt_project(tool, project_root, python, output_dir, *, compiler_root=None,
                   target="cpu", gpu_options=None, memory_model="call", scope_options=None):
     from .discovery import discover_project
 
+    if tool != "local":
+        raise ValueError(f"Unknown transformation tool: {tool}; expected local")
     if target not in {"cpu", "gpu"}:
         raise ValueError("Target must be cpu or gpu")
     if memory_model not in {"call", "scoped"}:
         raise ValueError("Memory model must be call or scoped")
     if memory_model == "scoped":
-        if tool != "local" or target != "gpu":
+        if target != "gpu":
             raise ValueError("Scoped memory requires the local compiler and GPU target")
         if include or exclude or marked_only:
             raise ValueError("Scoped source inputs use explicit entry/source selection; call-region filters do not apply")
@@ -113,12 +115,10 @@ def adapt_project(tool, project_root, python, output_dir, *, compiler_root=None,
                                    options=scope_options or {}, defines=defines, gpu_options=gpu_options)
     if scope_options:
         raise ValueError("Scope options require memory_model='scoped'")
-    if tool != "local" and (gpu_options or {}).get("gpu_policy", "always") != "always":
-        raise ValueError("GPU runtime policies are currently supported by the local compiler only")
     project_root, output_dir = Path(project_root).resolve(), Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     compiler_discovery = ({"compiler_root": compiler_root, "compiler_python": python}
-                          if tool == "local" and target == "gpu" else {})
+                          if target == "gpu" else {})
     discovery = discover_project(project_root, python, output_dir / "discovery",
                                  patterns=source_patterns, defines=defines, backend=target,
                                  **compiler_discovery)
@@ -137,7 +137,7 @@ def adapt_project(tool, project_root, python, output_dir, *, compiler_root=None,
                                      compiler_root=compiler_root, entry=region["entry"],
                                      context=region.get("context"), gpu_options=gpu_options)
                 sources = metadata["extra_sources"]
-            elif tool == "local":
+            else:
                 if region.get("context", {}).get("nested_parallel"):
                     uncertain = [symbol["name"] for symbol in region["symbols"]
                                  if symbol.get("rank", 0) and not symbol.get("contiguous_proven", False)]
@@ -149,11 +149,6 @@ def adapt_project(tool, project_root, python, output_dir, *, compiler_root=None,
                 metadata = transform(Path(region["input_path"]), compiler_root, python, region_dir,
                                      entry=region["entry"], context=region.get("context"))
                 sources = metadata["extra_sources"]
-            else:
-                from .recipes import transform
-                metadata = transform(tool, Path(region["input_path"]), python, region_dir,
-                                     context=region.get("context"))
-                sources = [metadata["generated_path"]]
             check_generated_sources(sources, region_dir / "syntax-check")
             if target == "gpu":
                 from .gpu_toolchain import compile_gpu_sources
