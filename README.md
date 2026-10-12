@@ -647,6 +647,45 @@ planning construction, validation and selection have separate counters. Sealing
 requires successful guards, complete fields, halo checks, configured reports
 and current plots. A sealed snapshot is evidence, not automatic promotion.
 
+Unmeasured construction has separate resource controls. `pipeline.py run --jobs`
+sets SCons build concurrency; it does not parallelize source analysis. `--timeout`
+limits each application process, not generation or compilation. Source generation
+currently runs serially and has no internal worker-count option; select its
+process affinity and deadline explicitly when launching it. Builds and generation
+may use a broader CPU mask without changing the calibrated four-thread runtime
+or the exact process placement required for benchmarks and calibration. Keep the
+3 GiB memory reserve and run heavy jobs sequentially when trying more build jobs.
+
+Component milestones use a separate maintained sealer:
+
+```sh
+python -m elmm_pipeline.campaigns.checkpoint --config /path/to/component.json --historical-plots-only --verify-only
+python -m elmm_pipeline.campaigns.checkpoint --config /path/to/component.json --historical-plots-only
+```
+
+Schema 1 requires `component_only: true`, `historical_plots_only: true`, a
+non-draft configuration, and zero `new_application_observations` and
+`new_performance_samples`. Explicit `repositories` bind compiler and pipeline
+paths, commits and `verified_source_sha256`; the running module must belong to
+the declared pipeline checkout. `input_sha256`, `successful_guards`, `json_checks`
+and `text_checks` authenticate component evidence. `previous_snapshot` and
+`previous_checkpoint_commits` retain the prior component authority separately
+from `previous_application_snapshot` and `previous_application_commits`; the
+application snapshot must still carry its original full-application gate and
+hash, either directly in the input map or through the previous component receipt.
+
+`historical_campaign`, `historical_input_sha256`, the explicitly hashed
+`ordinary_renderer` and `ordinary_label` select unchanged historical reports.
+Sealing calls maintained `campaigns.report.plot` and that renderer, preserving
+the original labels. It copies only declared files of at most 2 MiB from
+`evidence_root` using `copy_evidence`, adds `component_report` and
+`component_claims`, and creates the new `output` once. Inputs are checked again
+after rendering; a failure retains partial output without a successful snapshot.
+Verification alone performs no rendering or writes. Existing schema-1
+`receipt_helpers` fields may remain hashed provenance, but their code is never
+imported. Historical charts and component tests establish no new application
+timings, automatic-placement result or whole-stage residency claim.
+
 `python -m elmm_pipeline.campaigns.profile --campaign ... --case ... --mode ...
 --nsys /explicit/nsys --seconds 2 --output /new/diagnostic` runs a bounded
 CUDA/NVTX capture and validates the complete application output. Run it through
