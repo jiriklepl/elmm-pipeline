@@ -123,7 +123,11 @@ def _cuda_runtime_directory(cuda_root: Path, compiler: str, explicit: str | Path
             or not re.fullmatch(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_.]+)+", target)):
         raise RuntimeError("Invalid CUDA host compiler target; supply cuda_runtime_dir explicitly")
     parts = target.lower().split("-")
-    linux_gnu = "linux" in parts and parts[-1] == "gnu"
+    # Red Hat's native GCC reports e.g. x86_64-redhat-linux, omitting the
+    # GNU ABI suffix. It uses the same CUDA target as x86_64-linux-gnu.
+    # Keep explicit x32/musl (and unknown ABI) targets out of this alias.
+    linux_gnu = ("linux" in parts and parts[-1] == "gnu") or (
+        len(parts) == 3 and parts[1:] == ["redhat", "linux"])
     targets = cuda_root / "targets"
     candidates = [targets / target / "lib"]
     # Architecture-only CUDA directories do not distinguish x32/musl ABIs.

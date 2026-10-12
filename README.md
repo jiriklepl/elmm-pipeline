@@ -90,7 +90,11 @@ GPU's compute capability. It does not bypass the GPU availability check.
 baseline. GPU source discovery also supports `analyze --target gpu`.
 
 CUDA runtime discovery uses the selected host C++ compiler's target, rather
-than a fixed host architecture. The Python `discover_toolchain` API also accepts
+than a fixed host architecture. GNU/Linux targets include Red Hat's GCC triples
+such as `x86_64-redhat-linux`, which select CUDA's `targets/x86_64-linux/lib`
+layout (or a native flat `lib64` layout). Module-provided `nvcc` on `PATH` and
+the `NVCC` environment override determine the selected toolkit; no unrelated
+toolkit's library directories are searched. The Python `discover_toolchain` API also accepts
 `cuda_runtime_dir` directly or in its options for custom layouts, including
 ARM SBSA installations. That directory must contain `libcudart.so`; a cross
 compiler cannot silently select the running host's flat `lib64` directory.

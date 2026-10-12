@@ -59,6 +59,38 @@ class GPUConfigurationTests(unittest.TestCase):
             self.assertEqual(config["cuda_library_dir"], str(cross))
             self.assertEqual(config["cuda_runtime_discovery"]["method"], "host_target")
 
+    def test_redhat_native_target_uses_standard_cuda_target_and_lib64_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "targets/x86_64-linux/lib"
+            directory.mkdir(parents=True)
+            (directory / "libcudart.so").touch()
+            (root / "lib64").symlink_to(directory, target_is_directory=True)
+            config, _ = self.discover_cuda(root, "x86_64-redhat-linux")
+            self.assertEqual(config["cuda_library_dir"], str(directory))
+            self.assertEqual(config["cuda_runtime_discovery"]["target"], "x86_64-redhat-linux")
+            self.assertEqual(config["cuda_runtime_discovery"]["method"], "host_target")
+
+    def test_redhat_target_flat_runtime_is_native_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "lib64").mkdir()
+            (root / "lib64/libcudart.so").touch()
+            config, _ = self.discover_cuda(root, "x86_64-redhat-linux")
+            self.assertEqual(config["cuda_runtime_discovery"]["method"], "native_flat_layout")
+            with self.assertRaisesRegex(RuntimeError, "host target 'aarch64-redhat-linux'"):
+                self.discover_cuda(root, "aarch64-redhat-linux")
+
+    def test_redhat_native_target_rejects_foreign_target_lib64_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            foreign = root / "targets/aarch64-linux/lib"
+            foreign.mkdir(parents=True)
+            (foreign / "libcudart.so").touch()
+            (root / "lib64").symlink_to(foreign, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "host target 'x86_64-redhat-linux'"):
+                self.discover_cuda(root, "x86_64-redhat-linux")
+
     def test_explicit_cuda_runtime_override_requires_library_and_skips_target_query(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -131,7 +163,8 @@ class GPUConfigurationTests(unittest.TestCase):
             # Neither a target directory nor a native flat layout proves ABI compatibility.
             (root / "lib64").mkdir()
             (root / "lib64/libcudart.so").touch()
-            for target in ("x86_64-linux-gnux32", "x86_64-linux-musl"):
+            for target in ("x86_64-linux-gnux32", "x86_64-linux-musl",
+                           "x86_64-redhat-linux-gnux32", "x86_64-redhat-linux-musl"):
                 with self.subTest(target=target):
                     with self.assertRaisesRegex(RuntimeError, "supply cuda_runtime_dir"):
                         self.discover_cuda(root, target=target)
