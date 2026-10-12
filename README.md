@@ -655,7 +655,8 @@ shell. Toolchain and architecture choices belong in this configuration, so the
 runner does not assume a GPU generation or CUDA installation directory.
 
 Execution uses the committed pipeline snapshot. The memory guard serializes
-heavy jobs, requires 3 GiB available memory and tracks detached descendants
+heavy jobs, requires 3 GiB of headroom under both host available memory and
+applicable cgroup memory limits, and tracks detached descendants
 through cleanup. Reports retain incomplete or failed attempts. Each phase is
 immutable; prepare a new campaign after changing inputs. Timing includes process
 startup, native work, transfers, output and teardown, with one warmup and three

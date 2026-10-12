@@ -6,14 +6,54 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import time
 
 
-def available():
-    return int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines()
+def memory_headroom(proc=Path("/proc")):
+    """Respect container/job cgroup limits as well as host available memory."""
+    host = int(next(line.split()[1] for line in (proc / "meminfo").read_text().splitlines()
                     if line.startswith("MemAvailable:"))) * 1024
+    budgets = {"host_available_bytes": host}
+    memberships = [line.split(":", 2) for line in (proc / "self/cgroup").read_text().splitlines()]
+    for line in (proc / "self/mountinfo").read_text().splitlines():
+        before, separator, after = line.partition(" - ")
+        if not separator:
+            continue
+        fields, filesystem = before.split(), after.split()
+        unified = filesystem[0] == "cgroup2"
+        legacy = filesystem[0] == "cgroup" and "memory" in filesystem[2].split(",")
+        if not (unified or legacy):
+            continue
+        unescape = lambda text: re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), text)
+        mount = Path(unescape(fields[4])).resolve()
+        for _, controllers, group in memberships:
+            if not ((unified and not controllers) or (legacy and "memory" in controllers.split(","))):
+                continue
+            try:
+                relative = Path(group).relative_to(unescape(fields[3]))
+            except ValueError:
+                continue
+            directory = (mount / relative).resolve()
+            if not directory.is_relative_to(mount):
+                continue
+            while True:
+                limit = directory / ("memory.max" if unified else "memory.limit_in_bytes")
+                usage = directory / ("memory.current" if unified else "memory.usage_in_bytes")
+                if limit.is_file() and usage.is_file():
+                    value = limit.read_text().strip()
+                    if value != "max":
+                        budgets[str(directory)] = max(0, int(value) - int(usage.read_text()))
+                if directory == mount:
+                    break
+                directory = directory.parent
+    return budgets
+
+
+def available():
+    return min(memory_headroom().values())
 
 
 def processes():
@@ -140,6 +180,7 @@ def main():
     args.record.parent.mkdir(parents=True, exist_ok=True)
     args.log.parent.mkdir(parents=True, exist_ok=True)
     record = {"argv": command, "cwd": os.getcwd(), "headroom_bytes": threshold,
+              "memory_budget": "minimum host MemAvailable and applicable cgroup headroom",
               "started_unix": time.time(), "profiling_policy": "selected by caller; no overrides",
               "termination_policy": {"schema_version": 2, "linux_child_subreaper": True,
                   "identity": "PID and /proc start time, signaled through validated pidfd",
