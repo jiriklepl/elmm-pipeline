@@ -189,10 +189,11 @@ def test_fresh_compiler_response_validates_requested_capture_facts(tmp_path, sou
             apply_scope_sources(result, sources[1])
 
 
-def test_checked_plan_cannot_authorize_exact_window_build_contract(tmp_path, sources):
+@pytest.mark.parametrize("exact_window_version", [3, 4])
+def test_checked_plan_cannot_authorize_exact_window_build_contract(tmp_path, sources, exact_window_version):
     metadata = package(tmp_path, sources, "one")
     with_plan(metadata)
-    metadata["scope_manifest"]["scopes"][0]["exact_window"] = {"schema_version": 3}
+    metadata["scope_manifest"]["scopes"][0]["exact_window"] = {"schema_version": exact_window_version}
     save(metadata)
     with pytest.raises(LocalAdapterError, match="Exact-window"):
         apply_scope_sources(metadata, sources[1])
