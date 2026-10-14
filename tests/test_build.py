@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from elmm_pipeline.build import build, _find_library, preprocessing_defines, PREPROCESSOR_SWITCHES
+from elmm_pipeline.build_receipts import require_build_receipts
 
 
 class BuildTests(unittest.TestCase):
@@ -164,7 +165,8 @@ class BuildTests(unittest.TestCase):
         if importlib.util.find_spec("SCons"):
             python = Path(sys.executable)
         else:
-            python = Path(__file__).resolve().parents[1] / ".cache" / "envs" / "build" / "bin" / "python"
+            python = Path(os.environ.get("ELMM_SCONS_PYTHON", str(
+                Path(__file__).resolve().parents[1] / ".cache" / "envs" / "build" / "bin" / "python")))
             if not python.is_file():
                 self.skipTest("SCons is unavailable; run pipeline setup before this native build check")
             check = subprocess.run([str(python), "-c", "import SCons"], capture_output=True, check=False)
@@ -241,6 +243,18 @@ end module
             self.assertTrue((root / "build" / "first_outline.mod").is_file())
             self.assertTrue((root / "build" / "second_outline.mod").is_file())
             self.assertFalse(list((root / "build" / "extra").glob("*.mod")))
+            receipt = require_build_receipts(root / "build" / "build-receipts.json")
+            self.assertEqual(len(receipt["units"]), 5)
+            self.assertEqual({unit["source"] for unit in receipt["units"]},
+                             {str(path) for path in (source, elmm / "src" / "main.f90", first, second, cpp)})
+            self.assertFalse(receipt["placement_authority"])
+            # A fresh receipt directory prevents reusing old commands for a
+            # no-op incremental build; ordinary build behavior stays intact.
+            with patch.dict(os.environ, {"FC": "gfortran", "CC": "gcc", "CXX": "g++"}):
+                build(elmm, poisfft, root / "build", python, root / "lib", 4, 1, [],
+                      extra_sources=[second, cpp, first], patched_sources=[source])
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                require_build_receipts(root / "build" / "build-receipts.json")
 
 
 if __name__ == "__main__":

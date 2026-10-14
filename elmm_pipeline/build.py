@@ -14,8 +14,10 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import venv
 
+from .build_receipts import file_identity, snapshot_inputs, summarize_build
 from .gpu_toolchain import GPUSource, compile_gpu_sources, validate_gpu_sources
 
 
@@ -232,9 +234,25 @@ def build(
     anchor = "t = env.Program("
     if original.count(anchor) != 1:
         raise RuntimeError("Unsupported ELMM SConstruct: program insertion point changed")
+    input_roots = {source_dir, poisfft_root / "src", *[path.parent for path in sources],
+                   *[Path(unit["source"]).parent for unit in gpu_units]}
+    for argument in extra_args:
+        key, _, value = argument.partition("=")
+        if key in {"SB", "PB"} and value:
+            input_roots.add((source_dir / value).resolve().parent)
+    input_hashes = snapshot_inputs(input_roots, exclude=[build_dir])
+    receipt_directory = Path(tempfile.mkdtemp(prefix="host-command-receipts-", dir=build_dir))
+    recorder_module = build_dir / "build_receipts.py"
+    shutil.copyfile(Path(__file__).with_name("build_receipts.py"), recorder_module)
     gpu_build = compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines, jobs=jobs) if gpu_units else None
     injection = [
         "# Additional sources supplied by elmm-pipeline.",
+        "import importlib.util as pipeline_importlib",
+        f"pipeline_spec = pipeline_importlib.spec_from_file_location('pipeline_build_receipts', {str(recorder_module)!r})",
+        "pipeline_receipts = pipeline_importlib.module_from_spec(pipeline_spec)",
+        "pipeline_spec.loader.exec_module(pipeline_receipts)",
+        f"pipeline_recorder = pipeline_receipts.CommandRecorder({str(receipt_directory)!r})",
+        "env.Replace(SPAWN=pipeline_recorder.scons_spawn)",
         "if os.environ.get('FC'):",
         "  env.Replace(LINK=os.environ['FC'])",
         "env.Replace(LIBPATH=[p for p in os.environ.get('LIBRARY_PATH', '').split(os.pathsep) if p])",
@@ -327,6 +345,7 @@ def build(
     ])
     script = source_dir / "SConstruct.pipeline"
     script.write_text(original.replace(anchor, "\n".join(injection) + "\n" + anchor), encoding="utf-8")
+    build_inputs = {**input_hashes, **{str(path): file_identity(path)["sha256"] for path in (script, recorder_module)}}
     env = _python_environment()
     env["LIBRARY_PATH"] = str(fftw_library_dir) + (
         os.pathsep + env["LIBRARY_PATH"] if env.get("LIBRARY_PATH") else ""
@@ -346,7 +365,8 @@ def build(
                       "native_library_dir": str(fftw_library_dir),
                       "preprocessing_defines": defines,
                       "extra_sources": [str(path) for path in sources],
-                      "patched_sources": [str(path) for path in patched]}
+                      "patched_sources": [str(path) for path in patched],
+                      "command_receipts": str(receipt_directory)}
     if gpu_build:
         build_manifest["gpu"] = gpu_build
     (build_dir / "build-command.json").write_text(
@@ -362,5 +382,19 @@ def build(
     runtime_manifest = build_dir / "host-runtime.json"
     if runtime_manifest.is_file():
         build_manifest["host_runtime"] = json.loads(runtime_manifest.read_text(encoding="utf-8"))
-        (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
+    try:
+        if snapshot_inputs(input_roots, exclude=[build_dir]) != input_hashes:
+            raise ValueError("Source/header inventory changed during compilation")
+        directories = [receipt_directory]
+        if gpu_build:
+            directories.append(gpu_build["command_receipts"])
+        receipt = summarize_build(binary, directories, build_inputs)
+    except (ValueError, OSError, KeyError, TypeError) as error:
+        receipt = {"schema_version": 1, "kind": "application-build-receipts", "status": "unavailable",
+                   "placement_authority": False, "reason": str(error)}
+    receipt_path = build_dir / "build-receipts.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    build_manifest["build_receipts"] = {"path": str(receipt_path), "status": receipt["status"],
+                                       "identity": receipt.get("identity")}
+    (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
     return binary

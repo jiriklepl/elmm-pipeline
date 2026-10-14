@@ -270,6 +270,24 @@ composition or descriptor normalization from silently dropping a requirement
 that the application build cannot enforce. Ordinary scoped AUTO and its existing
 calibrations retain their supported behavior.
 
+Each fresh application build also writes `build-receipts.json`. A shell-free
+SCons execution hook records the actual compiler and linker argument vectors,
+including source-specific flags; CUDA commands use the same recorder. Receipts
+bind compiler binaries and versions, source/header inventories, generated
+objects, the final executable and the raw command records. Selected compiler
+environment variables are recorded explicitly, and the complete environment is
+hashed without copying unrelated credentials. No optimization or numerical
+flags are added by recording.
+
+A complete receipt requires a successful executed compilation for every
+directly linked object. Failed commands remain recorded. Incremental builds
+with reused objects receive an `unavailable` receipt rather than invented
+compile commands. `elmm_pipeline.build_receipts.require_build_receipts(path)`
+rejects unavailable or stale evidence. These receipts are source transport for
+future application calibration, not placement authority or a replacement for
+the stronger exact-window build contract. Implicit system headers and libraries
+are not yet inventoried, so the experimental contract remains unsupported.
+
 Scoped runtime traces report successful launches, upload/download bytes,
 allocations and waits during separate validation runs. Adapter call markers are
 not available for source scopes, so transformed-call coverage is explicitly

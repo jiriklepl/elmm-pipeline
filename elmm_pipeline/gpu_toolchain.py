@@ -16,8 +16,11 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+from .build_receipts import CommandRecorder
 
 try:
     from typing import Literal, NotRequired, TypedDict  # type: ignore
@@ -247,10 +250,13 @@ def compile_gpu_sources(
     config = toolchain or discover_toolchain(options, languages=languages)
     directory = build_dir.resolve() / "gpu"
     directory.mkdir(parents=True, exist_ok=True)
+    receipt_directory = Path(tempfile.mkdtemp(prefix="command-receipts-", dir=directory))
+    recorder = CommandRecorder(receipt_directory)
     commands = []
     objects = []
     manifest: dict = {"toolchain": config, "sources": units, "commands": commands, "objects": objects,
                       "jobs": jobs,
+                      "command_receipts": str(receipt_directory),
                       "compiler_environment": compiler_environment,
                       "library_dirs": [], "libraries": [], "rpaths": [], "link_flags": []}
     log_path = directory / "gpu-build.log"
@@ -279,7 +285,7 @@ def compile_gpu_sources(
             with unit_log.open("w", encoding="utf-8") as log:
                 log.write(shlex.join(command) + "\n")
                 log.flush()
-                result = subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=False)
+                result = recorder.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT)
                 if result.returncode or not target.is_file():
                     return "failed", f"compiler exit {result.returncode}; object exists: {target.is_file()}"
         except Exception as error:  # noqa: BLE001 - retain worker failures after joining the entire batch
