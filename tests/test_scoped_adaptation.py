@@ -46,7 +46,8 @@ from unittest.mock import patch
 from elmm_pipeline.adaptation import adapt_project
 source,compiler,facts,output=map(Path,sys.argv[1:5])
 with patch('elmm_pipeline.discovery.discover_project',side_effect=AssertionError('call discovery must not run')), \\
-     patch('elmm_pipeline.gpu_toolchain.compile_gpu_sources',return_value={'public_manifest_check':True}):
+     patch('elmm_pipeline.gpu_toolchain.compile_gpu_sources',return_value={'public_manifest_check':True},
+           side_effect=AssertionError('native fallback must not compile CUDA') if sys.argv[5]=='auto' else None):
     result=adapt_project('local',source.parent,Path(sys.executable),output,compiler_root=compiler,
                          target='gpu',memory_model='scoped',gpu_options={'gpu_policy':sys.argv[5]},
                          scope_options={'entry':'source_application::step','source':source.name,'capture_facts':facts})
@@ -57,26 +58,34 @@ print(json.dumps(result))
                             capture_output=True, text=True, timeout=90, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     adapter = json.loads(result.stdout)
-    assert adapter["scope_manifest"]["scope_count"] == 1
-    assert adapter["scope_manifest"]["runtime"]["link_once"] is True
-    # Public build roles can omit numerical CUDA units for an all-native plan.
-    assert len(adapter["gpu_sources"]) == (3 if policy == "sections" else 1)
+    manifest = adapter["scope_manifest"]
+    assert manifest["scope_count"] == (1 if policy == "sections" else 0)
     expected = [str(output / "compiler" / item["path"])
                 for item in adapter["scope_manifest"]["build_sources"]
                 if item["language"] == "fortran" and item["role"] != "original_source"]
     assert adapter["extra_sources"] == expected
     assert len(expected) == len(set(expected))
     assert adapter["coverage_enabled"] is False
-    assert adapter["changed_files"] == ["application.f90"]
     assert adapter["scope_extraction"]["numerical_extraction"]["entries"] == 2
     assert "--form-scopes" in adapter["scope_transformation"]["command"]
-    assert "fort_scope_owner_" in source.read_text()
     activity = gpu_activity("", "local", adapter["regions"], scope_manifest=adapter["scope_manifest"])
     assert native_policy_exercised(activity, adapter["regions"]) is (policy == "auto")
     assert activity["verified"] is False
     if policy == "auto":
+        assert adapter["native_success"] is True
+        assert adapter["changed_files"] == adapter["regions"] == []
+        assert adapter["gpu_sources"] == adapter["extra_sources"] == []
+        assert adapter["gpu_compile_check"] is None
+        assert manifest["runtime"] is None
+        assert manifest["build_sources"] == manifest["source_edits"] == []
+        assert source.read_text() == PROGRAM
         assert activity["offload_decisions"]["calls"] == 0
         assert "coverage unverified" in activity["native_selection_evidence"]
+    else:
+        assert manifest["runtime"]["link_once"] is True
+        assert len(adapter["gpu_sources"]) == 3
+        assert adapter["changed_files"] == ["application.f90"]
+        assert "fort_scope_owner_" in source.read_text()
 
 
 def test_no_approved_scope_is_a_successful_native_application(independent_scoped_pipeline, tmp_path):
@@ -308,10 +317,18 @@ result={'binary':str(binary),'adapter':adapter,
     metadata = json.loads((tmp_path / "integration.json").read_text())
     adapter = metadata["adapter"]
     public_units = adapter["scope_manifest"]["build_sources"]
-    assert sum(unit["role"] == "common_runtime" and unit["language"] == "cuda" for unit in public_units) == 1
-    assert len(metadata["build"]["gpu"]["objects"]) == len(adapter["gpu_sources"])
-    assert all("-arch=sm_86" in argv and argv[argv.index("-ccbin") + 1] == str(Path(cuda_host).resolve())
-               for argv in metadata["build"]["gpu"]["commands"])
+    if policy == "auto" and not os.environ.get("ELMM_TEST_SCOPED_PROFILE"):
+        assert public_units == adapter["gpu_sources"] == adapter["extra_sources"] == []
+        assert adapter["scope_manifest"]["scope_count"] == 0
+        assert adapter["native_success"] is True
+        assert "gpu" not in metadata["build"]
+        assert metadata["build"]["extra_sources"] == metadata["build"]["patched_sources"] == []
+        assert source.read_text() == PROGRAM
+    else:
+        assert sum(unit["role"] == "common_runtime" and unit["language"] == "cuda" for unit in public_units) == 1
+        assert len(metadata["build"]["gpu"]["objects"]) == len(adapter["gpu_sources"])
+        assert all("-arch=sm_86" in argv and argv[argv.index("-ccbin") + 1] == str(Path(cuda_host).resolve())
+                   for argv in metadata["build"]["gpu"]["commands"])
     for name in ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE", "CUDA_LAUNCH_BLOCKING"):
         environment.pop(name, None)
     environment.update(FORT_RUNTIME_TRACE="1", FORT_OFFLOAD_TRACE="1")

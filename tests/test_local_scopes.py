@@ -148,6 +148,42 @@ def test_independent_compiler_packages_compose_without_ir_or_source_merging(inde
     assert len(bundle["gpu_sources"]) == 5
 
 
+@pytest.mark.parametrize("execution", ["bounded", "reached"])
+def test_automatic_missing_profile_composes_authenticated_native_package(independent, tmp_path, execution):
+    _, _, compiler, source, _, _ = independent
+    output = tmp_path / "native-artifacts"
+    metadata = transform_scopes(source, compiler, Path(sys.executable), output, entry="step",
+                                capture_facts=FACTS,
+                                gpu_options={"gpu_policy": "auto", "scope_execution": execution})
+    manifest = metadata["scope_manifest"]
+    assert metadata["compiler_report"]["supported"] is True
+    assert metadata["compiler_report"]["outputs"] == ["scope-manifest.json"]
+    assert metadata["changed"] is False
+    assert metadata["gpu_sources"] == metadata["extra_sources"] == []
+    assert manifest["schema_version"] == 1
+    assert manifest["scope_execution"] == execution
+    assert manifest["scope_count"] == 0
+    assert manifest["scopes"] == manifest["source_edits"] == manifest["build_sources"] == []
+    assert manifest["sources"] == manifest["artifacts_sha256"] == {}
+    assert manifest["runtime"] is None
+    assert manifest["automatic_scope_available"] is manifest["automatic_estimate_available"] is False
+    assert manifest["numerical_decisions"] == []
+    assert manifest["native_effects"]["closure_materialization"] == "not_requested"
+    assert manifest["source_inputs"] == {str(source): hashlib.sha256(source.read_bytes()).hexdigest()}
+    facts = {**FACTS, "sources": manifest["source_inputs"]}
+    assert manifest["capture_facts_sha256"] == hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()
+    assert any("calibration" in boundary["reason"] for boundary in manifest["boundaries"])
+    assert json.loads((output / "scope-manifest.json").read_text()) == manifest
+
+    destination = tmp_path / "native-application.f90"
+    destination.write_bytes(source.read_bytes())
+    bundle = compose_scope_packages([metadata], {str(source): destination})
+    assert bundle["runtime"] is None
+    assert bundle["patched_sources"] == bundle["gpu_sources"] == bundle["extra_sources"] == []
+    assert bundle["build_artifacts"] == []
+    assert destination.read_text() == source.read_text() == PROGRAM
+
+
 @pytest.mark.parametrize("transfers", ["pinned", "pipelined", "coalesced"])
 def test_independent_adapter_transports_transfer_choice_and_compiler_reason(independent, tmp_path, transfers):
     _, _, compiler, source, _, _ = independent
