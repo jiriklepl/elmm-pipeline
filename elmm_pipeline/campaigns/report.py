@@ -1,15 +1,17 @@
 """Immutable plots and receipts for complete application comparisons."""
 from __future__ import annotations
 
+import math
 import os
 import shutil
-import math
 import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .identity import check_files, digest, guard_passed, read, tree_hashes, write
 from .prepare import check
+from .run import summaries
+from .targets import evaluate_target
 
 
 def plot(root, output=None, *, historical=False):
@@ -19,6 +21,8 @@ def plot(root, output=None, *, historical=False):
     verification = read(root / "verification/report.json")
     if report["status"] != "passed" or verification["status"] != "passed":
         raise ValueError("complete correctness and timing reports required")
+    if any("performance_target" in case for case in state.get("cases", [])):
+        return _plot_targets(root, state, report, verification, output, historical=historical)
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/elmm-campaign-plots")
     import matplotlib
     matplotlib.use("Agg")
@@ -77,6 +81,90 @@ def plot(root, output=None, *, historical=False):
                                    "historical": historical,
                                    "rendering_only": True,
                                    "plotter_sha256": digest(__file__)})
+
+
+def _plot_targets(root, state, report, verification, output, *, historical):
+    """Render metadata-driven targets without relabeling historical SGS receipts."""
+    hashes = {name: digest(root / name) for name in ("campaign.json", "timings/report.json", "verification/report.json")}
+    if any(value.get("campaign_sha256") != hashes["campaign.json"] for value in (report, verification)):
+        raise ValueError("plots require reports for the exact frozen campaign")
+    cases = {case["name"]: case for case in state["cases"]}
+    if [row["case"] for row in report["cases"]] != list(cases):
+        raise ValueError("plot cases differ from the frozen campaign")
+    for case in report["cases"]:
+        if case["summary"] != summaries(case["runs"], state["modes"]):
+            raise ValueError("plot summary differs from measured samples")
+        if "performance_target" in cases[case["case"]]:
+            expected = evaluate_target(state, cases[case["case"]], case["summary"], case["runs"])
+            if case["gates"] != expected:
+                raise ValueError("plot target evaluation differs from frozen metadata and measured rounds")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/elmm-campaign-plots")
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    output = root / "figures" if output is None else Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    modes = state["modes"]
+    labels = [mode["label"] for mode in modes]
+    for relative in (False, True):
+        fig, axes = plt.subplots(1, len(report["cases"]), figsize=(7 * len(report["cases"]), 5), squeeze=False,
+                                 sharey=relative)
+        for ax, case in zip(axes[0], report["cases"], strict=True):
+            baseline = case["summary"]["native"]["median"] if relative else 1
+            rows = [case["summary"][mode["name"]] for mode in modes]
+            values = [row["median"] / baseline for row in rows]
+            errors = [[(row["median"] - row["min"]) / baseline for row in rows],
+                      [(row["max"] - row["median"]) / baseline for row in rows]]
+            bars = ax.bar(np.arange(len(modes)), values, yerr=errors, capsize=4, color="#0284c7", alpha=.8)
+            observed = next(row for row in verification["cases"] if row["case"] == case["case"])
+            launches = {run["mode"]: run["activity"]["kernel_launches"] for run in observed["runs"]}
+            for position, (bar, mode, row) in enumerate(zip(bars, modes, rows, strict=True)):
+                ax.scatter(position + np.linspace(-.14, .14, len(row["samples"])),
+                           np.array(row["samples"]) / baseline, color="white", edgecolor="#172033", s=25, zorder=3)
+                if mode["name"] != "native" and not launches[mode["name"]]:
+                    bar.set_hatch("//")
+            gate = case["gates"]
+            target = gate["target_seconds"] / baseline
+            label = gate.get("target_label", "≤ 70% of better frozen baseline")
+            ax.axhline(target, color="#15803d", linestyle="--", linewidth=1.5, label="Target: " + label)
+            if relative:
+                ax.axhline(1, color="#64748b", linewidth=1)
+            ax.set_xticks(np.arange(len(modes)), labels, rotation=35, ha="right")
+            ax.set_title(f"{case['case']}\nNative median: {case['summary']['native']['median']:.3f} s")
+            ax.set_ylabel("Complete wall time / native median" if relative else "Complete wall time (seconds)")
+            ax.grid(axis="y", alpha=.2)
+            ax.set_axisbelow(True)
+            ax.legend(loc="upper right", fontsize=9)
+        # Shared relative limits include every panel; absolute panels retain their own scales.
+        for ax in axes[0]:
+            ax.set_ylim(bottom=0)
+        fig.suptitle(("Historical measurements · " if historical else "") + state["title"] + " · four host threads")
+        freshness = "Retained historical measurements" if historical else "Fresh complete-process measurements"
+        footer = fig.text(.5, .025, freshness + "; dots: runs; bars: medians; whiskers: sample min–max.\n"
+                          "Targets are case-specific. Hatching: no CUDA kernels in separate validation.\n"
+                          "One excluded warmup. Startup, native solver, transfers, output and teardown included.", ha="center")
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        label_height = max(label.get_window_extent(renderer).height for ax in axes[0]
+                           for label in ax.get_xticklabels()) / fig.dpi
+        bottom = label_height + footer.get_window_extent(renderer).height / fig.dpi + .65
+        height = 4.5 + bottom + .8
+        fig.set_size_inches(max(7, 7 * len(report["cases"])), height)
+        fig.subplots_adjust(left=.075, right=.99, bottom=bottom / height, top=1 - .8 / height, wspace=.25)
+        name = "complete-wall-relative" if relative else "complete-wall-absolute"
+        for suffix in ("png", "svg", "pdf"):
+            fig.savefig(output / (name + "." + suffix), dpi=180, bbox_inches="tight")
+        plt.close(fig)
+    check_files(root, hashes)
+    write(output / "source.json", {"schema_version": 2, "report_sha256": hashes["timings/report.json"],
+          "verification_sha256": hashes["verification/report.json"], "campaign_sha256": hashes["campaign.json"],
+          "historical": historical, "rendering_only": True, "relative_baseline": "native",
+          "labels": {mode["name"]: mode["label"] for mode in modes},
+          "performance_targets": {name: case.get("performance_target") for name, case in cases.items()},
+          "plotter_sha256": digest(__file__), "target_evaluator_sha256": digest(Path(__file__).with_name("targets.py")),
+          "files_sha256": tree_hashes(output)})
+    return output
 
 
 def plot_snapshot(snapshot, output, *, gpu_label="Scoped GPU", native_label="Native"):
@@ -213,8 +301,12 @@ def seal(root, output):
     if not (root / "figures/source.json").is_file():
         raise ValueError("current comparison plots required")
     plotted = read(root / "figures/source.json")
-    if plotted["report_sha256"] != reports["timings/report.json"] or plotted["verification_sha256"] != reports["verification/report.json"]:
+    if (plotted["report_sha256"] != reports["timings/report.json"]
+            or plotted["verification_sha256"] != reports["verification/report.json"]
+            or plotted.get("campaign_sha256") != digest(root / "campaign.json")):
         raise ValueError("comparison plots are stale")
+    if "files_sha256" in plotted:
+        check_files(root / "figures", plotted["files_sha256"])
     timing = read(root / "timings/report.json")
     output.mkdir(parents=True, exist_ok=False)
     for name in ("figures", *state.get("additional_figure_directories", [])):
@@ -227,11 +319,26 @@ def seal(root, output):
     lines = ["# " + state["title"], "", "Fresh complete-application runs; no timings reused.", "",
              f"Compiler `{pair['compiler']}` · pipeline `{pair['pipeline']}`.", "",
              ("[Current application comparison](figures/complete-wall-relative.png) · "
-              f"[Previous snapshot]({previous})."), "",
-             "| Case | Better baseline | Median (s) | 30% target (s) |", "|---|---|---:|---:|"]
-    for case in timing["cases"]:
-        gate = case["gates"]
-        lines.append(f"| {case['case']} | {gate['baseline_mode']} | {gate['baseline_seconds']:.3f} | {gate['target_seconds']:.3f} |")
+              f"[Previous snapshot]({previous})."), ""]
+    if any("performance_target" in case for case in state["cases"]):
+        candidate_label = next(mode["label"] for mode in state["modes"] if mode["name"] == state["candidate_mode"])
+        lines += ["[Absolute wall times](figures/complete-wall-absolute.png).", "",
+                  f"| Case | Native (s) | {candidate_label} (s) | Target | Accepted | Comfortable |",
+                  "|---|---:|---:|---|---|---|"]
+        for case in timing["cases"]:
+            gate = case["gates"]
+            candidate = case["summary"][state["candidate_mode"]]["median"]
+            lines.append(f"| {case['case']} | {case['summary']['native']['median']:.3f} | {candidate:.3f} | "
+                         f"{gate.get('target_label', 'Legacy 30% reduction')} | {gate.get('accepted', 'legacy')} | "
+                         f"{gate.get('comfortable', {}).get('met', 'legacy')} |")
+        lines += ["", ("Acceptance applies the configured median target and required control comparison. "
+                  "Comfort requires seven candidate runs meeting the target and beating the configured control in every matched round. "
+                  "A sealed report may record an unmet performance target.")]
+    else:
+        lines += ["| Case | Better baseline | Median (s) | 30% target (s) |", "|---|---|---:|---:|"]
+        for case in timing["cases"]:
+            gate = case["gates"]
+            lines.append(f"| {case['case']} | {gate['baseline_mode']} | {gate['baseline_seconds']:.3f} | {gate['target_seconds']:.3f} |")
     lines += ["", "All complete final fields and configured full-array/halo drivers passed.",
               "Diagnostic planning, transfer and allocation counters are separate from untraced timing samples.",
               "This receipt does not promote a policy or claim unmeasured overlap.", ""]

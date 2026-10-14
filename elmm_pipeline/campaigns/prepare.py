@@ -1,15 +1,16 @@
 """Freeze explicitly selected repositories, configurations and approved binaries."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .identity import check_files, digest, read, repository, tree_hashes, write
 from .launch_environment import freeze_launch_environment
+from .targets import validate_target
 
 
 def slug(value):
@@ -68,6 +69,11 @@ def validate(config):
         raise ValueError("three or seven measured repetitions required")
     if config.get("warmups", 1) != 1:
         raise ValueError("one matched warmup required")
+    for case in config["cases"]:
+        if "performance_target" in case:
+            validate_target(case["performance_target"], modes, config.get("candidate_mode"))
+            if config.get("repetitions", 3) != 7:
+                raise ValueError("per-case performance targets require seven measured repetitions")
     if not {"compiler", "pipeline"} <= config["repositories"].keys():
         raise ValueError("explicit independent compiler and pipeline repositories required")
     for name in [*config["repositories"], *config.get("commands", {}), *config.get("input_trees", {})]:

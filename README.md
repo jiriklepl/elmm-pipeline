@@ -602,6 +602,65 @@ unchanged tolerances. Their application-specific calls do not affect compiler
 eligibility. `external_files` binds shared libraries, objects and public build
 artifacts to their reviewed hashes.
 
+New qualification campaigns can attach a versioned `performance_target` to each
+case. Targets require `repetitions: 7`, a configured `candidate_mode`, and a
+distinct configured control mode. For automatic channel residency, use modes
+`native`, `sgs-direct`, and `auto-resident` with labels `Native`, `SGS direct`,
+and `Automatic resident`; select `candidate_mode: "auto-resident"`. Add these
+target objects to the corresponding existing case definitions (the existing
+configuration, reference, and step-count fields are omitted here):
+
+```json
+{
+  "cases": [
+    {
+      "name": "channel-simple",
+      "performance_target": {
+        "schema_version": 1,
+        "metric": "seconds",
+        "limit": 9,
+        "comparison": "lt",
+        "control_mode": "sgs-direct",
+        "require_control_improvement": false
+      }
+    },
+    {
+      "name": "channel",
+      "performance_target": {
+        "schema_version": 1,
+        "metric": "ratio_to_native",
+        "limit": 0.744,
+        "comparison": "le",
+        "control_mode": "sgs-direct"
+      }
+    }
+  ]
+}
+```
+
+The metric compares the candidate
+median to the absolute limit or the fresh **native median** times the ratio;
+`lt` is strict and `le` is inclusive. Unless explicitly false,
+`require_control_improvement` also requires a lower candidate median than the
+control. Comfort always requires all seven measured candidate runs to satisfy
+the same limit and beat the control in every matching round. Pairing uses round
+IDs despite rotated execution order; the warmup never contributes. Missing
+rounds cannot establish comfort. Short diagnostic campaigns must not claim this
+qualification protocol.
+
+New target gates have schema 2 and expose `target_met`, `faster_than_control`,
+`accepted`, and detailed `comfortable` evidence. Correctness/timing report
+`status: "passed"` means the measurements completed successfully; it does not
+assert a performance target was met. Unmet targets can be plotted and sealed.
+Target campaigns render both absolute and native-relative PNG/SVG/PDF charts,
+with individual samples, medians, ranges, case-specific target lines and mode
+labels from the frozen metadata. Their plotting receipt hashes the source
+reports, target evaluator, and chart files. Sealed reports retain acceptance and
+comfort outcomes, compatible commit identities, and the frozen calibration and
+binary provenance. Existing schema-1 campaigns without targets retain their
+better-baseline/30% gates and rendering; immutable SGS snapshots keep their
+original interpretation.
+
 Numerical calibration schema 2 also freezes a derived `cpu_placement` contract:
 the profile's four sorted CPU numbers and `OMP_PROC_BIND=false`. Launch preparation
 and every campaign phase externally under that exact process mask, for example

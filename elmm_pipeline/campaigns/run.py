@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import math
 import os
-from pathlib import Path
 import re
 import shutil
 import statistics
 import subprocess
 import time
+from pathlib import Path
 
 from ..common import clean_environment
 from ..gpu_validation import gpu_activity, trace_environment
@@ -18,6 +18,7 @@ from .guard import available
 from .identity import digest, read, write
 from .launch_environment import apply_launch_environment, launch_environment_values
 from .prepare import check, validate_cpu_placement
+from .targets import evaluate_target, target_seconds
 from .transfers import aggregate_final_statistics
 
 
@@ -114,7 +115,9 @@ def summaries(runs, modes):
     return summary
 
 
-def gates(state, summary):
+def gates(state, summary, case=None, runs=()):
+    if case and "performance_target" in case:
+        return evaluate_target(state, case, summary, runs)
     baseline = min(state["baseline_modes"], key=lambda mode: summary[mode]["median"])
     record = {"baseline_mode": baseline, "baseline_seconds": summary[baseline]["median"],
               "target_seconds": 0.70 * summary[baseline]["median"]}
@@ -126,7 +129,12 @@ def gates(state, summary):
     return record
 
 
-def borderline(state, summary):
+def borderline(state, summary, case=None):
+    if case and "performance_target" in case:
+        target = case["performance_target"]
+        candidate = summary[state["candidate_mode"]]["median"]
+        return any(abs(candidate / reference - 1) <= .03 for reference in (
+            target_seconds(target, summary), summary[target["control_mode"]]["median"]))
     reference = min(summary[mode]["median"] for mode in state["baseline_modes"])
     return any(abs(summary[mode["name"]]["median"] / reference - gate) <= 0.03
                for mode in state["modes"] if mode["name"] not in state["baseline_modes"]
@@ -181,12 +189,12 @@ def run(root, phase):
                 entry["runs"].append(run)
                 write(output / "report.json", report)
             round_ += 1
-            if not traced and round_ == 4 and borderline(state, summaries(entry["runs"], modes)):
+            if not traced and round_ == 4 and borderline(state, summaries(entry["runs"], modes), case):
                 repetitions = 7
                 entry["extended_reason"] = "within three percentage points of tie or acceptance boundary"
         if not traced:
             entry["summary"] = summaries(entry["runs"], modes)
-            entry["gates"] = gates(state, entry["summary"])
+            entry["gates"] = gates(state, entry["summary"], case, entry["runs"])
         write(output / "report.json", report)
     check(root)
     report["status"] = "passed"
