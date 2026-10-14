@@ -158,6 +158,20 @@ def test_public_build_report_missing_or_foreign_cuda_source_cannot_drop_requirem
         cuda_build_fields({"build_sources": [descriptor, cpp]}, "other.cu")
 
 
+@pytest.mark.parametrize("requirement", [None, {}, {"schema_version": 1, "cuda_options": ["-O3"]}])
+def test_exact_window_contract_cannot_be_dropped_or_treated_as_legacy(source, tmp_path, requirement):
+    descriptor = {"source": source, "language": "cuda", "numerical_contract": contract(),
+                  "exact_window_build_contract": requirement}
+    with patch("elmm_pipeline.gpu_toolchain.subprocess.run") as run, \
+            pytest.raises(ValueError, match="Exact-window build contracts"):
+        compile_gpu_sources([descriptor], tmp_path / "build", toolchain=toolchain())
+    run.assert_not_called()
+    assert not (tmp_path / "build").exists()
+    reported = {"path": "region.cu", **{key: value for key, value in descriptor.items() if key != "source"}}
+    with pytest.raises(LocalAdapterError, match="Exact-window build contracts"):
+        cuda_build_fields({"build_sources": [reported]}, "region.cu")
+
+
 @pytest.mark.skipif(os.environ.get("ELMM_GPU_NATIVE_TESTS") != "1", reason="Opt-in production CUDA execution")
 @pytest.mark.parametrize("bits,power", [(32, 13), (64, 28)])
 def test_public_compiler_and_production_build_preserve_separate_arithmetic(tmp_path, bits, power):

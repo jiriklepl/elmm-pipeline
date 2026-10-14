@@ -109,6 +109,28 @@ def test_distinct_roots_with_shared_pristine_inputs_apply_together(tmp_path, sou
         assert digest(Path(source).read_bytes()) == expected
 
 
+@pytest.mark.parametrize("location", ["scope", "manifest", "cuda", "fortran"])
+def test_exact_window_costs_require_supported_build_attestation_before_source_edits(tmp_path, sources, location):
+    first = package(tmp_path, sources, "ordinary")
+    second = package(tmp_path, sources, "exact", source="consumer.f90")
+    manifest = second["scope_manifest"]
+    requirement = {"schema_version": 1, "cuda_options": ["-O3"], "fortran_options": ["-O3"]}
+    if location == "scope":
+        manifest["scopes"] = [{"exact_window": {"contract": {"build_contract": requirement}}}]
+    elif location == "manifest":
+        manifest["exact_window_build_contract"] = requirement
+    else:
+        next(item for item in manifest["build_sources"] if item["language"] == location)[
+            "exact_window_build_contract"] = requirement
+    save(second)
+    with pytest.raises(LocalAdapterError, match="Exact-window"):
+        compose_scope_packages([first, second], sources[1])
+    unchanged(sources)
+    with pytest.raises(LocalAdapterError, match="Exact-window"):
+        apply_scope_sources(second, sources[1])
+    unchanged(sources)
+
+
 def test_exact_shared_entry_and_replacement_are_reused(tmp_path, sources):
     first = package(tmp_path, sources, "one", entry="same", replacement="! identical\n")
     second = package(tmp_path, sources, "two", entry="same", replacement="! identical\n")

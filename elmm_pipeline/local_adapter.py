@@ -19,6 +19,9 @@ class LocalAdapterError(RuntimeError):
 def _numerical_build_fields(item):
     if not isinstance(item, dict):
         raise LocalAdapterError("Compiler numerical build metadata requires a source descriptor")
+    if "exact_window_build_contract" in item:
+        raise LocalAdapterError("Exact-window build contracts are unsupported by the application consumer; "
+                                "use the independently authenticated fixture producer")
     if "numerical_contract" not in item:
         return {}
     if item.get("language") not in {"cuda", "c++"}:
@@ -44,8 +47,20 @@ def cuda_build_fields(report, path):
     return _numerical_build_fields(selected[0])
 
 
+def _require_supported_scope_build(manifest):
+    """Do not drop cost applicability contracts the consumer cannot enforce."""
+    scopes = manifest.get("scopes", [])
+    if not isinstance(scopes, list):
+        raise LocalAdapterError("Compiler scope metadata requires a list of source scopes")
+    if ("exact_window_build_contract" in manifest or any(
+            isinstance(scope, dict) and "exact_window" in scope for scope in scopes)):
+        raise LocalAdapterError("Exact-window cost evidence requires complete CUDA and Fortran build attestation; "
+                                "the application consumer does not support this contract")
+
+
 def _scope_numerical_contracts(manifest):
     """Required runtime metadata must match the actual common build source."""
+    _require_supported_scope_build(manifest)
     units = manifest.get("build_sources", [])
     if not isinstance(units, list):
         raise LocalAdapterError("Compiler build sources require public source descriptors")
@@ -520,6 +535,7 @@ def _scope_package_build(metadata):
     if not isinstance(metadata, dict) or not isinstance(metadata.get("scope_manifest"), dict):
         raise LocalAdapterError("Scope composition requires compiler package metadata")
     manifest = metadata["scope_manifest"]
+    _require_supported_scope_build(manifest)
     try:
         root = Path(metadata["artifact_root"]).resolve(strict=True)
     except (KeyError, TypeError, OSError) as error:

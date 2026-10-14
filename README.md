@@ -260,6 +260,16 @@ the contract retain their existing flags and are recorded as `legacy_unspecified
 they do not acquire a strict numerical guarantee. Compiler metadata is consumed
 through public JSON, without importing its implementation or inspecting kernels.
 
+Experimental complete-window measurements have a stronger build requirement:
+their costs depend on the exact CUDA and Fortran performance options as well as
+the numerical contract. The application consumer currently rejects compiler
+`scope.exact_window` records and `exact_window_build_contract` descriptors before
+source replacement or compilation. Such evidence is supported only by the
+compiler's independently authenticated fixture producer. This prevents source
+composition or descriptor normalization from silently dropping a requirement
+that the application build cannot enforce. Ordinary scoped AUTO and its existing
+calibrations retain their supported behavior.
+
 Scoped runtime traces report successful launches, upload/download bytes,
 allocations and waits during separate validation runs. Adapter call markers are
 not available for source scopes, so transformed-call coverage is explicitly

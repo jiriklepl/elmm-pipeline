@@ -199,6 +199,9 @@ def validate_gpu_sources(sources: list[GPUSource] | list[dict]) -> list[dict]:
     for entry in sources:
         if not isinstance(entry, dict) or "source" not in entry or "language" not in entry:
             raise ValueError("GPU sources must be descriptors containing source and language")
+        if "exact_window_build_contract" in entry:
+            raise ValueError("Exact-window build contracts require complete CUDA and Fortran build attestation; "
+                             "this application build consumer does not support them")
         source = Path(entry["source"]).resolve()
         language = entry["language"]
         suffixes = {"cuda": {".cu"}}
