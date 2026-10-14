@@ -175,6 +175,23 @@ operations can share a context. Consult its manifest for reached boundaries and
 available numerical work; selecting this mode is not evidence of a resident
 application chain or improved performance.
 
+Lexical scopes may include a compiler-issued `checked_execution_plan` schema 1
+inside the existing scope-manifest schema 1. The adapter validates its canonical
+JSON identity, source and configuration-input linkage, original procedure and
+unit order, and unique canonical registrations before applying a package. Fresh
+responses also bind the plan to the requested capture facts. Composition retains
+each plan unchanged. The full `identity` authenticates the diagnostic record;
+the separate opaque `execution_identity` identifies the compiler's source-bound
+execution semantics without process-local proof IDs. The pipeline validates its
+SHA256 form without reconstructing numerical or placement decisions. Each
+procedure also carries an opaque emission identity binding the compiler's
+admitted control and effect state. Operation trees, definitions,
+native interruptions, policy, and unavailable-cost reasons remain compiler facts.
+This explanatory record grants no additional placement or build authority.
+Earlier packages without the optional record remain supported. Exact-window
+build contracts remain rejected until the application consumer can enforce their
+full applicability contract.
+
 Capture facts use the compiler's versioned public JSON contract. They declare
 participation and canonical resource roots with storage lifetime, escape,
 allocation-change, and physical initialization facts. Supply `whole`, `none`, or

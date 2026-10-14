@@ -176,6 +176,12 @@ def test_independent_adapter_transports_reached_execution_without_choosing_segme
     assert manifest['scope_execution'] == 'reached'
     assert manifest['scope_count'] == 1
     assert manifest['scopes'][0]['native_continuation'].startswith('original lexical scope')
+    plan = manifest['scopes'][0]['checked_execution_plan']
+    assert plan['schema_version'] == 1
+    assert len(plan['execution_identity']) == 64
+    assert plan['entry'] == manifest['entry'] == 'source_application::step'
+    assert plan['sources'] == manifest['source_inputs']
+    assert plan['procedures'][0]['units'][0]['operations'] == manifest['scopes'][0]['planning_segments'][0]['operations']
     assert metadata['compiler_report']['scopes'] == manifest
 
 

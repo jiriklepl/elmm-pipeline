@@ -8,12 +8,20 @@ import re
 import subprocess
 from pathlib import Path
 
+from .checked_execution_plan import validate_checked_execution_plans
 from .common import python_environment
 from .gpu_toolchain import validate_numerical_contract
 
 
 class LocalAdapterError(RuntimeError):
     pass
+
+
+def _checked_execution_plans(manifest, *, capture_facts=None):
+    try:
+        validate_checked_execution_plans(manifest, capture_facts=capture_facts)
+    except ValueError as error:
+        raise LocalAdapterError(str(error)) from error
 
 
 def _numerical_build_fields(item):
@@ -415,6 +423,7 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             or not isinstance(manifest.get("artifacts_sha256"),dict)
             or not isinstance(report.get("outputs"),list)):
         raise LocalAdapterError("Compiler source-scope report is missing versioned scope/capture/artifact facts")
+    _checked_execution_plans(manifest, capture_facts=facts)
     _check_descriptor_expectation_contract(manifest, facts)
     if collective is not None:
         _check_collective_scope_report(manifest, collective)
@@ -536,6 +545,7 @@ def _scope_package_build(metadata):
         raise LocalAdapterError("Scope composition requires compiler package metadata")
     manifest = metadata["scope_manifest"]
     _require_supported_scope_build(manifest)
+    _checked_execution_plans(manifest)
     try:
         root = Path(metadata["artifact_root"]).resolve(strict=True)
     except (KeyError, TypeError, OSError) as error:
