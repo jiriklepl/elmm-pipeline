@@ -94,5 +94,11 @@ def adapt_source_scopes(project_root, python, output_dir, *, compiler_root, opti
                   "changed_files": [str(path.relative_to(root)) for path in changed],
                   "native_success": not regions, "defines": list(defines),
                   "source_patterns": [str(path.relative_to(root)) for path in sources]}
+    if manifest.get("scope_measurement"):
+        adaptation.update(measurement_only=True, scope_measurement=manifest["scope_measurement"],
+                          policy="compiler-issued diagnostic call timing; no placement or calibration authority")
+        if manifest["scope_measurement"] == "native":
+            adaptation["optimized_regions"] = 0
+            adaptation["native_success"] = True
     write_json(output / "adaptation.json", adaptation)
     return adaptation

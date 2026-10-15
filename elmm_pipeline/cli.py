@@ -59,16 +59,19 @@ def scoped_configuration(args):
     model = getattr(args, "memory_model", "call")
     transfers = getattr(args, "scope_transfers", "direct")
     execution = getattr(args, "scope_execution", "bounded")
+    measurement = getattr(args, "scope_measurement", None)
     if transfers not in {"direct", "pinned", "pipelined", "auto", "coalesced"}:
         raise ValueError("Unknown scope transfer mode")
     if execution not in {"bounded", "reached"}:
         raise ValueError("Unknown scope execution mode")
+    if measurement not in (None, "native", "resident"):
+        raise ValueError("Unknown scope measurement variant")
     values = {"entry": getattr(args, "scope_entry", None), "source": getattr(args, "scope_source", None),
               "source_files": getattr(args, "scope_source_file", None) or [],
               "capture_facts": getattr(args, "scope_facts", None),
               "effect_contracts": getattr(args, "scope_effect_contracts", None)}
     if model == "call":
-        if transfers != "direct" or execution != "bounded" or any(values[key] for key in values):
+        if transfers != "direct" or execution != "bounded" or measurement is not None or any(values[key] for key in values):
             raise ValueError("--scope-* options require --memory-model scoped")
         return None
     if model != "scoped":
@@ -77,6 +80,8 @@ def scoped_configuration(args):
         raise ValueError("Scoped memory requires --target gpu and --tools local")
     if args.gpu_policy not in {"sections", "auto"}:
         raise ValueError("Scoped memory requires --gpu-policy sections or auto")
+    if measurement is not None and (args.gpu_policy != "sections" or execution != "reached"):
+        raise ValueError("Scope measurement requires --gpu-policy sections and --scope-execution reached")
     if not values["entry"] or not values["source"] or not values["capture_facts"]:
         raise ValueError("Scoped memory requires --scope-entry, --scope-source and --scope-facts")
     for key in ("capture_facts", "effect_contracts"):
@@ -84,6 +89,7 @@ def scoped_configuration(args):
             values[key] = Path(values[key]).resolve(strict=True)
     values["transfers"] = transfers
     values["execution"] = execution
+    values["measurement"] = measurement
     return values
 
 
@@ -112,6 +118,7 @@ def prepare_build(tool, args, setup_state, compilers):
                              "source_files": scope_options["source_files"],
                              "transfers": scope_options["transfers"],
                              "execution": scope_options["execution"],
+                             "measurement": scope_options["measurement"],
                              "capture_facts_sha256": hashlib.sha256(scope_options["capture_facts"].read_bytes()).hexdigest(),
                              "effect_contracts_sha256": (hashlib.sha256(scope_options["effect_contracts"].read_bytes()).hexdigest()
                                                           if scope_options["effect_contracts"] else None)}
@@ -119,7 +126,7 @@ def prepare_build(tool, args, setup_state, compilers):
         key_data["target"] = args.target
         paths += [ROOT / "elmm_pipeline" / name for name in (
             "adaptation.py", "discovery.py", "structural.py", "local_adapter.py",
-            "instrumentation.py", "common.py")]
+            "instrumentation.py", "common.py", "owner_measurement.py")]
         if args.target == "gpu":
             paths += [ROOT / "elmm_pipeline" / name for name in ("gpu_discovery.py", "gpu_calls.py", "gpu_backend.py")]
             if scope_options:
@@ -159,6 +166,7 @@ def prepare_build(tool, args, setup_state, compilers):
         if scope_options:
             gpu_options["scope_transfers"] = scope_options["transfers"]
             gpu_options["scope_execution"] = scope_options["execution"]
+            gpu_options["scope_measurement"] = scope_options["measurement"]
         profile_path = getattr(args, "calibration_profile", None)
         if profile_path:
             copied_profile = directory / "calibration.json"
@@ -465,6 +473,8 @@ def main():
                          help="Pass the scoped transfer mode to the compiler; independent of GPU placement")
     measure.add_argument("--scope-execution", choices=("bounded", "reached"), default="bounded",
                          help="Pass the opt-in reached source execution mode to the compiler")
+    measure.add_argument("--scope-measurement", choices=("native", "resident"),
+                         help="Diagnostic compiler-issued call timing; sections/reached only, no placement evidence")
     measure.add_argument("--scope-entry", help="Explicit procedure or module::procedure for scoped execution")
     measure.add_argument("--scope-source", help="Entry source path relative to the application src/ tree")
     measure.add_argument("--scope-source-file", action="append", default=[],

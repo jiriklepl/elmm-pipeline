@@ -12,10 +12,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from test_local_scopes import FACTS, PROGRAM
+
 from elmm_pipeline.adaptation import adapt_project
 from elmm_pipeline.cli import prepare_build, scoped_configuration
 from elmm_pipeline.gpu_validation import gpu_activity, native_policy_exercised
-from test_local_scopes import FACTS, PROGRAM
 
 
 @pytest.fixture(scope="module")
@@ -151,6 +152,7 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         assert kwargs["memory_model"] == "scoped"
         assert kwargs["gpu_options"]["scope_transfers"] == getattr(args, "scope_transfers", "direct")
         assert kwargs["gpu_options"]["scope_execution"] == getattr(args, "scope_execution", "bounded")
+        assert kwargs["gpu_options"]["scope_measurement"] == getattr(args, "scope_measurement", None)
         copied = kwargs["scope_options"]["capture_facts"]
         assert copied != facts
         body = json.loads(copied.read_text())
@@ -180,12 +182,39 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         fifth, reached_metadata = prepare_build("local", args, setup, {})
         reached_cached, _ = prepare_build("local", args, setup, {})
         assert reached_cached == fifth
-    assert len(seen) == 5
-    assert len({first.parent, second.parent, third.parent, fourth.parent, fifth.parent}) == 5
+        args.gpu_policy = "sections"
+        args.scope_measurement = "native"
+        sixth, native_measurement = prepare_build("local", args, setup, {})
+        args.scope_measurement = "resident"
+        seventh, resident_measurement = prepare_build("local", args, setup, {})
+    assert len(seen) == 7
+    assert len({first.parent, second.parent, third.parent, fourth.parent, fifth.parent, sixth.parent, seventh.parent}) == 7
     assert metadata["identity"]["scope"]["execution"] == "bounded"
     assert reached_metadata["identity"]["scope"]["execution"] == "reached"
     assert metadata["identity"]["memory_model"] == "scoped"
     assert "scope_extraction.py" in metadata["identity"]["implementation"]
+    assert native_measurement["identity"]["scope"]["measurement"] == "native"
+    assert resident_measurement["identity"]["scope"]["measurement"] == "resident"
+    assert "owner_measurement.py" in resident_measurement["identity"]["implementation"]
+
+
+@pytest.mark.parametrize("variant", ["native", "resident"])
+def test_measurement_configuration_requires_sections_reached(tmp_path, variant):
+    facts = tmp_path / "facts.json"
+    facts.write_text(json.dumps(FACTS))
+    args = SimpleNamespace(memory_model="scoped", scope_entry="step", scope_source="application.f90",
+                           scope_facts=facts, target="gpu", tools=["baseline", "local"], gpu_policy="sections",
+                           scope_execution="reached", scope_measurement=variant)
+    assert scoped_configuration(args)["measurement"] == variant
+    args.gpu_policy = "auto"
+    with pytest.raises(ValueError, match="measurement requires"):
+        scoped_configuration(args)
+    args.gpu_policy, args.scope_execution = "sections", "bounded"
+    with pytest.raises(ValueError, match="measurement requires"):
+        scoped_configuration(args)
+    args.scope_measurement = "unsupported"
+    with pytest.raises(ValueError, match="Unknown scope measurement"):
+        scoped_configuration(args)
 
 
 @pytest.mark.parametrize("transfers", ["pinned", "coalesced"])

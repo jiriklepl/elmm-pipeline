@@ -175,6 +175,21 @@ operations can share a context. Consult its manifest for reached boundaries and
 available numerical work; selecting this mode is not evidence of a resident
 application chain or improved performance.
 
+`--scope-measurement native|resident` requests diagnostic timing around the
+compiler's authenticated original call sites for an already admitted complete
+owner. It requires `sections` policy, `reached` execution and noncollective
+participation. The compiler includes argument evaluation, procedure execution,
+native interruptions and final resident cleanup; output uses
+`FORT_SCOPE_MEASUREMENT` records. The adapter validates the versioned
+`owner_measurement` identities and exact original call text, preserves the
+contract through composition, and labels instrumentation as measurement-only.
+The native variant changes only caller timing and needs no CUDA/runtime build
+units; its admitted owner plan grants no GPU execution claim. Original build
+flags remain unchanged and executed build receipts support comparison with the
+native control. These observations have no runtime workload key, calibration
+authority or automatic placement authority. Guarded resident fallbacks require
+separate runtime traces; timing records alone do not establish GPU execution.
+
 Lexical scopes may include a compiler-issued `checked_execution_plan` schema 1
 inside the existing scope-manifest schema 1. The adapter validates its canonical
 JSON identity, source and configuration-input linkage, original procedure and

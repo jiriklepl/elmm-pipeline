@@ -11,10 +11,18 @@ from pathlib import Path
 from .checked_execution_plan import validate_checked_execution_plans
 from .common import python_environment
 from .gpu_toolchain import validate_numerical_contract
+from .owner_measurement import validate_owner_measurements
 
 
 class LocalAdapterError(RuntimeError):
     pass
+
+
+def _owner_measurements(manifest):
+    try:
+        return validate_owner_measurements(manifest)
+    except ValueError as error:
+        raise LocalAdapterError(str(error)) from error
 
 
 def _checked_execution_plans(manifest, *, capture_facts=None):
@@ -366,6 +374,11 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
     policy=options.get("gpu_policy","sections")
     if policy not in {"sections","auto"}:
         raise LocalAdapterError("Scoped source execution requires sections or auto")
+    measurement = options.get("scope_measurement")
+    if measurement not in (None, "native", "resident"):
+        raise LocalAdapterError("Unknown scope measurement variant")
+    if measurement is not None and (policy != "sections" or options.get("scope_execution") != "reached"):
+        raise LocalAdapterError("Scope measurement requires sections policy and reached execution")
     facts=dict(capture_facts)
     sources=list(dict.fromkeys([source_path,*source_files]))
     hashes={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
@@ -373,6 +386,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         raise LocalAdapterError("Scope capture facts belong to different source contents")
     facts["sources"]=hashes
     collective = _collective_scope_contract(facts, entry, options.get("host_threads", 4), hashes)
+    if measurement is not None and collective is not None:
+        raise LocalAdapterError("Scope measurement requires a noncollective original caller")
     output_dir.mkdir(parents=True,exist_ok=True)
     facts_path=output_dir/"scope-captures.json"
     facts_path.write_text(json.dumps(facts,indent=2)+"\n")
@@ -383,6 +398,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         arguments += ["--scope-transfers", options["scope_transfers"]]
     if options.get("scope_execution", "bounded") != "bounded":
         arguments += ["--scope-execution", options["scope_execution"]]
+    if measurement is not None:
+        arguments += ["--scope-measurement", measurement]
     if collective is not None:
         arguments += ["--gpu-collective"]
     for source in source_files:
@@ -424,11 +441,13 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             or not isinstance(report.get("outputs"),list)):
         raise LocalAdapterError("Compiler source-scope report is missing versioned scope/capture/artifact facts")
     _checked_execution_plans(manifest, capture_facts=facts)
+    if _owner_measurements(manifest) != measurement:
+        raise LocalAdapterError("Compiler scope measurement variant differs from its request")
     _check_descriptor_expectation_contract(manifest, facts)
     if collective is not None:
         _check_collective_scope_report(manifest, collective)
     _scope_numerical_contracts(manifest)
-    if manifest["scope_count"]:
+    if manifest["scope_count"] and measurement != "native":
         runtime=manifest.get("runtime")
         if (not isinstance(runtime,dict) or runtime.get("abi_version") != 1
                 or runtime.get("link_once") is not True or not isinstance(runtime.get("runtime_id"),str)
@@ -470,6 +489,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             raise LocalAdapterError("Normalized source changed while its compiler scope artifacts were prepared")
     metadata={"tool":"local","memory_model":"scoped","entry":entry,"changed":bool(manifest["scope_count"]),
               "command":command,"compiler_report":report,"scope_manifest":manifest,"artifact_root":str(output_dir)}
+    if measurement is not None:
+        metadata.update(measurement_only=True, scope_measurement=measurement)
     # The existing application build already scans GNU Fortran dependencies
     # and compiles separate CUDA objects. Supply its inputs from public roles.
     units=manifest.get("build_sources",[])
@@ -499,6 +520,7 @@ def _prepare_scope_sources(metadata, destinations):
     """Validate replacements without changing any application source."""
     manifest=metadata["scope_manifest"]
     _scope_numerical_contracts(manifest)
+    _owner_measurements(manifest)
     root=Path(metadata["artifact_root"]).resolve(strict=True)
     prepared=[]
     dependencies=manifest.get("analysis_sources") or {}
@@ -546,6 +568,7 @@ def _scope_package_build(metadata):
     manifest = metadata["scope_manifest"]
     _require_supported_scope_build(manifest)
     _checked_execution_plans(manifest)
+    measurement = _owner_measurements(manifest)
     try:
         root = Path(metadata["artifact_root"]).resolve(strict=True)
     except (KeyError, TypeError, OSError) as error:
@@ -571,7 +594,7 @@ def _scope_package_build(metadata):
     if not isinstance(units, list):
         raise LocalAdapterError("Scope composition requires public build roles")
     runtime = manifest.get("runtime")
-    if manifest.get("scope_count", 0):
+    if manifest.get("scope_count", 0) and measurement != "native":
         if (not isinstance(runtime, dict) or runtime.get("schema_version") != 1
                 or runtime.get("abi_version") != 1 or runtime.get("link_once") is not True
                 or not isinstance(runtime.get("source_sha256"), dict) or not runtime["source_sha256"]
@@ -670,6 +693,7 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
     for destination, content in replacements.items():
         destination.write_bytes(content)
     return {"schema_version": 1, "tool": "local", "memory_model": "scoped",
+            **({"measurement_only": True} if any(p["scope_manifest"].get("scope_measurement") for p in packages) else {}),
             "scope_packages": packages, "runtime": runtime, "build_artifacts": list(artifacts.values()),
             "patched_sources": [str(path) for path in replacements],
             "extra_sources": [item["source"] for item in artifacts.values() if item["language"] == "fortran"],
