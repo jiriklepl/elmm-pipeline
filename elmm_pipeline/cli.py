@@ -60,6 +60,7 @@ def scoped_configuration(args):
     transfers = getattr(args, "scope_transfers", "direct")
     execution = getattr(args, "scope_execution", "bounded")
     measurement = getattr(args, "scope_measurement", None)
+    cost = getattr(args, "scope_cost", None)
     if transfers not in {"direct", "pinned", "pipelined", "auto", "coalesced"}:
         raise ValueError("Unknown scope transfer mode")
     if execution not in {"bounded", "reached"}:
@@ -71,7 +72,7 @@ def scoped_configuration(args):
               "capture_facts": getattr(args, "scope_facts", None),
               "effect_contracts": getattr(args, "scope_effect_contracts", None)}
     if model == "call":
-        if transfers != "direct" or execution != "bounded" or measurement is not None or any(values[key] for key in values):
+        if transfers != "direct" or execution != "bounded" or measurement is not None or cost is not None or any(values[key] for key in values):
             raise ValueError("--scope-* options require --memory-model scoped")
         return None
     if model != "scoped":
@@ -90,6 +91,7 @@ def scoped_configuration(args):
     values["transfers"] = transfers
     values["execution"] = execution
     values["measurement"] = measurement
+    values["cost"] = Path(cost).resolve(strict=True) if cost is not None else None
     return values
 
 
@@ -119,6 +121,8 @@ def prepare_build(tool, args, setup_state, compilers):
                              "transfers": scope_options["transfers"],
                              "execution": scope_options["execution"],
                              "measurement": scope_options["measurement"],
+                             "cost_sha256": (hashlib.sha256(scope_options["cost"].read_bytes()).hexdigest()
+                                             if scope_options["cost"] else None),
                              "capture_facts_sha256": hashlib.sha256(scope_options["capture_facts"].read_bytes()).hexdigest(),
                              "effect_contracts_sha256": (hashlib.sha256(scope_options["effect_contracts"].read_bytes()).hexdigest()
                                                           if scope_options["effect_contracts"] else None)}
@@ -126,7 +130,7 @@ def prepare_build(tool, args, setup_state, compilers):
         key_data["target"] = args.target
         paths += [ROOT / "elmm_pipeline" / name for name in (
             "adaptation.py", "discovery.py", "structural.py", "local_adapter.py",
-            "instrumentation.py", "common.py", "owner_measurement.py")]
+            "instrumentation.py", "common.py", "owner_measurement.py", "application_build.py")]
         if args.target == "gpu":
             paths += [ROOT / "elmm_pipeline" / name for name in ("gpu_discovery.py", "gpu_calls.py", "gpu_backend.py")]
             if scope_options:
@@ -155,7 +159,8 @@ def prepare_build(tool, args, setup_state, compilers):
     if stamp.is_file():
         data = json.loads(stamp.read_text())
         binary = directory / "bin" / "ELMM"
-        if binary.is_file() and hashlib.sha256(binary.read_bytes()).hexdigest() == data["binary_sha256"]:
+        if (binary.is_file() and hashlib.sha256(binary.read_bytes()).hexdigest() == data["binary_sha256"]
+                and not (scope_options and scope_options["cost"])):
             return binary, data
     if directory.exists():
         shutil.rmtree(directory)
@@ -167,6 +172,10 @@ def prepare_build(tool, args, setup_state, compilers):
             gpu_options["scope_transfers"] = scope_options["transfers"]
             gpu_options["scope_execution"] = scope_options["execution"]
             gpu_options["scope_measurement"] = scope_options["measurement"]
+            if scope_options["cost"]:
+                copied_cost = directory / "scope-cost.json"
+                shutil.copy2(scope_options["cost"], copied_cost)
+                gpu_options["scope_cost"] = str(copied_cost)
         profile_path = getattr(args, "calibration_profile", None)
         if profile_path:
             copied_profile = directory / "calibration.json"
@@ -208,7 +217,8 @@ def prepare_build(tool, args, setup_state, compilers):
                    args.jobs, args.threads, args.build_arg,
                    extra_sources=[Path(p) for p in adapter.get("extra_sources", [])],
                    patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
-                   gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain)
+                   gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain,
+                   **({"application_build": adapter["application_build"]} if "application_build" in adapter else {}))
     data = {"identity": key_data, "adapter": adapter,
             "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
             "changed_source_sha256": {name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
@@ -475,6 +485,8 @@ def main():
                          help="Pass the opt-in reached source execution mode to the compiler")
     measure.add_argument("--scope-measurement", choices=("native", "resident"),
                          help="Diagnostic compiler-issued call timing; sections/reached only, no placement evidence")
+    measure.add_argument("--scope-cost", type=Path,
+                         help="Compiler-owned checked selection cost request; executed application build attestation required")
     measure.add_argument("--scope-entry", help="Explicit procedure or module::procedure for scoped execution")
     measure.add_argument("--scope-source", help="Entry source path relative to the application src/ tree")
     measure.add_argument("--scope-source-file", action="append", default=[],

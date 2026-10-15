@@ -68,10 +68,15 @@ def _require_supported_scope_build(manifest):
     scopes = manifest.get("scopes", [])
     if not isinstance(scopes, list):
         raise LocalAdapterError("Compiler scope metadata requires a list of source scopes")
-    if ("exact_window_build_contract" in manifest or any(
-            isinstance(scope, dict) and "exact_window" in scope for scope in scopes)):
+    from .application_build import selection_builds
+
+    if "exact_window_build_contract" in manifest:
         raise LocalAdapterError("Exact-window cost evidence requires complete CUDA and Fortran build attestation; "
                                 "the application consumer does not support this contract")
+    try:
+        selection_builds(manifest)
+    except (KeyError, TypeError, ValueError) as error:
+        raise LocalAdapterError(str(error)) from error
 
 
 def _scope_numerical_contracts(manifest):
@@ -400,6 +405,14 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         arguments += ["--scope-execution", options["scope_execution"]]
     if measurement is not None:
         arguments += ["--scope-measurement", measurement]
+    cost_path = options.get("scope_cost")
+    cost_identity = None
+    if cost_path is not None:
+        cost_path = Path(cost_path).resolve(strict=True)
+        cost_identity = hashlib.sha256(cost_path.read_bytes()).hexdigest()
+        if collective is not None or measurement is not None:
+            raise LocalAdapterError("Scope cost requires a noncollective selection without diagnostic call measurement")
+        arguments += ["--scope-cost", str(cost_path)]
     if collective is not None:
         arguments += ["--gpu-collective"]
     for source in source_files:
@@ -428,6 +441,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             raise LocalAdapterError("Invalid numerical source package") from error
         arguments+=["--numerical-sources",str(numerical_sources)]
     report,command=_invoke(source_path,compiler_root,python,output_dir,entry,arguments,"scope-compiler.log")
+    if cost_path is not None and hashlib.sha256(cost_path.read_bytes()).hexdigest() != cost_identity:
+        raise LocalAdapterError("Scope cost request changed during compilation")
     manifest=report.get("scopes") if isinstance(report,dict) else None
     if (not isinstance(manifest,dict) or report.get("supported") is not True
             or manifest.get("schema_version") != 1 or type(manifest.get("scope_count")) is not int
@@ -489,6 +504,15 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             raise LocalAdapterError("Normalized source changed while its compiler scope artifacts were prepared")
     metadata={"tool":"local","memory_model":"scoped","entry":entry,"changed":bool(manifest["scope_count"]),
               "command":command,"compiler_report":report,"scope_manifest":manifest,"artifact_root":str(output_dir)}
+    if cost_path is not None:
+        metadata["scope_cost"] = {"path": str(cost_path), "sha256": cost_identity}
+    from .application_build import selection_builds
+
+    if selection_builds(manifest):
+        metadata["application_build"] = {"compiler_root": str(Path(compiler_root).resolve()),
+                                         "python": str(Path(python).absolute()), "artifact_root": str(output_dir),
+                                         "manifest": str(output_dir / "scope-manifest.json"),
+                                         "manifest_sha256": hashlib.sha256((output_dir / "scope-manifest.json").read_bytes()).hexdigest()}
     if measurement is not None:
         metadata.update(measurement_only=True, scope_measurement=measurement)
     # The existing application build already scans GNU Fortran dependencies
@@ -558,6 +582,15 @@ def apply_scope_sources(metadata: dict, destinations: dict[str, Path]) -> list[P
     prepared = _prepare_scope_sources(metadata, destinations)
     for destination, content in prepared:
         destination.write_bytes(content)
+    if "application_build" in metadata:
+        from .application_build import selection_builds
+
+        records = selection_builds(metadata["scope_manifest"])
+        originals = records[0]["contract"]["build_contract"]["original_inputs"]
+        # An omitted destination means the unchanged exact original path; no
+        # implicit basename/root relocation is performed.
+        metadata["application_build"]["destinations"] = {
+            source: str(Path(destinations.get(source, source)).resolve()) for source in originals}
     return [destination for destination, _ in prepared]
 
 
@@ -660,6 +693,12 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
     separate in the receipt; this function makes no compiler decisions.
     """
     packages = list(packages)
+    from .application_build import selection_builds
+
+    for package in packages:
+        _require_supported_scope_build(package.get("scope_manifest", {}))
+    if any(selection_builds(package.get("scope_manifest", {})) for package in packages):
+        raise LocalAdapterError("Priced selection bundles require one compiler-issued package and its complete build attestation")
     replacements, artifacts, artifact_hashes, runtime = {}, {}, {}, None
     for index, metadata in enumerate(packages):
         package_runtime, build, package_hashes = _scope_package_build(metadata)

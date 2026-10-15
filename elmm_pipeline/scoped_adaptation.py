@@ -69,7 +69,7 @@ def adapt_source_scopes(project_root, python, output_dir, *, compiler_root, opti
     # Application sources own their native module dependencies. Their generated
     # replacements are checked with the complete build, not as isolated modules.
     gpu_check = None
-    if metadata["gpu_sources"]:
+    if metadata["gpu_sources"] and "application_build" not in metadata:
         from .gpu_toolchain import compile_gpu_sources
         gpu_check = compile_gpu_sources(metadata["gpu_sources"], output / "syntax-check",
                                         options=gpu_options, defines=list(defines),
@@ -94,6 +94,8 @@ def adapt_source_scopes(project_root, python, output_dir, *, compiler_root, opti
                   "changed_files": [str(path.relative_to(root)) for path in changed],
                   "native_success": not regions, "defines": list(defines),
                   "source_patterns": [str(path.relative_to(root)) for path in sources]}
+    if "application_build" in metadata:
+        adaptation["application_build"] = metadata["application_build"]
     if manifest.get("scope_measurement"):
         adaptation.update(measurement_only=True, scope_measurement=manifest["scope_measurement"],
                           policy="compiler-issued diagnostic call timing; no placement or calibration authority")

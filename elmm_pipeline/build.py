@@ -187,6 +187,7 @@ def build(
     patched_sources: list[Path] | None = None,
     gpu_sources: list[GPUSource] | list[dict] | None = None,
     gpu_options: dict | None = None,
+    application_build: dict | None = None,
 ) -> Path:
     """Build double-precision ELMM and return the absolute executable path.
 
@@ -244,7 +245,16 @@ def build(
     receipt_directory = Path(tempfile.mkdtemp(prefix="host-command-receipts-", dir=build_dir))
     recorder_module = build_dir / "build_receipts.py"
     shutil.copyfile(Path(__file__).with_name("build_receipts.py"), recorder_module)
-    gpu_build = compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines, jobs=jobs) if gpu_units else None
+    application_token = None
+    application_macros = None
+    if application_build is not None:
+        from .application_build import preflight
+
+        application_token = preflight(application_build, build_dir)
+        application_macros = application_token["macros"]
+    gpu_build = (compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines, jobs=jobs,
+                                    **({"application_macros": application_macros} if application_macros else {}))
+                 if gpu_units else None)
     injection = [
         "# Additional sources supplied by elmm-pipeline.",
         "import importlib.util as pipeline_importlib",
@@ -396,5 +406,9 @@ def build(
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     build_manifest["build_receipts"] = {"path": str(receipt_path), "status": receipt["status"],
                                        "identity": receipt.get("identity")}
+    if application_token is not None:
+        from .application_build import attest
+
+        build_manifest["application_build"] = attest(application_build, application_token, receipt_path, build_dir)
     (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
     return binary

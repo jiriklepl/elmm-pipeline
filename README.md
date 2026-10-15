@@ -300,15 +300,55 @@ the contract retain their existing flags and are recorded as `legacy_unspecified
 they do not acquire a strict numerical guarantee. Compiler metadata is consumed
 through public JSON, without importing its implementation or inspecting kernels.
 
-Experimental complete-window measurements have a stronger build requirement:
-their costs depend on the exact CUDA and Fortran performance options as well as
-the numerical contract. The application consumer currently rejects compiler
-`scope.exact_window` records and `exact_window_build_contract` descriptors before
-source replacement or compilation. Such evidence is supported only by the
-compiler's independently authenticated fixture producer. This prevents source
-composition or descriptor normalization from silently dropping a requirement
-that the application build cannot enforce. Ordinary scoped AUTO and its existing
-calibrations retain their supported behavior.
+Complete-window measurements have a stronger build requirement: their costs
+depend on the exact CUDA and Fortran performance options as well as the numerical
+contract. The legacy fixture protocols, including `complete-original-window-cold-v4`
+and `exact_window_build_contract` descriptors, remain unsupported by the
+application consumer and are rejected before source replacement or compilation.
+
+The separate `checked-selection-process-v1` protocol supports compiler-selected
+complete original numerical groups through `--scope-cost FILE`. The pipeline
+transports this source-bound request unchanged; it does not choose groups or
+derive costs. Its `executed-application-build-v1` contract uses successful native
+and resident origin receipts, explicit original-source mappings, per-unit
+ordered compiler arguments, compiler identities, generated-language recipes,
+and a declared final link policy. Original Fortran flags can differ between
+units and are preserved. Only declared build paths and exact source/object
+operands are normalized. Current compiler workers and runtime identities are
+bound separately from the old controls' approved generated sources.
+
+For a package that emits a runtime selector, `transform_scopes` returns
+`metadata["application_build"]`. After `apply_scope_sources(metadata, destinations)`
+records the explicit application-copy mapping, pass that transport object to
+`build(..., application_build=metadata["application_build"])`. The build helper
+calls the explicitly selected compiler snapshot's public verifier:
+`python -m compiler.offload.application_build preflight|attest`.
+Preflight binds the finalized manifest, all admitted bundle groups, approved
+source destinations, and exact selector macros. The pipeline adds each returned
+`FORT_EXACT_WINDOW_BUILD_<selection-contract-sha256>=1` macro only to its selector.
+After linking, the verifier checks actual executed receipts and binds the final
+objects, manifest and binary in `application-build/attest.json`. A failed final
+verification blocks binary delivery. The preflight token alone grants no
+completed-build authority. Priced packages cannot be independently composed;
+their complete selection bundle must come from one compiler request.
+
+Native calibration has its own emitted original numerical execution and CPU
+observer. It may retain the common CUDA link envelope, whose startup is included
+in process measurements; it is not a claim of a CUDA-free binary. Its contract
+retains the resident workers' identities even when those unused artifacts are
+removed. Native capture has no GPU selector macro, but still requires the full
+source and executed-build attestation for its observer. A static automatic-native
+decision with no emitted selector requires no selector macro or application-cost
+build attestation. Legacy scoped AUTO
+calibrations retain their existing behavior.
+
+Calibration and production must analyze the same immutable original source
+paths. Separate mutable build copies use explicit destination mappings. The
+low-level `transform_scopes`/`apply_scope_sources`/`build` interfaces support this
+workflow. The high-level `prepare_build` cache currently copies sources into a
+request-specific directory; automatic reuse of its calibration across those
+different original paths is not qualified. `--scope-cost` is transported and
+hashed there, but cannot silently make incompatible source identities reusable.
 
 Each fresh application build also writes `build-receipts.json`. A shell-free
 SCons execution hook records the actual compiler and linker argument vectors,
@@ -323,10 +363,12 @@ A complete receipt requires a successful executed compilation for every
 directly linked object. Failed commands remain recorded. Incremental builds
 with reused objects receive an `unavailable` receipt rather than invented
 compile commands. `elmm_pipeline.build_receipts.require_build_receipts(path)`
-rejects unavailable or stale evidence. These receipts are source transport for
-future application calibration, not placement authority or a replacement for
-the stronger exact-window build contract. Implicit system headers and libraries
-are not yet inventoried, so the experimental contract remains unsupported.
+rejects unavailable or stale evidence. These receipts alone supply no placement
+authority; the application selection verifier combines them with the
+compiler-issued contract and final manifest. Implicit system headers and
+libraries are not inventoried. Both the contract and attestation explicitly
+retain this limitation: applicability covers the recorded local build inputs,
+not a complete portable toolchain dependency closure.
 
 Scoped runtime traces report successful launches, upload/download bytes,
 allocations and waits during separate validation runs. Adapter call markers are
