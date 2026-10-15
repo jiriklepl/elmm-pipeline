@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .common import python_environment
 
-PROTOCOL = "checked-selection-process-v1"
+PROTOCOL = "checked-selection-process-v2"
 
 
 def selection_builds(manifest):

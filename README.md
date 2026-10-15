@@ -306,7 +306,7 @@ contract. The legacy fixture protocols, including `complete-original-window-cold
 and `exact_window_build_contract` descriptors, remain unsupported by the
 application consumer and are rejected before source replacement or compilation.
 
-The separate `checked-selection-process-v1` protocol supports compiler-selected
+The separate `checked-selection-process-v2` protocol supports compiler-selected
 complete original numerical groups through `--scope-cost FILE`. The pipeline
 transports this source-bound request unchanged; it does not choose groups or
 derive costs. Its `executed-application-build-v1` contract uses successful native
@@ -316,6 +316,19 @@ and a declared final link policy. Original Fortran flags can differ between
 units and are preserved. Only declared build paths and exact source/object
 operands are normalized. Current compiler workers and runtime identities are
 bound separately from the old controls' approved generated sources.
+
+The request requires a numerical validation policy bound before capture. The
+compiler verifies full-float64 diagnostic fields, storage bounds and required
+ordinary outputs against actual payloads at those fixed tolerances. Required
+output fields are a minimum inventory; all fields present in the matched native
+and resident outputs are compared. Diagnostic
+build evidence identifies one reviewed driver replacement and preserves all
+other numerical objects and recorded build arguments. This source is a trusted
+validation input; its hash alone does not prove instrumentation correctness.
+The pipeline transports these facts and leaves their acceptance to the compiler.
+Version 1 contracts are rejected, including static-native diagnostic records.
+Version 1 captures require regeneration and rebuilding before they can supply
+version 2 calibration evidence; changing a protocol label cannot reuse them.
 
 For a package that emits a runtime selector, `transform_scopes` returns
 `metadata["application_build"]`. After `apply_scope_sources(metadata, destinations)`

@@ -131,6 +131,22 @@ def test_exact_window_costs_require_supported_build_attestation_before_source_ed
     unchanged(sources)
 
 
+@pytest.mark.parametrize("capture", [False, True])
+def test_v1_selection_cost_rejects_before_source_edits(tmp_path, sources, capture):
+    metadata = package(tmp_path, sources, "old_selection")
+    metadata["scope_manifest"]["scopes"] = [{"exact_window": {
+        "capture": capture, "selection": "native",
+        "contract": {"protocol": "checked-selection-process-v1",
+                     "build_contract": {"protocol": "executed-application-build-v1"}}}}]
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="supported executed application"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+    with pytest.raises(LocalAdapterError, match="supported executed application"):
+        compose_scope_packages([metadata], sources[1])
+    unchanged(sources)
+
+
 def test_exact_shared_entry_and_replacement_are_reused(tmp_path, sources):
     first = package(tmp_path, sources, "one", entry="same", replacement="! identical\n")
     second = package(tmp_path, sources, "two", entry="same", replacement="! identical\n")
