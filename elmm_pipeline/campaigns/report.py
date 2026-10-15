@@ -83,11 +83,8 @@ def plot(root, output=None, *, historical=False):
                                    "plotter_sha256": digest(__file__)})
 
 
-def _plot_targets(root, state, report, verification, output, *, historical):
-    """Render metadata-driven targets without relabeling historical SGS receipts."""
-    hashes = {name: digest(root / name) for name in ("campaign.json", "timings/report.json", "verification/report.json")}
-    if any(value.get("campaign_sha256") != hashes["campaign.json"] for value in (report, verification)):
-        raise ValueError("plots require reports for the exact frozen campaign")
+def _validate_target_report(state, report):
+    """Use one current qualification interpretation for rendering and sealing."""
     cases = {case["name"]: case for case in state["cases"]}
     if [row["case"] for row in report["cases"]] != list(cases):
         raise ValueError("plot cases differ from the frozen campaign")
@@ -95,9 +92,21 @@ def _plot_targets(root, state, report, verification, output, *, historical):
         if case["summary"] != summaries(case["runs"], state["modes"]):
             raise ValueError("plot summary differs from measured samples")
         if "performance_target" in cases[case["case"]]:
+            if case["gates"].get("schema_version") != 3:
+                raise ValueError("target gates require schema 3; use the frozen plotter for older reports "
+                                 "or recompute from complete evidence without changing the frozen report")
             expected = evaluate_target(state, cases[case["case"]], case["summary"], case["runs"])
             if case["gates"] != expected:
                 raise ValueError("plot target evaluation differs from frozen metadata and measured rounds")
+    return cases
+
+
+def _plot_targets(root, state, report, verification, output, *, historical):
+    """Render metadata-driven targets without relabeling historical SGS receipts."""
+    hashes = {name: digest(root / name) for name in ("campaign.json", "timings/report.json", "verification/report.json")}
+    if any(value.get("campaign_sha256") != hashes["campaign.json"] for value in (report, verification)):
+        raise ValueError("plots require reports for the exact frozen campaign")
+    cases = _validate_target_report(state, report)
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/elmm-campaign-plots")
     import matplotlib
     matplotlib.use("Agg")
@@ -141,9 +150,12 @@ def _plot_targets(root, state, report, verification, output, *, historical):
             ax.set_ylim(bottom=0)
         fig.suptitle(("Historical measurements · " if historical else "") + state["title"] + " · four host threads")
         freshness = "Retained historical measurements" if historical else "Fresh complete-process measurements"
+        warmups = ("One excluded warmup per mode." if all(
+            case["gates"].get("comfortable", {}).get("warmups_complete") for case in report["cases"])
+            else "Excluded warmup evidence incomplete.")
         footer = fig.text(.5, .025, freshness + "; dots: runs; bars: medians; whiskers: sample min–max.\n"
                           "Targets are case-specific. Hatching: no CUDA kernels in separate validation.\n"
-                          "One excluded warmup. Startup, native solver, transfers, output and teardown included.", ha="center")
+                          + warmups + " Startup, native solver, transfers, output and teardown included.", ha="center")
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
         label_height = max(label.get_window_extent(renderer).height for ax in axes[0]
@@ -308,6 +320,8 @@ def seal(root, output):
     if "files_sha256" in plotted:
         check_files(root / "figures", plotted["files_sha256"])
     timing = read(root / "timings/report.json")
+    if any("performance_target" in case for case in state["cases"]):
+        _validate_target_report(state, timing)
     output.mkdir(parents=True, exist_ok=False)
     for name in ("figures", *state.get("additional_figure_directories", [])):
         shutil.copytree(root / name, output / name)
@@ -332,7 +346,8 @@ def seal(root, output):
                          f"{gate.get('target_label', 'Legacy 30% reduction')} | {gate.get('accepted', 'legacy')} | "
                          f"{gate.get('comfortable', {}).get('met', 'legacy')} |")
         lines += ["", ("Acceptance applies the configured median target and required control comparison. "
-                  "Comfort requires seven candidate runs meeting the target and beating the configured control in every matched round. "
+                  "Comfort requires seven measured rounds and one valid excluded warmup for native, control and candidate; "
+                  "every candidate run must meet the target and beat the control in its matching round. "
                   "A sealed report may record an unmet performance target.")]
     else:
         lines += ["| Case | Better baseline | Median (s) | 30% target (s) |", "|---|---|---:|---:|"]

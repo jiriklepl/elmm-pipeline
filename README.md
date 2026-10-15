@@ -687,13 +687,15 @@ The metric compares the candidate
 median to the absolute limit or the fresh **native median** times the ratio;
 `lt` is strict and `le` is inclusive. Unless explicitly false,
 `require_control_improvement` also requires a lower candidate median than the
-control. Comfort always requires all seven measured candidate runs to satisfy
+control. Comfort requires seven measured rounds and one valid excluded warmup
+for each of native, control and candidate. All seven candidate runs must satisfy
 the same limit and beat the control in every matching round. Pairing uses round
-IDs despite rotated execution order; the warmup never contributes. Missing
-rounds cannot establish comfort. Short diagnostic campaigns must not claim this
+IDs despite rotated execution order; the warmup never contributes. Missing native
+rounds or warmups cannot establish comfort. Summaries must match the available
+observed samples. Short diagnostic campaigns must not claim this
 qualification protocol.
 
-New target gates have schema 2 and expose `target_met`, `faster_than_control`,
+New target gates have schema 3 and expose `target_met`, `faster_than_control`,
 `accepted`, and detailed `comfortable` evidence. Correctness/timing report
 `status: "passed"` means the measurements completed successfully; it does not
 assert a performance target was met. Unmet targets can be plotted and sealed.
@@ -702,7 +704,9 @@ with individual samples, medians, ranges, case-specific target lines and mode
 labels from the frozen metadata. Their plotting receipt hashes the source
 reports, target evaluator, and chart files. Sealed reports retain acceptance and
 comfort outcomes, compatible commit identities, and the frozen calibration and
-binary provenance. Existing schema-1 campaigns without targets retain their
+binary provenance. Current plotting and sealing reject older target-gate versions;
+render those immutable reports with their frozen plotter, or recompute a new report
+from complete evidence. Existing schema-1 campaigns without targets retain their
 better-baseline/30% gates and rendering; immutable SGS snapshots keep their
 original interpretation.
 

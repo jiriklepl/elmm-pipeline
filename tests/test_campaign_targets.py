@@ -28,7 +28,7 @@ def measured(state, *, native=12, control=9.6, candidate=8.8):
     runs = [{"mode": mode["name"], "round": round_, "warmup": round_ == 0, "traced": False,
              "wall_seconds": (values[mode["name"]][round_ - 1] if isinstance(values[mode["name"]], list)
                               and round_ > 0 else 100 if round_ == 0 else values[mode["name"]]),
-             "peak_host_rss_bytes": 1024}
+             "peak_host_rss_bytes": 1024, "validation": {"passed": True}}
             for round_ in range(8) for mode in state["modes"]]
     return runs, summaries(runs, state["modes"])
 
@@ -44,6 +44,8 @@ def test_primary_targets_validate_and_have_distinct_boundaries():
     assert channel["target_seconds"] == pytest.approx(9.3)
     assert channel["baseline_mode"] == "native"  # The faster SGS control is not the ratio denominator.
     assert channel["accepted"] and channel["comfortable"]["met"]
+    assert channel["schema_version"] == 3
+    assert channel["comfortable"]["warmups_complete"]
     assert "thirty_percent_lower" not in channel
 
 
@@ -68,6 +70,7 @@ def test_comfort_matches_rounds_despite_rotated_execution_and_excludes_warmup():
     for row in runs:
         if row["mode"] == "sgs-direct" and row["round"] == 1:
             row["wall_seconds"] = 9.9
+    summary = summaries(runs, state["modes"])
     assert gates(state, summary, state["cases"][0], runs)["comfortable"]["met"]
 
 
@@ -79,12 +82,64 @@ def test_one_slow_candidate_prevents_comfort_even_when_median_passes():
     assert not result["comfortable"]["met"]
 
 
-def test_incomplete_rounds_cannot_establish_comfort():
+@pytest.mark.parametrize("mode", ["native", "sgs-direct", "auto-resident"])
+def test_incomplete_rounds_cannot_establish_comfort(mode):
+    state = campaign()
+    runs, _ = measured(state)
+    runs = [row for row in runs if row["round"] != 7 or row["mode"] != mode]
+    summary = summaries(runs, state["modes"])
+    result = gates(state, summary, state["cases"][0], runs)
+    assert result["accepted"]  # A passing partial median is not complete qualification.
+    assert not result["comfortable"]["paired_rounds_complete"] and not result["comfortable"]["met"]
+    assert result["comfortable"]["measured_rounds_by_mode"][mode] == list(range(1, 7))
+
+
+@pytest.mark.parametrize("mode", ["native", "sgs-direct", "auto-resident", None])
+def test_missing_excluded_warmups_cannot_establish_comfort(mode):
     state = campaign()
     runs, summary = measured(state)
-    runs = [row for row in runs if row["round"] != 7 or row["mode"] != "sgs-direct"]
+    runs = [row for row in runs if not row["warmup"] or mode is not None and row["mode"] != mode]
     result = gates(state, summary, state["cases"][0], runs)
-    assert not result["comfortable"]["paired_rounds_complete"] and not result["comfortable"]["met"]
+    assert result["accepted"] and result["comfortable"]["paired_rounds_complete"]
+    assert not result["comfortable"]["warmups_complete"] and not result["comfortable"]["met"]
+
+
+def test_absent_native_observations_leave_supplied_baseline_diagnostic_only():
+    state = campaign()
+    runs, summary = measured(state)
+    runs = [row for row in runs if row["mode"] != "native"]
+    result = gates(state, summary, state["cases"][1], runs)
+    assert result["accepted"] and not result["comfortable"]["met"]
+    assert result["comfortable"]["measured_rounds_by_mode"]["native"] == []
+    assert result["comfortable"]["excluded_warmups_by_mode"]["native"] == 0
+
+
+@pytest.mark.parametrize("update", [{"round": 1}, {"traced": True}, {"wall_seconds": float("nan")},
+                                   {"wall_seconds": True}, {"validation": {"passed": False}}])
+def test_invalid_warmup_evidence_rejects(update):
+    state = campaign()
+    runs, summary = measured(state)
+    next(row for row in runs if row["round"] == 0 and row["mode"] == "native").update(update)
+    with pytest.raises(ValueError, match="qualification requires"):
+        gates(state, summary, state["cases"][0], runs)
+
+
+def test_duplicate_warmup_rejects():
+    state = campaign()
+    runs, summary = measured(state)
+    runs.append(deepcopy(runs[0]))
+    with pytest.raises(ValueError, match="unique excluded warmup"):
+        gates(state, summary, state["cases"][0], runs)
+
+
+@pytest.mark.parametrize("mode", ["native", "sgs-direct", "auto-resident"])
+@pytest.mark.parametrize("field", ["median", "min", "max", "repetitions", "samples", "ratio_to_native"])
+def test_summary_must_match_observed_rounds(mode, field):
+    state = campaign()
+    runs, summary = measured(state)
+    summary[mode][field] = [1] * 7 if field == "samples" else summary[mode][field] + 1
+    with pytest.raises(ValueError, match="summary differs"):
+        gates(state, summary, state["cases"][1], runs)
 
 
 @pytest.mark.parametrize("update", [{"round": 2}, {"traced": True}, {"wall_seconds": float("nan")}])
@@ -189,6 +244,62 @@ def test_target_plots_reject_stale_or_mismatched_evidence_before_output(tmp_path
     with pytest.raises(ValueError, match="plots require|plot target|plot summary"):
         report.plot(tmp_path)
     assert not (tmp_path / "figures").exists()
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_older_target_gates_require_their_frozen_plotter(tmp_path, monkeypatch, historical):
+    report, _, timing = plot_fixture(tmp_path, monkeypatch)
+    timing["cases"][0]["gates"]["schema_version"] = 2
+    write(tmp_path / "timings/report.json", timing)
+    with pytest.raises(ValueError, match="schema 3.*frozen plotter"):
+        report.plot(tmp_path, historical=historical)
+    assert not (tmp_path / "figures").exists()
+
+
+def test_partial_warmup_report_plots_without_claiming_complete_protocol(tmp_path, monkeypatch):
+    report, state, timing = plot_fixture(tmp_path, monkeypatch)
+    for record, case in zip(timing["cases"], state["cases"], strict=True):
+        record["runs"] = [row for row in record["runs"] if not row["warmup"]]
+        record["gates"] = gates(state, record["summary"], case, record["runs"])
+        assert not record["gates"]["comfortable"]["met"]
+    write(tmp_path / "timings/report.json", timing)
+    import matplotlib.figure
+    labels = []
+    original_text = matplotlib.figure.Figure.text
+
+    def text(figure, x, y, label, *args, **kwargs):
+        labels.append(label)
+        return original_text(figure, x, y, label, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.figure.Figure, "text", text)
+    report.plot(tmp_path)
+    assert any("Excluded warmup evidence incomplete." in label for label in labels)
+    assert not any("One excluded warmup" in label for label in labels)
+
+
+@pytest.mark.parametrize("mutation", ["legacy", "fabricated_comfort"])
+def test_seal_revalidates_target_gates_even_with_matching_plot_hashes(tmp_path, monkeypatch, mutation):
+    report, state, timing = plot_fixture(tmp_path, monkeypatch)
+    for phase in ("verification", "halos", "timings"):
+        write(tmp_path / f"guards/{phase}.json", {"status": "finished", "exit_code": 0,
+              "headroom_bytes": 3 * 2**30, "minimum_available_bytes": 4 * 2**30,
+              "cleanup_complete": True, "remaining_descendants": []})
+    write(tmp_path / "halos/report.json", {"status": "passed"})
+    if mutation == "legacy":
+        timing["cases"][0]["gates"]["schema_version"] = 2
+    else:
+        case = timing["cases"][0]
+        case["runs"] = [row for row in case["runs"] if not row["warmup"]]
+        case["gates"] = gates(state, case["summary"], state["cases"][0], case["runs"])
+        case["gates"]["comfortable"]["met"] = True
+    write(tmp_path / "timings/report.json", timing)
+    write(tmp_path / "figures/source.json", {
+        "report_sha256": digest(tmp_path / "timings/report.json"),
+        "verification_sha256": digest(tmp_path / "verification/report.json"),
+        "campaign_sha256": digest(tmp_path / "campaign.json")})
+    with pytest.raises(ValueError, match="schema 3|plot target evaluation"):
+        report.seal(tmp_path, tmp_path / "snapshot")
+    assert not (tmp_path / "snapshot").exists()
 
 
 @pytest.mark.parametrize("tamper_chart", [False, True])
