@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from elmm_pipeline.checked_execution_plan import validate_checked_execution_plans
 from elmm_pipeline.local_adapter import LocalAdapterError, apply_scope_sources, compose_scope_packages, transform_scopes
 from test_scope_composition import package, save, sources, unchanged  # noqa: F401 - shared fixture
 
@@ -53,6 +54,101 @@ def with_plan(metadata, *, facts=None, analysis=None):
                                  "structured_summary_identity": summary}, "checked_execution_plan": plan}]})
     save(metadata)
     return plan
+
+
+def with_applicability(metadata):
+    plan = with_plan(metadata)
+    record = {
+        "schema_version": 1, "kind": "checked-interval-cost-applicability", "plan_identity": plan["identity"],
+        **{key: copy.deepcopy(plan[key]) for key in ("execution_identity", "entry", "sources",
+            "source_inputs_identity", "configuration_identity", "capture_facts_identity")},
+        "canonical_resources": copy.deepcopy(plan["resources"]),
+        "key_candidates": [{"resource": "argument::a", "kind": "array_descriptor",
+                            "safe_evaluation_authorized": False, "properties": [{"property": "size", "axis": 1}],
+                            "missing_proofs": ["interval descriptor lifetime"]}],
+        "unclassified_dependencies": [],
+        "original_control_trees": [{"procedure": plan["entry"], "unit": 0, "tree": [],
+                                    "entry_key_authorized": False}],
+        "native_operations": [], "numerical_operations": [],
+        "requirements": [{"kind": "runtime_workload_key", "status": "not_established", "reason": "coverage missing"}],
+        "existing_exact_window": None, "placement_authorized": False, "execution_authorized": False,
+        "existing_placement_unchanged": True, "identity_policy": "Exact configuration retained",
+        "coverage": "Diagnostic candidates; no authority to evaluate or select execution",
+    }
+    seal(record)
+    metadata["scope_manifest"]["scopes"][0]["interval_applicability"] = record
+    save(metadata)
+    return record
+
+
+def test_interval_applicability_transports_without_changing_build_or_placement(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    expected = copy.deepcopy(with_applicability(metadata))
+    bundle = compose_scope_packages([metadata], sources[1])
+    scope = bundle["scope_packages"][0]["scope_manifest"]["scopes"][0]
+    assert scope["interval_applicability"] == expected
+    assert len(bundle["gpu_sources"]) == 2
+    assert len(bundle["patched_sources"]) == 1
+    assert "exact_window" not in scope
+
+
+@pytest.mark.parametrize("change,reason", [
+    (lambda r: r.update(schema_version=2), "schema version"),
+    (lambda r: r.update(schema_version=True), "schema version"),
+    (lambda r: r.update(plan_identity="0" * 64), "plan identity"),
+    (lambda r: r.update(execution_identity="0" * 64), "execution_identity"),
+    (lambda r: r.update(configuration_identity="0" * 64), "configuration_identity"),
+    (lambda r: r.update(source_inputs_identity="0" * 64), "source_inputs_identity"),
+    (lambda r: r.update(canonical_resources=[]), "canonical resources"),
+    (lambda r: r.update(placement_authorized=True), "cannot authorize"),
+    (lambda r: r.update(execution_authorized=0), "cannot authorize"),
+    (lambda r: r.update(existing_exact_window={"available": True}), "cannot add or replace"),
+    (lambda r: r["key_candidates"][0].update(safe_evaluation_authorized=True), "cannot authorize runtime"),
+    (lambda r: r["requirements"][0].update(status="complete"), "unresolved explanatory"),
+    (lambda r: r["original_control_trees"][0].update(procedure="foreign::scope"), "outside its checked interval"),
+    (lambda r: r["original_control_trees"][0].update(unit=True), "outside its checked interval"),
+])
+def test_interval_applicability_rejects_detachment_or_authority_before_edits(tmp_path, sources, change, reason):
+    metadata = package(tmp_path, sources, "one")
+    record = with_applicability(metadata)
+    change(record)
+    seal(record)
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="interval applicability .*" + reason):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+def test_interval_applicability_requires_its_plan_and_content_digest(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    record = with_applicability(metadata)
+    record["requirements"][0]["reason"] = "changed after issuance"
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="interval applicability identity differs"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+    seal(record)
+    del metadata["scope_manifest"]["scopes"][0]["checked_execution_plan"]
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="interval applicability requires its checked plan"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+def test_interval_applicability_projects_existing_attachment_without_authorizing_build(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    record = with_applicability(metadata)
+    scope = metadata["scope_manifest"]["scopes"][0]
+    scope["exact_window"] = {"schema_version": 4, "available": True, "selection": "native",
+                             "reason": "measured native winner", "inventory": {"preserved": True}}
+    record["existing_exact_window"] = {"available": True, "selection": "native",
+                                        "reason": "measured native winner"}
+    seal(record)
+    validate_checked_execution_plans(metadata["scope_manifest"])
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="Exact-window"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
 
 
 def test_checked_plan_preserved_in_composition_without_placement_decisions(tmp_path, sources):

@@ -24,6 +24,13 @@ _PROCEDURE_FIELDS = {
 _UNIT_FIELDS = {
     "ordinal", "selected_node_ids", "first_line", "last_line", "resources", "ordered_definitions", "operations",
 }
+_APPLICABILITY_FIELDS = {
+    "schema_version", "kind", "identity", "plan_identity", "execution_identity",
+    "entry", "sources", "source_inputs_identity", "configuration_identity", "capture_facts_identity",
+    "canonical_resources", "key_candidates", "unclassified_dependencies", "original_control_trees",
+    "native_operations", "numerical_operations", "requirements", "existing_exact_window",
+    "placement_authorized", "execution_authorized", "existing_placement_unchanged", "identity_policy", "coverage",
+}
 
 
 def _require(condition, reason):
@@ -74,9 +81,15 @@ def validate_checked_execution_plans(manifest, *, capture_facts=None):
     scopes = manifest.get("scopes", [])
     _require(isinstance(scopes, list), "requires a list of source scopes")
     for scope in scopes:
-        if not isinstance(scope, dict) or "checked_execution_plan" not in scope:
+        if not isinstance(scope, dict):
+            continue
+        _require("interval_applicability" not in scope or "checked_execution_plan" in scope,
+                 "interval applicability requires its checked plan")
+        if "checked_execution_plan" not in scope:
             continue
         _validate_plan(scope["checked_execution_plan"], manifest, scope, capture_facts)
+        if "interval_applicability" in scope:
+            _validate_applicability(scope["interval_applicability"], scope["checked_execution_plan"], scope)
 
 
 def _validate_plan(plan, manifest, scope, capture_facts):
@@ -155,3 +168,53 @@ def _validate_plan(plan, manifest, scope, capture_facts):
     _require(isinstance(plan["cost_requirements"], list)
              and all(isinstance(item, dict) and _text(item.get("kind")) and _text(item.get("reason"))
                      for item in plan["cost_requirements"]), "requires explanatory cost requirements")
+
+
+def _validate_applicability(record, plan, scope):
+    """Transport explanatory key candidates, never accept them as calibration."""
+    _require(isinstance(record, dict) and set(record) == _APPLICABILITY_FIELDS,
+             "interval applicability requires the complete v1 schema")
+    _require(type(record["schema_version"]) is int and record["schema_version"] == 1
+             and record["kind"] == "checked-interval-cost-applicability",
+             "interval applicability has an unsupported schema version or kind")
+    _require(_sha256(record["identity"])
+             and record["identity"] == _digest({key: value for key, value in record.items() if key != "identity"}),
+             "interval applicability identity differs from its contents")
+    _require(record["plan_identity"] == plan["identity"], "interval applicability plan identity differs")
+    for key in ("execution_identity", "entry", "sources", "source_inputs_identity", "configuration_identity",
+                "capture_facts_identity"):
+        _require(record[key] == plan[key], "interval applicability " + key + " differs")
+    _require(record["canonical_resources"] == plan["resources"],
+             "interval applicability canonical resources differ")
+    _require(record["placement_authorized"] is False and record["execution_authorized"] is False
+             and record["existing_placement_unchanged"] is True,
+             "interval applicability cannot authorize execution or placement")
+    exact = scope.get("exact_window")
+    _require(exact is None or isinstance(exact, dict), "requires a structured exact-window attachment")
+    projection = None if exact is None else {key: exact[key] for key in (
+        "available", "selection", "reason", "contract_sha256", "evidence_sha256", "capture") if key in exact}
+    _require(record["existing_exact_window"] == projection,
+             "interval applicability cannot add or replace an exact-window attachment")
+    _require(all(_text(record[key]) for key in ("identity_policy", "coverage")),
+             "interval applicability requires its evidence limitations")
+    for key in ("key_candidates", "unclassified_dependencies", "original_control_trees", "native_operations",
+                "numerical_operations", "requirements"):
+        _require(isinstance(record[key], list) and all(isinstance(item, dict) for item in record[key]),
+                 "interval applicability requires structured " + key)
+    for candidate in record["key_candidates"]:
+        _require(_text(candidate.get("resource")) and _text(candidate.get("kind"))
+                 and candidate.get("safe_evaluation_authorized") is False
+                 and isinstance(candidate.get("properties"), list)
+                 and isinstance(candidate.get("missing_proofs"), list),
+                 "interval applicability candidates cannot authorize runtime evaluation")
+    for requirement in record["requirements"]:
+        _require(_text(requirement.get("kind")) and _text(requirement.get("reason"))
+                 and requirement.get("status") == "not_established",
+                 "interval applicability requires unresolved explanatory requirements")
+    procedures = {item["procedure"]: item for item in plan["procedures"]}
+    for key in ("original_control_trees", "native_operations", "numerical_operations"):
+        for item in record[key]:
+            procedure, ordinal = item.get("procedure"), item.get("unit")
+            _require(_text(procedure) and procedure in procedures and type(ordinal) is int
+                     and 0 <= ordinal < len(procedures[procedure]["units"]),
+                     "interval applicability operation is outside its checked interval")

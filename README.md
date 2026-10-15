@@ -207,6 +207,14 @@ Earlier packages without the optional record remain supported. Exact-window
 build contracts remain rejected until the application consumer can enforce their
 full applicability contract.
 
+The optional scope-level `interval_applicability` schema 1 accompanies that
+checked plan. It records compiler-owned workload-key candidates and missing
+measurement/build/outcome evidence. Before source edits, the adapter checks its
+content digest, exact plan/source/configuration/resource linkage and lack of
+execution or placement authority. Composition preserves it unchanged. Its
+compact existing-exact-window projection must match the authoritative attachment;
+it cannot add calibration or bypass the application build-contract requirement.
+
 Capture facts use the compiler's versioned public JSON contract. They declare
 participation and canonical resource roots with storage lifetime, escape,
 allocation-change, and physical initialization facts. Supply `whole`, `none`, or
