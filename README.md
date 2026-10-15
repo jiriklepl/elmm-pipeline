@@ -684,42 +684,48 @@ configuration, reference, and step-count fields are omitted here):
     {
       "name": "channel-simple",
       "performance_target": {
-        "schema_version": 1,
-        "metric": "seconds",
-        "limit": 9,
-        "comparison": "lt",
+        "schema_version": 2,
+        "metric": "ratio_to_control",
+        "limit": 1,
+        "comparison": "le",
         "control_mode": "sgs-direct",
-        "require_control_improvement": false
+        "control_comparison": "le"
       }
     },
     {
       "name": "channel",
       "performance_target": {
-        "schema_version": 1,
-        "metric": "ratio_to_native",
-        "limit": 0.744,
+        "schema_version": 2,
+        "metric": "ratio_to_control",
+        "limit": 1,
         "comparison": "le",
-        "control_mode": "sgs-direct"
+        "control_mode": "sgs-direct",
+        "control_comparison": "le"
       }
     }
   ]
 }
 ```
 
-The metric compares the candidate
-median to the absolute limit or the fresh **native median** times the ratio;
-`lt` is strict and `le` is inclusive. Unless explicitly false,
-`require_control_improvement` also requires a lower candidate median than the
-control. Comfort requires seven measured rounds and one valid excluded warmup
+Version 2 supports `seconds`, `ratio_to_native`, and `ratio_to_control`.
+Ratio targets use the fresh median of the named reference; `lt` is strict and
+`le` is inclusive. The example requires non-regression against SGS direct,
+including equality. `control_comparison` separately requires a strict (`lt`)
+or inclusive (`le`) control comparison. It establishes performance only, not
+automatic placement or generic applicability; those need compiler evidence.
+Comfort requires seven measured rounds and one valid excluded warmup
 for each of native, control and candidate. All seven candidate runs must satisfy
-the same limit and beat the control in every matching round. Pairing uses round
+the same limit and satisfy the control comparison in every matching round. Pairing uses round
 IDs despite rotated execution order; the warmup never contributes. Missing native
 rounds or warmups cannot establish comfort. Summaries must match the available
 observed samples. Short diagnostic campaigns must not claim this
 qualification protocol.
 
-New target gates have schema 3 and expose `target_met`, `faster_than_control`,
-`accepted`, and detailed `comfortable` evidence. Correctness/timing report
+Version-2 target gates have schema 4 and expose `target_met`, `faster_than_control`,
+`control_requirement_met`, `accepted`, and detailed `comfortable` evidence.
+Version-1 targets retain schema-3 gates and their original strict per-round
+control comparison, including the legacy `require_control_improvement` option
+for median acceptance. Correctness/timing report
 `status: "passed"` means the measurements completed successfully; it does not
 assert a performance target was met. Unmet targets can be plotted and sealed.
 Target campaigns render both absolute and native-relative PNG/SVG/PDF charts,

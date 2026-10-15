@@ -92,8 +92,9 @@ def _validate_target_report(state, report):
         if case["summary"] != summaries(case["runs"], state["modes"]):
             raise ValueError("plot summary differs from measured samples")
         if "performance_target" in cases[case["case"]]:
-            if case["gates"].get("schema_version") != 3:
-                raise ValueError("target gates require schema 3; use the frozen plotter for older reports "
+            expected_version = 4 if cases[case["case"]]["performance_target"]["schema_version"] == 2 else 3
+            if case["gates"].get("schema_version") != expected_version:
+                raise ValueError(f"target gates require schema {expected_version}; use the frozen plotter for older reports "
                                  "or recompute from complete evidence without changing the frozen report")
             expected = evaluate_target(state, cases[case["case"]], case["summary"], case["runs"])
             if case["gates"] != expected:
@@ -347,7 +348,7 @@ def seal(root, output):
                          f"{gate.get('comfortable', {}).get('met', 'legacy')} |")
         lines += ["", ("Acceptance applies the configured median target and required control comparison. "
                   "Comfort requires seven measured rounds and one valid excluded warmup for native, control and candidate; "
-                  "every candidate run must meet the target and beat the control in its matching round. "
+                  "every candidate run must meet the target and the required control comparison in its matching round. "
                   "A sealed report may record an unmet performance target.")]
     else:
         lines += ["| Case | Better baseline | Median (s) | 30% target (s) |", "|---|---|---:|---:|"]

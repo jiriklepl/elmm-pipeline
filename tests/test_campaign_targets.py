@@ -49,6 +49,51 @@ def test_primary_targets_validate_and_have_distinct_boundaries():
     assert "thirty_percent_lower" not in channel
 
 
+def non_regression_campaign():
+    state = campaign()
+    for case in state["cases"]:
+        case["performance_target"] = {
+            "schema_version": 2, "metric": "ratio_to_control", "limit": 1,
+            "comparison": "le", "control_mode": "sgs-direct", "control_comparison": "le"}
+    return state
+
+
+def test_non_regression_accepts_equality_against_the_fresh_control():
+    state = non_regression_campaign()
+    validate(state)
+    runs, summary = measured(state, candidate=9.6)
+    for case in state["cases"]:
+        result = gates(state, summary, case, runs)
+        assert result["schema_version"] == 4
+        assert result["target_seconds"] == 9.6
+        assert result["target_label"] == "≤ 100% of sgs-direct"
+        assert result["accepted"] and result["comfortable"]["met"]
+        assert result["control_requirement_met"] and result["comfortable"]["meets_control_each_round"]
+        assert not result["faster_than_control"] and not result["comfortable"]["beats_control_each_round"]
+
+
+def test_non_regression_checks_both_median_and_corresponding_rounds():
+    state = non_regression_campaign()
+    runs, summary = measured(state, candidate=9.7)
+    assert not gates(state, summary, state["cases"][0], runs)["accepted"]
+    runs, summary = measured(state, candidate=[9.5] * 6 + [9.6], control=[9.6] * 6 + [9.4])
+    result = gates(state, summary, state["cases"][0], list(reversed(runs)))
+    assert result["accepted"] and result["comfortable"]["all_samples_meet_target"]
+    assert not result["comfortable"]["meets_control_each_round"] and not result["comfortable"]["met"]
+    state["cases"][0]["performance_target"]["control_comparison"] = "lt"
+    runs, summary = measured(state, candidate=9.6)
+    assert not gates(state, summary, state["cases"][0], runs)["accepted"]
+
+
+@pytest.mark.parametrize("change", [{"control_comparison": "eq"}, {"control_comparison": []},
+    {"require_control_improvement": False}, {"schema_version": 1}, {"metric": "ratio_to_missing"}])
+def test_non_regression_contract_rejects_ambiguous_comparisons(change):
+    state = non_regression_campaign()
+    state["cases"][0]["performance_target"].update(change)
+    with pytest.raises(ValueError, match="performance_target"):
+        validate(state)
+
+
 def test_acceptance_and_comfort_have_independent_control_requirements():
     state = campaign()
     runs, summary = measured(state, control=8.5)
@@ -178,9 +223,9 @@ def test_borderline_uses_configured_seconds_or_native_ratio():
     assert not borderline(state, summary, state["cases"][0])
 
 
-def plot_fixture(tmp_path, monkeypatch):
+def plot_fixture(tmp_path, monkeypatch, state=None):
     from elmm_pipeline.campaigns import report
-    state = campaign()
+    state = campaign() if state is None else state
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
     monkeypatch.setattr(report, "check", lambda root: state)
     write(tmp_path / "campaign.json", state)
@@ -196,6 +241,14 @@ def plot_fixture(tmp_path, monkeypatch):
           "cases": [{"case": case["name"], "runs": [{"mode": mode["name"], "activity": {"kernel_launches": 1}}
                     for mode in state["modes"]]} for case in state["cases"]]})
     return report, state, timing
+
+
+def test_non_regression_target_renders_and_retains_versioned_evidence(tmp_path, monkeypatch):
+    report, state, _ = plot_fixture(tmp_path, monkeypatch, non_regression_campaign())
+    report.plot(tmp_path)
+    receipt = read(tmp_path / "figures/source.json")
+    assert receipt["performance_targets"]["channel"] == state["cases"][1]["performance_target"]
+    assert "100% of sgs-direct" in (tmp_path / "figures/complete-wall-absolute.svg").read_text()
 
 
 def test_target_charts_render_both_units_metadata_labels_and_samples(tmp_path, monkeypatch):

@@ -7,13 +7,22 @@ import statistics
 
 def validate_target(target, modes, candidate):
     required = {"schema_version", "metric", "limit", "comparison", "control_mode"}
-    if (not isinstance(target, dict) or not required <= target.keys()
-            or set(target) - required - {"require_control_improvement"}
-            or type(target.get("schema_version")) is not int or target["schema_version"] != 1):
-        raise ValueError("performance_target requires the version 1 target contract")
-    if (not isinstance(target["metric"], str) or target["metric"] not in {"seconds", "ratio_to_native"}
+    if (not isinstance(target, dict) or type(target.get("schema_version")) is not int
+            or target["schema_version"] not in {1, 2}):
+        raise ValueError("performance_target requires a supported versioned target contract")
+    version = target["schema_version"]
+    if version == 2:
+        required.add("control_comparison")
+    optional = {"require_control_improvement"} if version == 1 else set()
+    if not required <= target.keys() or set(target) - required - optional:
+        raise ValueError("performance_target requires its complete versioned target contract")
+    metrics = {"seconds", "ratio_to_native"} | ({"ratio_to_control"} if version == 2 else set())
+    if (not isinstance(target["metric"], str) or target["metric"] not in metrics
             or not isinstance(target["comparison"], str) or target["comparison"] not in {"lt", "le"}):
-        raise ValueError("performance_target requires seconds/ratio_to_native and lt/le")
+        raise ValueError("performance_target requires a supported metric and lt/le")
+    if version == 2 and (not isinstance(target["control_comparison"], str)
+                          or target["control_comparison"] not in {"lt", "le"}):
+        raise ValueError("performance_target control_comparison requires lt/le")
     limit = target["limit"]
     if type(limit) not in (int, float) or not math.isfinite(limit) or limit <= 0:
         raise ValueError("performance_target limit must be finite and positive")
@@ -25,13 +34,15 @@ def validate_target(target, modes, candidate):
 
 
 def target_seconds(target, summary):
-    return target["limit"] * (summary["native"]["median"] if target["metric"] == "ratio_to_native" else 1)
+    reference = {"ratio_to_native": "native", "ratio_to_control": target["control_mode"]}.get(target["metric"])
+    return target["limit"] * (summary[reference]["median"] if reference else 1)
 
 
 def target_label(target):
     operator = "<" if target["comparison"] == "lt" else "≤"
     value = (f"{target['limit']:g} s" if target["metric"] == "seconds"
-             else f"{100 * target['limit']:g}% of native")
+             else f"{100 * target['limit']:g}% of " + (
+                 target["control_mode"] if target["metric"] == "ratio_to_control" else "native"))
     return operator + " " + value
 
 
@@ -86,14 +97,27 @@ def evaluate_target(state, case, summary, runs):
                                    for round_ in range(1, 8))
     median_target = meets(summary[candidate]["median"])
     median_control = summary[candidate]["median"] < summary[control]["median"]
-    return {"schema_version": 3, "baseline_mode": "native", "baseline_seconds": summary["native"]["median"],
+    control_operator = target.get("control_comparison", "lt")
+
+    def meets_control(value, reference):
+        return value < reference if control_operator == "lt" else value <= reference
+
+    control_met = meets_control(summary[candidate]["median"], summary[control]["median"])
+    all_control_met = complete and all(meets_control(paired[candidate][round_], paired[control][round_])
+                                      for round_ in range(1, 8))
+    result = {"schema_version": 4 if target["schema_version"] == 2 else 3,
+            "baseline_mode": "native", "baseline_seconds": summary["native"]["median"],
             "candidate_mode": candidate, "candidate_ratio": summary[candidate]["median"] / summary["native"]["median"],
             "performance_target": target, "target_seconds": threshold, "target_label": target_label(target),
             "target_met": median_target, "faster_than_control": median_control,
-            "accepted": median_target and (median_control or not target.get("require_control_improvement", True)),
+            "accepted": median_target and (control_met or not target.get("require_control_improvement", True)),
             "comfortable": {"required_measured_rounds": 7, "paired_rounds_complete": complete,
                             "required_excluded_warmups_per_mode": 1, "warmups_complete": warmups_complete,
                             "measured_rounds_by_mode": {mode: sorted(rounds) for mode, rounds in paired.items()},
                             "excluded_warmups_by_mode": warmups,
                             "all_samples_meet_target": all_target, "beats_control_each_round": all_control,
-                            "met": complete and warmups_complete and all_target and all_control}}
+                            "met": complete and warmups_complete and all_target and all_control_met}}
+    if target["schema_version"] == 2:
+        result.update(control_comparison=control_operator, control_requirement_met=control_met)
+        result["comfortable"]["meets_control_each_round"] = all_control_met
+    return result
