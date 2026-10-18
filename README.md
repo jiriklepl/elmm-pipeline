@@ -339,6 +339,62 @@ interval completion, zero guarded fallback transitions and actual GPU work;
 planned native interruptions are measured parts of the alternative. Changing a
 protocol label cannot reuse older evidence.
 
+`python -m elmm_pipeline.selection_request --request REQUEST --output NEW_DIRECTORY`
+assembles native/resident capture requests from existing executed build origins.
+It writes a hashed `session.json` and two `capture-*.json` scope-cost requests;
+these files grant no placement authority. Its request has `schema_version: 1`
+and the following explicit inputs:
+
+- `compiler: {"compiler_root": "/selected/checkout", "python": "/venv/bin/python"}`;
+- `analysis` with hashed `source`, optional `source_files`, `capture_facts`, an
+  `entry`, and optional hashed `analysis_sources`, `numerical_sources` and
+  `effect_contracts` packages;
+- `origins.native` and `origins.resident`, each with a hashed `receipt`, its
+  absolute `build_root`, and `source_mapping` from copied original files to the
+  immutable analysis/original files. The resident origin also requires its
+  hashed compiler-issued `manifest`;
+- `workloads`, each naming an absolute `configuration_directory`, contained
+  relative input `files`, expected `argv`, `environment` and `completion`;
+- a hashed `validation_policy` and reviewed `diagnostic_source`, whose digest
+  must match the policy's driver replacement;
+- explicit `acceptance`, such as `{"criterion": "paired_non_regression"}`, and
+  optional shared `gpu_options` (`host_threads`, `scope_transfers`,
+  `calibration_profile`).
+
+Every hashed reference is `{"path": "/absolute/file", "sha256": "..."}`.
+Both origins must contain actual successful compiler/link command receipts and
+current binaries. An existing resident origin supplies generated-language build
+recipes; it does not establish the numerical authority of a new window. The
+compiler verifies whether those recipes, source mappings and manifests are
+compatible when consuming the requests.
+
+Use the returned session with the existing public generation interface:
+
+```python
+from pathlib import Path
+from elmm_pipeline.selection_request import assemble, generation_inputs
+from elmm_pipeline.local_adapter import transform_scopes
+
+prepared = assemble(request, Path("/new/request-session"))
+capture = transform_scopes(output_dir=Path("/new/native-capture"),
+                          **generation_inputs(prepared["session"], "native"))
+# Repeat with "resident", apply each compiler manifest to explicit build copies,
+# build and attest them, then collect the workload evidence below.
+production = transform_scopes(
+    output_dir=Path("/new/production"),
+    **generation_inputs(prepared["session"], "production",
+                        production_scope_cost={"path": "/campaign/scope-cost.json",
+                                               "sha256": "..."}))
+```
+
+Capture and production reuse identical original paths. Before each generation,
+the assembler rechecks all recorded source, configured dependency, workload,
+origin and policy hashes. Production requires matching collector evidence,
+acceptance and workload identities. The compiler still authenticates that
+evidence and chooses placement. Public compiler generation and evidence
+verification have independent 180-second phase limits and retain partial logs
+on timeout. Virtualenv Python launcher paths are preserved.
+
 `python -m elmm_pipeline.selection_campaign --request REQUEST --output DIRECTORY`
 collects one compiler-issued workload from already built native/resident capture
 variants and approved full-field diagnostic relinks. The request contains:

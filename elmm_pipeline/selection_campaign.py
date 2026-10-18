@@ -79,7 +79,10 @@ def _input(directory, name, expected):
 def _verifier(transport, phase, request, directory):
     """Call a public compiler command; its timeout excludes application runs."""
     root = Path(transport["compiler_root"]).resolve(strict=True)
-    python = Path(transport["python"]).resolve(strict=True)
+    # A virtualenv launcher is commonly a symlink to the system interpreter.
+    python = Path(transport["python"]).absolute()
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise ValueError("selected compiler Python launcher is unavailable")
     if not (root / "compiler/offload/selection_cost.py").is_file():
         raise ValueError("selected compiler has no interval evidence verifier")
     directory.mkdir(parents=True, exist_ok=False)
@@ -89,8 +92,17 @@ def _verifier(transport, phase, request, directory):
     environment["PYTHONPATH"] = str(root)
     argv = [str(python), "-m", "compiler.offload.selection_cost", phase,
             "--request", str(request_path), "--output", str(output)]
-    result = subprocess.run(argv, cwd=root, env=environment, text=True, capture_output=True,
-                            check=False, timeout=VERIFIER_TIMEOUT)
+    try:
+        result = subprocess.run(argv, cwd=root, env=environment, text=True, capture_output=True,
+                                check=False, timeout=VERIFIER_TIMEOUT)
+    except subprocess.TimeoutExpired as error:
+        stdout, stderr = (value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+                          for value in (error.stdout, error.stderr))
+        (directory / "stdout.log").write_text(stdout)
+        (directory / "stderr.log").write_text(stderr)
+        _write(directory / "command.json", {"argv": argv, "cwd": str(root), "returncode": None,
+                                            "timeout_seconds": VERIFIER_TIMEOUT, "timed_out": True})
+        raise ValueError("compiler interval evidence verification exceeded the 180-second phase limit") from error
     (directory / "stdout.log").write_text(result.stdout)
     (directory / "stderr.log").write_text(result.stderr)
     _write(directory / "command.json", {"argv": argv, "cwd": str(root), "returncode": result.returncode,

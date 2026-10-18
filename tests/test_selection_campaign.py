@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import pytest
+
 from elmm_pipeline import selection_campaign as collector
 from elmm_pipeline.build_receipts import (
     CommandRecorder,
@@ -129,6 +130,34 @@ def test_public_verifier_transport_has_separate_180_second_cap(tmp_path, monkeyp
     monkeypatch.setattr(collector.subprocess, "run", invoke)
     response = collector._verifier({"compiler_root": str(root), "python": sys.executable}, "builds", {}, tmp_path / "verify")
     assert response["placement_authority"] is False
+
+
+@pytest.mark.parametrize("streams", [(b"partial output", b"partial error"), (None, None)])
+def test_verifier_timeout_retains_command_streams_and_virtualenv_launcher(tmp_path, monkeypatch, streams):
+    root = tmp_path / "compiler"
+    (root / "compiler/offload").mkdir(parents=True)
+    (root / "compiler/offload/selection_cost.py").touch()
+    launcher = tmp_path / "venv/bin/python"
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(sys.executable)
+
+    def invoke(argv, **kwargs):
+        assert argv[0] == str(launcher)
+        assert kwargs["timeout"] == 180
+        raise subprocess.TimeoutExpired(argv, 180, *streams)
+
+    monkeypatch.setattr(collector.subprocess, "run", invoke)
+    directory = tmp_path / "verify"
+    with pytest.raises(ValueError, match="180-second phase limit"):
+        collector._verifier({"compiler_root": str(root), "python": str(launcher)}, "builds", {}, directory)
+    command = json.loads((directory / "command.json").read_text())
+    assert command["timed_out"] is True
+    assert command["returncode"] is None
+    assert command["timeout_seconds"] == 180
+    assert command["argv"][0] == str(launcher)
+    assert (directory / "stdout.log").read_text() == ("partial output" if streams[0] else "")
+    assert (directory / "stderr.log").read_text() == ("partial error" if streams[1] else "")
+    assert not (directory / "response.json").exists()
 
 
 def test_full_campaign_transport_keeps_warmups_diagnostics_and_all_timing_pairs_separate(tmp_path, monkeypatch):
