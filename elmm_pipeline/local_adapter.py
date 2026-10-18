@@ -257,8 +257,17 @@ def _invoke(source_path, compiler_root, python, output_dir, entry, arguments, lo
     environment["PYTHONPATH"] = str(compiler_root)
     command = [str(python), "-m", "compiler", "--input", str(source_path),
                "--opt-level", "1", "--fallback", "error", "--json", *arguments]
-    result = subprocess.run(command, cwd=compiler_root, env=environment, text=True,
-                            capture_output=True, check=False)
+    try:
+        result = subprocess.run(command, cwd=compiler_root, env=environment, text=True,
+                                capture_output=True, check=False, timeout=180)
+    except subprocess.TimeoutExpired as error:
+        stdout, stderr = (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+                          for value in (error.stdout, error.stderr))
+        (output_dir / log_name).write_text(stdout + stderr)
+        (output_dir / (log_name + ".timeout.json")).write_text(json.dumps({
+            "argv": command, "cwd": str(compiler_root), "timeout_seconds": 180,
+            "timed_out": True, "returncode": None}, indent=2) + "\n")
+        raise LocalAdapterError(f"Compiler {entry} exceeded the 180-second phase limit; no artifacts accepted") from error
     (output_dir / log_name).write_text(result.stdout + result.stderr)
     try:
         report = json.loads(result.stdout)

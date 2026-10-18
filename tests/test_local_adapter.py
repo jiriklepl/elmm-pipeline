@@ -48,8 +48,27 @@ class LocalCompilerProtocolTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fallback") + 1], "error")
             self.assertEqual(command[command.index("--opt-level") + 1], "1")
             self.assertEqual(run.call_args.kwargs["cwd"], self.snapshot)
+            self.assertEqual(run.call_args.kwargs["timeout"], 180)
             self.assertEqual(run.call_args.kwargs["env"]["PYTHONPATH"], str(self.snapshot))
             self.assertEqual({path.name for path in self.output.iterdir()}, {"check.log", "check.json"})
+
+    def test_compiler_timeout_preserves_partial_output_and_rejects_artifacts(self):
+        for stdout, stderr in ((b"partial stdout\n", b"partial stderr\n"),
+                               ("partial stdout\n", "partial stderr\n"), (None, None)):
+            with self.subTest(stdout=stdout), patch(
+                    "elmm_pipeline.local_adapter.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired(["compiler"], 180, stdout, stderr)), \
+                    self.assertRaisesRegex(LocalAdapterError, "180-second phase limit"):
+                check(self.source, self.snapshot, self.python, "advance", self.output)
+            receipt = json.loads((self.output / "check.log.timeout.json").read_text())
+            self.assertEqual(receipt["timeout_seconds"], 180)
+            self.assertTrue(receipt["timed_out"])
+            self.assertIsNone(receipt["returncode"])
+            self.assertEqual(receipt["cwd"], str(self.snapshot))
+            self.assertIn("--list-candidates", receipt["argv"])
+            self.assertEqual((self.output / "check.log").read_text(),
+                             "partial stdout\npartial stderr\n" if stdout else "")
+            self.assertFalse((self.output / "check.json").exists())
 
     def test_preflight_rejects_missing_ambiguous_and_unstructured_reports(self):
         for report in ([], [self.candidate(), self.candidate()], {"supported": True}, [{"name": "advance"}]):
