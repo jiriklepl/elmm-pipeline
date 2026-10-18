@@ -339,6 +339,52 @@ interval completion, zero guarded fallback transitions and actual GPU work;
 planned native interruptions are measured parts of the alternative. Changing a
 protocol label cannot reuse older evidence.
 
+`python -m elmm_pipeline.selection_campaign --request REQUEST --output DIRECTORY`
+collects one compiler-issued workload from already built native/resident capture
+variants and approved full-field diagnostic relinks. The request contains:
+
+- `schema_version: 1`, a hashed `contract` reference (`path`, `sha256`), and the
+  exact `workload_identity` from that contract;
+- `compiler` with the explicitly selected `compiler_root` and `python`, plus
+  `configuration_directory` containing the unchanged workload files;
+- `builds.native` and `builds.resident`, the application observations returned
+  by build attestation, and corresponding `diagnostics` with hashed `plan`,
+  `build` and two executed `commands` references;
+- the existing `application_timeout_seconds`, which is required explicitly;
+- `completion: {"kind": "elmm-log"}` for natural ELMM completion with
+  `completed_steps` and `natural_end` workload fields, or
+  `completion: {"kind": "json-stdout"}` for a generic program that prints one
+  `FORT_APPLICATION_COMPLETION ` line followed by its observed completion JSON.
+
+The collector calls the selected compiler's public `selection_cost builds`
+verifier before running any executable. It then records one excluded warmup per
+mode, one separate full-float64 diagnostic pair, and seven rotated timing pairs
+plus two holdouts. All ordinary final/average outputs remain required in every
+timed pair. Real subprocess elapsed times include startup, output and teardown;
+no tracing or runtime forcing enters these samples. A declined resident warmup
+stops the campaign before further application runs. Run directories are never
+reused, and failed processes retain their measured receipts.
+
+The compiler's `selection_cost evaluate` command verifies the build/relink
+receipts, original observation logs, full fields including bounds and halos,
+ordinary outputs, and timing criterion. The collector emits `evidence.json` and
+a reusable `scope-cost.json` only after successful verification. A verified
+native decision remains native. The two compiler verifier calls each have a
+180-second limit; application processes keep the separately supplied runtime
+limit. This is calibration evidence, not final application qualification or a
+placement proof. Both primary cases still require fresh production AUTO runs
+and the separate native/SGS-direct/automatic-resident qualification campaign.
+
+Each collection covers one workload. Unmeasured workloads retain native
+execution. When both cases share an identical compiler contract, combine their
+completed packages with `--combine --request COMBINE.json --output DIRECTORY`.
+The combination request has `schema_version: 1`, the same explicit `compiler`
+transport, and `scope_costs`, a list of hashed references to the collected
+`scope-cost.json` files. Combination requires distinct campaigns covering every
+workload in the contract and rechecks all evidence through the compiler; one
+unprofitable workload cannot borrow another's advantage. Different source/plan
+contracts require separate calibration packages.
+
 For a package that emits a runtime selector, `transform_scopes` returns
 `metadata["application_build"]`. After `apply_scope_sources(metadata, destinations)`
 records the explicit application-copy mapping, pass that transport object to
