@@ -990,21 +990,29 @@ run fail. Use the campaign memory guard and a command timeout for heavy scripts,
 including bounds on filesystem waits during shutdown. These samples are
 diagnostics, not application timing measurements.
 
-For a complete-field diagnostic main, derive its compile and link arguments from
-the fresh application's own `build-command.json` and `build.log`:
+For a complete-field diagnostic driver, select its unchanged original source
+from the compiler-attested application's structured executed build receipts:
 
 ```python
-from elmm_pipeline.campaigns.driver_link import derive_driver_link
+from elmm_pipeline.campaigns.driver_link import build_driver_link
 
-commands = derive_driver_link(
-    binary, fortran=fortran, source=diagnostic_main,
+diagnostic = build_driver_link(
+    application_build, original_source=original_driver, source=diagnostic_driver,
     object_path=new_object, output=new_executable,
+    directory=new_evidence_directory, module_inputs=current_fortran_modules,
 )
 ```
 
-Run `compile_argv` and then `link_argv` in the returned `cwd`, keeping the recorded
-inputs unchanged. The helper preserves the original numerical flags, module
-paths, generated objects and library order. It replaces only the application
-main; PoisFFT's separate `P/main.o` remains linked. New diagnostic outputs must
-not already exist. Derivation records input and command provenance and does not
-execute a compiler or select an offload policy.
+The helper executes the recorded compile and link commands with a 180-second
+limit per compiler command, retaining logs and actual command receipts. It
+preserves numerical flags, module paths, generated objects and library order;
+only the selected source, its object and the executable output change. The
+supplied or current environment must match the recorded build environment.
+Pass the current `.mod`/`.smod` dependencies explicitly. New outputs and the
+evidence directory must not exist. Failures preserve evidence and do not return
+an executable observation. Application runtime limits are unaffected.
+
+The returned `plan`, `build` and two `commands` references fit
+`selection_campaign`'s `diagnostics` entries. The compiler independently verifies
+them against the build contract and reviewed driver hash. The helper grants no
+numerical or placement authority and does not run the application.

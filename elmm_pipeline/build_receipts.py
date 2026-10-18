@@ -159,7 +159,7 @@ class CommandRecorder:
                 self._compilers[key] = identity
             return dict(self._compilers[key])
 
-    def run(self, argv, *, cwd=None, env=None, stdout=None, stderr=None, additional_inputs=()):
+    def run(self, argv, *, cwd=None, env=None, stdout=None, stderr=None, additional_inputs=(), timeout=None):
         """Execute precisely the recorded argv and retain failures as evidence."""
         argv = [str(argument) for argument in argv]
         if not argv or any("\0" in argument for argument in argv):
@@ -180,6 +180,8 @@ class CommandRecorder:
                                                                    separators=(",", ":")).encode()).hexdigest(),
                   "compiler": compiler, "inputs": [], "outputs": [],
                   "started_ns": time.time_ns()}
+        if timeout is not None:
+            record.update(timeout_seconds=timeout, timed_out=False)
         if identity_error is not None:
             record["identity_error"] = identity_error
         output = None
@@ -203,7 +205,7 @@ class CommandRecorder:
         save()
         try:
             result = subprocess.run(argv, cwd=directory, env=environment, stdout=stdout,
-                                    stderr=stderr, check=False)
+                                    stderr=stderr, check=False, timeout=timeout)
             record["returncode"] = result.returncode
             record["status"] = "completed"
             if output is not None and output.is_file():
@@ -215,6 +217,8 @@ class CommandRecorder:
         except BaseException as error:
             record["status"] = "failed"
             record["error"] = type(error).__name__ + ": " + str(error)
+            if isinstance(error, subprocess.TimeoutExpired):
+                record["timed_out"] = True
             raise
         finally:
             record["finished_ns"] = time.time_ns()
