@@ -306,9 +306,9 @@ contract. The legacy fixture protocols, including `complete-original-window-cold
 and `exact_window_build_contract` descriptors, remain unsupported by the
 application consumer and are rejected before source replacement or compilation.
 
-The separate `checked-selection-process-v2` protocol supports compiler-selected
-complete original numerical groups through `--scope-cost FILE`. The pipeline
-transports this source-bound request unchanged; it does not choose groups or
+The `checked-interval-process-v3` protocol supports compiler-checked original
+intervals and numerical groups through `--scope-cost FILE`. The pipeline
+transports this source-bound request unchanged; it does not choose intervals or
 derive costs. Its `executed-application-build-v1` contract uses successful native
 and resident origin receipts, explicit original-source mappings, per-unit
 ordered compiler arguments, compiler identities, generated-language recipes,
@@ -326,9 +326,12 @@ build evidence identifies one reviewed driver replacement and preserves all
 other numerical objects and recorded build arguments. This source is a trusted
 validation input; its hash alone does not prove instrumentation correctness.
 The pipeline transports these facts and leaves their acceptance to the compiler.
-Version 1 contracts are rejected, including static-native diagnostic records.
-Version 1 captures require regeneration and rebuilding before they can supply
-version 2 calibration evidence; changing a protocol label cannot reuse them.
+Versions 1 and 2 of the process contract are rejected, including static-native
+diagnostic records. Their captures require regeneration and rebuilding before
+they can supply version 3 interval evidence. The compiler verifies successful
+interval completion, zero guarded fallback transitions and actual GPU work;
+planned native interruptions are measured parts of the alternative. Changing a
+protocol label cannot reuse older evidence.
 
 For a package that emits a runtime selector, `transform_scopes` returns
 `metadata["application_build"]`. After `apply_scope_sources(metadata, destinations)`

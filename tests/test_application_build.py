@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
 from elmm_pipeline.application_build import selection_builds, verify
 from elmm_pipeline.build import build
 from elmm_pipeline.local_adapter import LocalAdapterError, transform_scopes
@@ -37,7 +38,7 @@ def test_public_verifier_transport_preserves_paths_and_blocks_failure(tmp_path):
         verify(transport, "attest", {}, tmp_path / "evidence")
 
 
-@pytest.mark.parametrize("protocol", ["complete-original-window-cold-v4", "checked-selection-process-v1"])
+@pytest.mark.parametrize("protocol", ["complete-original-window-cold-v4", "checked-selection-process-v1", "checked-selection-process-v2"])
 @pytest.mark.parametrize("capture", [False, True])
 def test_old_cost_protocols_remain_rejected(protocol, capture):
     with pytest.raises(ValueError, match="supported executed application"):
@@ -48,11 +49,11 @@ def test_old_cost_protocols_remain_rejected(protocol, capture):
 
 
 @pytest.mark.parametrize("capture,selection", [(True, "native"), (True, "resident"), (False, "resident")])
-def test_v2_build_transport_preserves_compiler_validation_policy(capture, selection):
+def test_interval_build_transport_preserves_compiler_validation_policy(capture, selection):
     # Numerical interpretation belongs to the selected compiler. Transport the
     # exact policy and evidence reference without synthesizing a pass receipt.
     record = {"capture": capture, "selection": selection,
-              "contract": {"protocol": "checked-selection-process-v2",
+              "contract": {"protocol": "checked-interval-process-v3",
                            "build_contract": {"protocol": "executed-application-build-v1"},
                            "validation_policy": {"identity": "compiler-issued-policy",
                                                  "atol": 1e-6, "rtol": 1e-5,
@@ -65,7 +66,7 @@ def test_v2_build_transport_preserves_compiler_validation_policy(capture, select
 
 def test_static_automatic_native_diagnostic_requires_no_selector_build():
     record = {"selection": "native", "capture": False, "reason": "unavailable calibration",
-              "contract": {"protocol": "checked-selection-process-v2",
+              "contract": {"protocol": "checked-interval-process-v3",
                            "build_contract": {"protocol": "executed-application-build-v1"}}}
     assert selection_builds({"scopes": [{"exact_window": record}]}) == []
     record["capture"] = True
