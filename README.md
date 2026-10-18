@@ -306,7 +306,7 @@ contract. The legacy fixture protocols, including `complete-original-window-cold
 and `exact_window_build_contract` descriptors, remain unsupported by the
 application consumer and are rejected before source replacement or compilation.
 
-The `checked-interval-process-v3` protocol supports compiler-checked original
+The `checked-interval-process-v4` protocol supports compiler-checked original
 intervals and numerical groups through `--scope-cost FILE`. The pipeline
 transports this source-bound request unchanged; it does not choose intervals or
 derive costs. Its `executed-application-build-v1` contract uses successful native
@@ -316,6 +316,12 @@ and a declared final link policy. Original Fortran flags can differ between
 units and are preserved. Only declared build paths and exact source/object
 operands are normalized. Current compiler workers and runtime identities are
 bound separately from the old controls' approved generated sources.
+The request may explicitly select
+`"acceptance": {"criterion": "paired_non_regression"}`; the compiler then
+requires every resident timing to be no slower than its corresponding native
+timing, including both holdouts. Omitting it retains the compiler's default 5%
+advantage requirement. The pipeline preserves this criterion without changing
+the numerical validation or evaluating performance itself.
 
 The request requires a numerical validation policy bound before capture. The
 compiler verifies full-float64 diagnostic fields, storage bounds and required
@@ -326,9 +332,9 @@ build evidence identifies one reviewed driver replacement and preserves all
 other numerical objects and recorded build arguments. This source is a trusted
 validation input; its hash alone does not prove instrumentation correctness.
 The pipeline transports these facts and leaves their acceptance to the compiler.
-Versions 1 and 2 of the process contract are rejected, including static-native
+Versions 1 through 3 of the process contract are rejected, including static-native
 diagnostic records. Their captures require regeneration and rebuilding before
-they can supply version 3 interval evidence. The compiler verifies successful
+they can supply version 4 interval evidence. The compiler verifies successful
 interval completion, zero guarded fallback transitions and actual GPU work;
 planned native interruptions are measured parts of the alternative. Changing a
 protocol label cannot reuse older evidence.

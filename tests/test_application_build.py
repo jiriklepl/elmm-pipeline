@@ -38,7 +38,8 @@ def test_public_verifier_transport_preserves_paths_and_blocks_failure(tmp_path):
         verify(transport, "attest", {}, tmp_path / "evidence")
 
 
-@pytest.mark.parametrize("protocol", ["complete-original-window-cold-v4", "checked-selection-process-v1", "checked-selection-process-v2"])
+@pytest.mark.parametrize("protocol", ["complete-original-window-cold-v4", "checked-selection-process-v1",
+                                      "checked-selection-process-v2", "checked-interval-process-v3"])
 @pytest.mark.parametrize("capture", [False, True])
 def test_old_cost_protocols_remain_rejected(protocol, capture):
     with pytest.raises(ValueError, match="supported executed application"):
@@ -53,7 +54,8 @@ def test_interval_build_transport_preserves_compiler_validation_policy(capture, 
     # Numerical interpretation belongs to the selected compiler. Transport the
     # exact policy and evidence reference without synthesizing a pass receipt.
     record = {"capture": capture, "selection": selection,
-              "contract": {"protocol": "checked-interval-process-v3",
+              "contract": {"protocol": "checked-interval-process-v4",
+                           "acceptance": {"criterion": "paired_non_regression"},
                            "build_contract": {"protocol": "executed-application-build-v1"},
                            "validation_policy": {"identity": "compiler-issued-policy",
                                                  "atol": 1e-6, "rtol": 1e-5,
@@ -66,7 +68,7 @@ def test_interval_build_transport_preserves_compiler_validation_policy(capture, 
 
 def test_static_automatic_native_diagnostic_requires_no_selector_build():
     record = {"selection": "native", "capture": False, "reason": "unavailable calibration",
-              "contract": {"protocol": "checked-interval-process-v3",
+              "contract": {"protocol": "checked-interval-process-v4",
                            "build_contract": {"protocol": "executed-application-build-v1"}}}
     assert selection_builds({"scopes": [{"exact_window": record}]}) == []
     record["capture"] = True
@@ -78,7 +80,7 @@ def test_scope_cost_transport_is_hashed_and_not_reinterpreted(tmp_path):
     source = tmp_path / "source.f90"
     source.write_text("subroutine step\nend\n")
     cost = tmp_path / "cost.json"
-    requested = {"coverage": "original_selection", "validation_policy": {
+    requested = {"coverage": "checked_interval", "acceptance": {"criterion": "paired_non_regression"}, "validation_policy": {
         "driver": {"original_source": str(source), "replacement_sha256": "a" * 64},
         "outputs": {"files": {"final.vtk": ["velocity"], "average.vtk": ["velocity"]}}}}
     encoded = json.dumps(requested, indent=3).encode()

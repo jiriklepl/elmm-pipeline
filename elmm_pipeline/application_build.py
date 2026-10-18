@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .common import python_environment
 
-PROTOCOL = "checked-interval-process-v3"
+PROTOCOL = "checked-interval-process-v4"
 
 
 def selection_builds(manifest):
