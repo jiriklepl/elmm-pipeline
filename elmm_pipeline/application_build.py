@@ -10,10 +10,9 @@ import json
 import subprocess
 from pathlib import Path
 
-from .common import python_environment
+from .common import COMPILER_PHASE_TIMEOUT_SECONDS, python_environment
 
 PROTOCOL = "checked-interval-process-v4"
-VERIFIER_TIMEOUT_SECONDS = 180
 
 
 def selection_builds(manifest):
@@ -46,11 +45,11 @@ def verify(transport, phase, request, directory):
     environment = python_environment()
     environment["PYTHONPATH"] = str(root)
     record = {"argv": command, "cwd": str(root), "returncode": None,
-              "timeout_seconds": VERIFIER_TIMEOUT_SECONDS, "timed_out": False}
+              "timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS, "timed_out": False}
     timeout_error = None
     try:
         result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True,
-                                check=False, timeout=VERIFIER_TIMEOUT_SECONDS)
+                                check=False, timeout=COMPILER_PHASE_TIMEOUT_SECONDS)
         record["returncode"] = result.returncode
         stdout, stderr = result.stdout, result.stderr
     except subprocess.TimeoutExpired as error:
@@ -64,7 +63,7 @@ def verify(transport, phase, request, directory):
     (directory / (phase + ".log")).write_text(stdout + stderr)
     if timeout_error is not None:
         raise ValueError("Compiler application build verification timed out after "
-                         + str(VERIFIER_TIMEOUT_SECONDS) + " seconds; binary delivery blocked") from timeout_error
+                         + str(COMPILER_PHASE_TIMEOUT_SECONDS) + " seconds; binary delivery blocked") from timeout_error
     if result.returncode:
         raise ValueError("Compiler application build verification failed; binary delivery blocked: " + result.stderr[-2000:])
     response = json.loads(result.stdout)

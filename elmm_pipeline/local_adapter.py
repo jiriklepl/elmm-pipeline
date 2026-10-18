@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from .checked_execution_plan import validate_checked_execution_plans
-from .common import python_environment
+from .common import COMPILER_PHASE_TIMEOUT_SECONDS, python_environment
 from .gpu_toolchain import validate_numerical_contract
 from .owner_measurement import validate_owner_measurements
 
@@ -259,15 +259,16 @@ def _invoke(source_path, compiler_root, python, output_dir, entry, arguments, lo
                "--opt-level", "1", "--fallback", "error", "--json", *arguments]
     try:
         result = subprocess.run(command, cwd=compiler_root, env=environment, text=True,
-                                capture_output=True, check=False, timeout=180)
+                                capture_output=True, check=False, timeout=COMPILER_PHASE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as error:
         stdout, stderr = (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
                           for value in (error.stdout, error.stderr))
         (output_dir / log_name).write_text(stdout + stderr)
         (output_dir / (log_name + ".timeout.json")).write_text(json.dumps({
-            "argv": command, "cwd": str(compiler_root), "timeout_seconds": 180,
+            "argv": command, "cwd": str(compiler_root), "timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS,
             "timed_out": True, "returncode": None}, indent=2) + "\n")
-        raise LocalAdapterError(f"Compiler {entry} exceeded the 180-second phase limit; no artifacts accepted") from error
+        raise LocalAdapterError(f"Compiler {entry} exceeded the {COMPILER_PHASE_TIMEOUT_SECONDS}-second phase limit; "
+                                "no artifacts accepted") from error
     (output_dir / log_name).write_text(result.stdout + result.stderr)
     try:
         report = json.loads(result.stdout)

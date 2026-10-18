@@ -40,7 +40,7 @@ def application(tmp_path):
     link_argv = [compiler, "-fopenmp", "../build output/P/main.o", "../build output/entry-point.o",
                  "-Wl,--disable-new-dtags", "-lm", "-o", "../build output/application"]
     for argv in ([compiler, *flags, "-c", helper.name, "-o", str(helper_obj)], compile_argv, link_argv):
-        assert recorder.run(argv, cwd=cwd, timeout=180).returncode == 0
+        assert recorder.run(argv, cwd=cwd, timeout=240).returncode == 0
     receipt = summarize_build(binary, [commands], {str(p): file_identity(p)["sha256"] for p in (destination, helper)})
     receipt_ref = save(build / "receipts.json", receipt)
     # This transport fixture is deliberately not a compiler attestation. The
@@ -78,7 +78,7 @@ def test_real_relink_preserves_order_relative_paths_unrelated_objects_and_module
     assert commands[0]["argv"] == plan["relink"]["compile_argv"] == expected_compile
     assert commands[1]["argv"] == plan["relink"]["link_argv"] == expected_link
     assert "../build output/P/main.o" in expected_link
-    assert all(row["timeout_seconds"] == 180 and row["timed_out"] is False for row in commands)
+    assert all(row["timeout_seconds"] == 240 and row["timed_out"] is False for row in commands)
     assert all(row["status"] == "completed" and row["returncode"] == 0 for row in commands)
     module = str(arguments["module_inputs"][0])
     assert all(module in {item["path"] for item in row["inputs"]} for row in commands)
@@ -138,16 +138,16 @@ def test_timeout_retains_command_and_partial_log_and_blocks_relink(application, 
     def timeout(argv, **kwargs):
         if "--version" in argv:
             return run(argv, **kwargs)
-        assert kwargs["timeout"] == 180
+        assert kwargs["timeout"] == 240
         kwargs["stdout"].write(b"compiler partial diagnostic\n")
-        raise subprocess.TimeoutExpired(argv, 180)
+        raise subprocess.TimeoutExpired(argv, 240)
 
     monkeypatch.setattr(build_receipts.subprocess, "run", timeout)
     with pytest.raises(subprocess.TimeoutExpired):
         build_driver_link(observation, **arguments)
     directory = arguments["directory"]
     row, = [json.loads(path.read_text()) for path in (directory / "commands").glob("*.json")]
-    assert row["status"] == "failed" and row["timed_out"] is True and row["timeout_seconds"] == 180
+    assert row["status"] == "failed" and row["timed_out"] is True and row["timeout_seconds"] == 240
     assert (directory / "compile.log").read_text() == "compiler partial diagnostic\n"
     assert json.loads((directory / "build.json").read_text())["status"] == "failed"
     assert not (directory / "link.log").exists()

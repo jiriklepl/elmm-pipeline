@@ -48,7 +48,7 @@ class LocalCompilerProtocolTests(unittest.TestCase):
             self.assertEqual(command[command.index("--fallback") + 1], "error")
             self.assertEqual(command[command.index("--opt-level") + 1], "1")
             self.assertEqual(run.call_args.kwargs["cwd"], self.snapshot)
-            self.assertEqual(run.call_args.kwargs["timeout"], 180)
+            self.assertEqual(run.call_args.kwargs["timeout"], 240)
             self.assertEqual(run.call_args.kwargs["env"]["PYTHONPATH"], str(self.snapshot))
             self.assertEqual({path.name for path in self.output.iterdir()}, {"check.log", "check.json"})
 
@@ -57,11 +57,11 @@ class LocalCompilerProtocolTests(unittest.TestCase):
                                ("partial stdout\n", "partial stderr\n"), (None, None)):
             with self.subTest(stdout=stdout), patch(
                     "elmm_pipeline.local_adapter.subprocess.run",
-                    side_effect=subprocess.TimeoutExpired(["compiler"], 180, stdout, stderr)), \
-                    self.assertRaisesRegex(LocalAdapterError, "180-second phase limit"):
+                    side_effect=subprocess.TimeoutExpired(["compiler"], 240, stdout, stderr)), \
+                    self.assertRaisesRegex(LocalAdapterError, "240-second phase limit"):
                 check(self.source, self.snapshot, self.python, "advance", self.output)
             receipt = json.loads((self.output / "check.log.timeout.json").read_text())
-            self.assertEqual(receipt["timeout_seconds"], 180)
+            self.assertEqual(receipt["timeout_seconds"], 240)
             self.assertTrue(receipt["timed_out"])
             self.assertIsNone(receipt["returncode"])
             self.assertEqual(receipt["cwd"], str(self.snapshot))

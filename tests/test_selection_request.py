@@ -122,7 +122,7 @@ def executed_origins(tmp_path_factory):
                 argv = [nvcc, "-std=c++17", "-ccbin", host, "-arch=sm_86", "-Xcompiler=-fopenmp",
                         *cuda_options, *("-Xcompiler=" + flag for flag in host_options),
                         "-I" + str(build_root), "-c", str(path), "-o", str(obj)]
-            completed = recorder.run(argv, cwd=originals, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            completed = recorder.run(argv, cwd=originals, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=240)
             assert completed.returncode == 0, completed.stderr.decode()
             objects[path] = obj
         binary = build_root / "application"
@@ -131,7 +131,7 @@ def executed_origins(tmp_path_factory):
         if mode == "resident":
             argv += ["-L/usr/local/cuda/lib64", "-Wl,-rpath,/usr/local/cuda/lib64", "-lcudart", "-lstdc++"]
         completed = recorder.run([*argv, "-o", str(binary)], cwd=originals,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=240)
         assert completed.returncode == 0, completed.stderr.decode()
         receipt = save(build_root / "receipt.json", summarize_build(binary, [recorder.directory],
                        snapshot_inputs([originals, build_root])))
@@ -206,7 +206,7 @@ def test_session_reuses_sources_and_accepts_only_matching_collector_transport(tm
     save(input_path, executed_origins)
     command = [sys.executable, "-m", "elmm_pipeline.selection_request", "--request", str(input_path),
                "--output", str(tmp_path / "cli-request")]
-    result = subprocess.run(command, text=True, capture_output=True, timeout=180, check=False)
+    result = subprocess.run(command, text=True, capture_output=True, timeout=240, check=False)
     assert result.returncode == 0, result.stderr
     cli = json.loads(result.stdout)
     assert requests.generation_inputs(cli["session"], "resident")["source_path"] == production["source_path"]

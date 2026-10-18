@@ -392,7 +392,7 @@ the assembler rechecks all recorded source, configured dependency, workload,
 origin and policy hashes. Production requires matching collector evidence,
 acceptance and workload identities. The compiler still authenticates that
 evidence and chooses placement. Public compiler generation and evidence
-verification have independent 180-second phase limits and retain partial logs
+verification have independent 240-second phase limits and retain partial logs
 on timeout. Virtualenv Python launcher paths are preserved.
 
 `python -m elmm_pipeline.selection_campaign --request REQUEST --output DIRECTORY`
@@ -426,7 +426,7 @@ receipts, original observation logs, full fields including bounds and halos,
 ordinary outputs, and timing criterion. The collector emits `evidence.json` and
 a reusable `scope-cost.json` only after successful verification. A verified
 native decision remains native. The two compiler verifier calls each have a
-180-second limit; application processes keep the separately supplied runtime
+240-second limit; application processes keep the separately supplied runtime
 limit. This is calibration evidence, not final application qualification or a
 placement proof. Both primary cases still require fresh production AUTO runs
 and the separate native/SGS-direct/automatic-resident qualification campaign.
@@ -1059,7 +1059,7 @@ diagnostic = build_driver_link(
 )
 ```
 
-The helper executes the recorded compile and link commands with a 180-second
+The helper executes the recorded compile and link commands with a 240-second
 limit per compiler command, retaining logs and actual command receipts. It
 preserves numerical flags, module paths, generated objects and library order;
 only the selected source, its object and the executable output change. The

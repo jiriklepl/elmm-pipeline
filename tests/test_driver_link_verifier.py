@@ -39,8 +39,8 @@ def public_api(root, directory, code, payload):
     script += "\nPath(sys.argv[2]).write_text(json.dumps(result))\n"
     result = subprocess.run([sys.executable, "-c", script, str(request), str(output)], cwd=root,
                             env={**os.environ, "PYTHONPATH": str(root)}, capture_output=True, text=True,
-                            check=False, timeout=180)
-    saved(directory / "command.json", {"argv": result.args, "returncode": result.returncode, "timeout_seconds": 180})
+                            check=False, timeout=240)
+    saved(directory / "command.json", {"argv": result.args, "returncode": result.returncode, "timeout_seconds": 240})
     (directory / "compiler.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 0, result.stdout + result.stderr
     return json.loads(output.read_text())
@@ -75,11 +75,11 @@ def test_executed_diagnostic_is_accepted_by_public_compiler_verifier(tmp_path):
                 flags.append("-D" + macros[str(source)])
             argv = [cuda if is_cuda else fortran, *flags, "-c", str(source), "-o", str(obj)]
             with (build_root / ("compile-" + str(index) + ".log")).open("wb") as log:
-                assert recorder.run(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode == 0
+                assert recorder.run(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT, timeout=240).returncode == 0
             objects.append(str(obj))
         binary = build_root / "program"
         assert recorder.run([fortran, "-O0", *objects, str(cudart), "-Wl,-rpath," + str(cudart.parent),
-                             "-o", str(binary)], cwd=cwd, timeout=180).returncode == 0
+                             "-o", str(binary)], cwd=cwd, timeout=240).returncode == 0
         receipt = summarize_build(binary, [build_root / "commands"],
                                   {str(source): file_identity(source)["sha256"] for source in sources})
         reference = saved(build_root / "receipts.json", receipt)

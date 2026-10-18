@@ -18,13 +18,16 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
-from .common import clean_environment, python_environment
+from .common import (
+    COMPILER_PHASE_TIMEOUT_SECONDS,
+    clean_environment,
+    python_environment,
+)
 from .validation import validate_log
 
 PROTOCOL = "checked-interval-process-v4"
 OBSERVATION = "FORT_SELECTION_OBSERVATION "
 COMPLETION = "FORT_APPLICATION_COMPLETION "
-VERIFIER_TIMEOUT = 180
 MAX_LOG_BYTES = 64 * 1024 * 1024
 
 
@@ -94,19 +97,20 @@ def _verifier(transport, phase, request, directory):
             "--request", str(request_path), "--output", str(output)]
     try:
         result = subprocess.run(argv, cwd=root, env=environment, text=True, capture_output=True,
-                                check=False, timeout=VERIFIER_TIMEOUT)
+                                check=False, timeout=COMPILER_PHASE_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired as error:
         stdout, stderr = (value.decode(errors="replace") if isinstance(value, bytes) else value or ""
                           for value in (error.stdout, error.stderr))
         (directory / "stdout.log").write_text(stdout)
         (directory / "stderr.log").write_text(stderr)
         _write(directory / "command.json", {"argv": argv, "cwd": str(root), "returncode": None,
-                                            "timeout_seconds": VERIFIER_TIMEOUT, "timed_out": True})
-        raise ValueError("compiler interval evidence verification exceeded the 180-second phase limit") from error
+                                            "timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS, "timed_out": True})
+        raise ValueError("compiler interval evidence verification exceeded the "
+                         f"{COMPILER_PHASE_TIMEOUT_SECONDS}-second phase limit") from error
     (directory / "stdout.log").write_text(result.stdout)
     (directory / "stderr.log").write_text(result.stderr)
     _write(directory / "command.json", {"argv": argv, "cwd": str(root), "returncode": result.returncode,
-                                        "timeout_seconds": VERIFIER_TIMEOUT})
+                                        "timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS})
     if result.returncode:
         raise ValueError("compiler interval evidence verification rejected the campaign: " + result.stderr[-2000:])
     response = _read(_reference(output))
@@ -265,7 +269,7 @@ def run(request, output):
     _write(output / "request.json", request)
     report = {"schema_version": 1, "status": "running", "placement_authority": False,
               "qualification": False, "warmups": [], "application_timeout_seconds": timeout,
-              "compiler_verifier_timeout_seconds": VERIFIER_TIMEOUT}
+              "compiler_verifier_timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS}
     try:
         verified = _verifier(request["compiler"], "builds", {key: request[key] for key in
                              ("contract", "builds", "diagnostics")}, output / "build-verification")

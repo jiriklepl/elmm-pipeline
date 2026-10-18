@@ -25,7 +25,7 @@ def test_public_verifier_transport_preserves_paths_and_blocks_failure(tmp_path):
     def invoke(argv, **kwargs):
         calls.append((argv, kwargs))
         assert kwargs["cwd"] == compiler and kwargs["env"]["PYTHONPATH"] == str(compiler)
-        assert kwargs["timeout"] == 180
+        assert kwargs["timeout"] == 240
         request = json.loads(Path(argv[argv.index("--request") + 1]).read_text())
         assert request == {"manifest": "literal $(unchanged) path"}
         Path(argv[argv.index("--output") + 1]).write_text(json.dumps({"identity": "verified"}))
@@ -49,11 +49,11 @@ def test_public_verifier_timeout_blocks_delivery_and_preserves_evidence(tmp_path
     evidence = tmp_path / "evidence"
 
     def timeout(argv, **kwargs):
-        assert kwargs["timeout"] == 180
+        assert kwargs["timeout"] == 240
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=stdout, stderr=stderr)
 
     with patch("elmm_pipeline.application_build.subprocess.run", side_effect=timeout), \
-            pytest.raises(ValueError, match="timed out after 180 seconds; binary delivery blocked") as caught:
+            pytest.raises(ValueError, match="timed out after 240 seconds; binary delivery blocked") as caught:
         verify(transport, phase, {"literal": "request"}, evidence)
     assert isinstance(caught.value.__cause__, subprocess.TimeoutExpired)
     command = json.loads((evidence / (phase + "-command.json")).read_text())
@@ -61,7 +61,7 @@ def test_public_verifier_timeout_blocks_delivery_and_preserves_evidence(tmp_path
     assert command["cwd"] == str(compiler)
     assert command["timed_out"] is True
     assert command["returncode"] is None
-    assert command["timeout_seconds"] == 180
+    assert command["timeout_seconds"] == 240
     assert json.loads((evidence / (phase + "-request.json")).read_text()) == {"literal": "request"}
     expected = "partial output\npartial error\n" if isinstance(stdout, bytes) else "still checking\n"
     assert (evidence / (phase + ".log")).read_text() == expected

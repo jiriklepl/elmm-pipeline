@@ -1,11 +1,14 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import subprocess
 import time
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+# Compiler generation, verification and diagnostic relinks share this phase
+# cap. Application processes retain their explicitly supplied runtime limits.
+COMPILER_PHASE_TIMEOUT_SECONDS = 240
 
 
 def write_json(path, value):
@@ -35,11 +38,11 @@ def command(args, *, cwd=None, env=None, log=None, timeout=None):
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         with Path(log).open("w") as stream:
             result = subprocess.run(args, cwd=cwd, env=env, stdout=stream,
-                                    stderr=subprocess.STDOUT, timeout=timeout)
+                                    stderr=subprocess.STDOUT, timeout=timeout, check=False)
         output = Path(log).read_text(errors="replace")
     else:
         result = subprocess.run(args, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, timeout=timeout)
+                                stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False)
         output = result.stdout
     elapsed = time.perf_counter() - started
     if result.returncode:

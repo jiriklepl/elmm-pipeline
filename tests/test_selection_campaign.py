@@ -113,13 +113,13 @@ def test_completion_is_observed_not_copied_from_expected_workload(tmp_path, real
     assert record["completion"]["steps"] == 3
 
 
-def test_public_verifier_transport_has_separate_180_second_cap(tmp_path, monkeypatch):
+def test_public_verifier_transport_has_separate_240_second_cap(tmp_path, monkeypatch):
     root = tmp_path / "compiler"
     (root / "compiler/offload").mkdir(parents=True)
     (root / "compiler/offload/selection_cost.py").touch()
 
     def invoke(argv, **kwargs):
-        assert kwargs["timeout"] == 180
+        assert kwargs["timeout"] == 240
         assert kwargs["cwd"] == root
         assert kwargs["env"]["PYTHONPATH"] == str(root)
         response = {"status": "verified", "placement_authority": False}
@@ -143,17 +143,17 @@ def test_verifier_timeout_retains_command_streams_and_virtualenv_launcher(tmp_pa
 
     def invoke(argv, **kwargs):
         assert argv[0] == str(launcher)
-        assert kwargs["timeout"] == 180
-        raise subprocess.TimeoutExpired(argv, 180, *streams)
+        assert kwargs["timeout"] == 240
+        raise subprocess.TimeoutExpired(argv, 240, *streams)
 
     monkeypatch.setattr(collector.subprocess, "run", invoke)
     directory = tmp_path / "verify"
-    with pytest.raises(ValueError, match="180-second phase limit"):
+    with pytest.raises(ValueError, match="240-second phase limit"):
         collector._verifier({"compiler_root": str(root), "python": str(launcher)}, "builds", {}, directory)
     command = json.loads((directory / "command.json").read_text())
     assert command["timed_out"] is True
     assert command["returncode"] is None
-    assert command["timeout_seconds"] == 180
+    assert command["timeout_seconds"] == 240
     assert command["argv"][0] == str(launcher)
     assert (directory / "stdout.log").read_text() == ("partial output" if streams[0] else "")
     assert (directory / "stderr.log").read_text() == ("partial error" if streams[1] else "")

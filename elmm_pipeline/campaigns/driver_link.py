@@ -17,8 +17,8 @@ from ..build_receipts import (
     read_receipts,
     require_build_receipts,
 )
+from ..common import COMPILER_PHASE_TIMEOUT_SECONDS
 
-COMPILER_TIMEOUT_SECONDS = 180
 FORTRAN_SUFFIXES = {".f", ".for", ".ftn", ".f90", ".f95", ".f03", ".f08"}
 
 
@@ -144,14 +144,14 @@ def build_driver_link(application_build, *, original_source, source, object_path
             "application_binary": receipt["binary"], "diagnostic_binary": str(output),
             "original_source": str(original_source), "original_object": unit["object"],
             "module_inputs": modules, "files_sha256": identities,
-            "compiler_timeout_seconds": COMPILER_TIMEOUT_SECONDS,
+            "compiler_timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS,
             "relink": {"cwd": str(cwd), "compile_argv": compile_argv, "link_argv": link_argv}}
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     plan_ref = _write(directory / "plan.json", plan)
     recorder = CommandRecorder(directory / "commands")
     build = {"schema_version": 1, "status": "failed", "plan_sha256": plan_ref["sha256"],
-             "binary": str(output), "compiler_timeout_seconds": COMPILER_TIMEOUT_SECONDS}
+             "binary": str(output), "compiler_timeout_seconds": COMPILER_PHASE_TIMEOUT_SECONDS}
 
     def recheck():
         for path, expected in identities.items():
@@ -165,7 +165,7 @@ def build_driver_link(application_build, *, original_source, source, object_path
             inputs = {item["path"] for item in previous["inputs"] if item["path"] != replaced} | set(modules)
             with (directory / (phase + ".log")).open("wb") as log:
                 result = recorder.run(argv, cwd=cwd, env=environment, stdout=log, stderr=subprocess.STDOUT,
-                                      additional_inputs=inputs, timeout=COMPILER_TIMEOUT_SECONDS)
+                                      additional_inputs=inputs, timeout=COMPILER_PHASE_TIMEOUT_SECONDS)
             if result.returncode:
                 raise ValueError("diagnostic " + phase + " failed; see " + str(directory / (phase + ".log")))
         recheck()
