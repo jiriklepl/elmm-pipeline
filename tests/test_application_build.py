@@ -25,6 +25,7 @@ def test_public_verifier_transport_preserves_paths_and_blocks_failure(tmp_path):
     def invoke(argv, **kwargs):
         calls.append((argv, kwargs))
         assert kwargs["cwd"] == compiler and kwargs["env"]["PYTHONPATH"] == str(compiler)
+        assert kwargs["timeout"] == 180
         request = json.loads(Path(argv[argv.index("--request") + 1]).read_text())
         assert request == {"manifest": "literal $(unchanged) path"}
         Path(argv[argv.index("--output") + 1]).write_text(json.dumps({"identity": "verified"}))
@@ -36,6 +37,35 @@ def test_public_verifier_transport_preserves_paths_and_blocks_failure(tmp_path):
     with patch("elmm_pipeline.application_build.subprocess.run", return_value=subprocess.CompletedProcess([], 1, "", "actual argv differs")), \
             pytest.raises(ValueError, match="binary delivery blocked"):
         verify(transport, "attest", {}, tmp_path / "evidence")
+
+
+@pytest.mark.parametrize("phase", ["preflight", "attest"])
+@pytest.mark.parametrize("stdout,stderr", [(b"partial output\n", b"partial error\n"), (None, "still checking\n")])
+def test_public_verifier_timeout_blocks_delivery_and_preserves_evidence(tmp_path, phase, stdout, stderr):
+    compiler = tmp_path / "compiler with spaces"
+    (compiler / "compiler/offload").mkdir(parents=True)
+    (compiler / "compiler/offload/application_build.py").touch()
+    transport = {"compiler_root": str(compiler), "python": sys.executable}
+    evidence = tmp_path / "evidence"
+
+    def timeout(argv, **kwargs):
+        assert kwargs["timeout"] == 180
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=stdout, stderr=stderr)
+
+    with patch("elmm_pipeline.application_build.subprocess.run", side_effect=timeout), \
+            pytest.raises(ValueError, match="timed out after 180 seconds; binary delivery blocked") as caught:
+        verify(transport, phase, {"literal": "request"}, evidence)
+    assert isinstance(caught.value.__cause__, subprocess.TimeoutExpired)
+    command = json.loads((evidence / (phase + "-command.json")).read_text())
+    assert command["argv"][:4] == [sys.executable, "-m", "compiler.offload.application_build", phase]
+    assert command["cwd"] == str(compiler)
+    assert command["timed_out"] is True
+    assert command["returncode"] is None
+    assert command["timeout_seconds"] == 180
+    assert json.loads((evidence / (phase + "-request.json")).read_text()) == {"literal": "request"}
+    expected = "partial output\npartial error\n" if isinstance(stdout, bytes) else "still checking\n"
+    assert (evidence / (phase + ".log")).read_text() == expected
+    assert not (evidence / (phase + ".json")).exists()
 
 
 @pytest.mark.parametrize("protocol", ["complete-original-window-cold-v4", "checked-selection-process-v1",

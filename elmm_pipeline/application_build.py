@@ -13,6 +13,7 @@ from pathlib import Path
 from .common import python_environment
 
 PROTOCOL = "checked-interval-process-v4"
+VERIFIER_TIMEOUT_SECONDS = 180
 
 
 def selection_builds(manifest):
@@ -44,10 +45,26 @@ def verify(transport, phase, request, directory):
                "--request", str(request_path), "--output", str(output)]
     environment = python_environment()
     environment["PYTHONPATH"] = str(root)
-    result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True, check=False)
-    (directory / (phase + "-command.json")).write_text(json.dumps({"argv": command, "cwd": str(root),
-                                                                  "returncode": result.returncode}, indent=2) + "\n")
-    (directory / (phase + ".log")).write_text(result.stdout + result.stderr)
+    record = {"argv": command, "cwd": str(root), "returncode": None,
+              "timeout_seconds": VERIFIER_TIMEOUT_SECONDS, "timed_out": False}
+    timeout_error = None
+    try:
+        result = subprocess.run(command, cwd=root, env=environment, text=True, capture_output=True,
+                                check=False, timeout=VERIFIER_TIMEOUT_SECONDS)
+        record["returncode"] = result.returncode
+        stdout, stderr = result.stdout, result.stderr
+    except subprocess.TimeoutExpired as error:
+        # TimeoutExpired can retain byte output even with text=True. Preserve
+        # that diagnostic stream before rejecting either verification phase.
+        timeout_error = error
+        record["timed_out"] = True
+        stdout, stderr = (value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+                          for value in (error.stdout, error.stderr))
+    (directory / (phase + "-command.json")).write_text(json.dumps(record, indent=2) + "\n")
+    (directory / (phase + ".log")).write_text(stdout + stderr)
+    if timeout_error is not None:
+        raise ValueError("Compiler application build verification timed out after "
+                         + str(VERIFIER_TIMEOUT_SECONDS) + " seconds; binary delivery blocked") from timeout_error
     if result.returncode:
         raise ValueError("Compiler application build verification failed; binary delivery blocked: " + result.stderr[-2000:])
     response = json.loads(result.stdout)
