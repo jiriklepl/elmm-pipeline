@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+from .application_build import PROTOCOL
 
 _PLAN_FIELDS = {
     "schema_version", "identity", "execution_identity", "entry", "sources", "source_inputs_identity",
@@ -208,9 +209,26 @@ def _validate_applicability(record, plan, scope):
                  and isinstance(candidate.get("missing_proofs"), list),
                  "interval applicability candidates cannot authorize runtime evaluation")
     for requirement in record["requirements"]:
-        _require(_text(requirement.get("kind")) and _text(requirement.get("reason"))
-                 and requirement.get("status") == "not_established",
-                 "interval applicability requires unresolved explanatory requirements")
+        _require(_text(requirement.get("kind")) and _text(requirement.get("reason")),
+                 "interval applicability requires explanatory requirements")
+        if requirement.get("status") == "covered_by_checked_interval_attachment":
+            # This is the existing v1 producer's measured-coverage state, for
+            # both native and resident decisions. It conveys no new authority;
+            # source edits and build attestation retain their separate checks.
+            _require(exact is not None and exact.get("available") is True
+                     and exact.get("capture") is False
+                     and _text(exact.get("selection"))
+                     and exact.get("selection") in {"native", "resident"}
+                     and isinstance(exact.get("contract"), dict)
+                     and exact["contract"].get("protocol") == PROTOCOL
+                     and _sha256(exact.get("contract_sha256"))
+                     and exact["contract_sha256"] == _digest(exact["contract"])
+                     and _sha256(exact.get("evidence_sha256"))
+                     and requirement.get("attachment") == exact["contract_sha256"],
+                     "interval applicability covered requirement differs from its measured attachment")
+        else:
+            _require(requirement.get("status") == "not_established" and "attachment" not in requirement,
+                     "interval applicability requires unresolved explanatory requirements")
     procedures = {item["procedure"]: item for item in plan["procedures"]}
     for key in ("original_control_trees", "native_operations", "numerical_operations"):
         for item in record[key]:

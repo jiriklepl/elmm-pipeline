@@ -151,6 +151,61 @@ def test_interval_applicability_projects_existing_attachment_without_authorizing
     unchanged(sources)
 
 
+def with_measured_applicability(metadata, selection="native"):
+    record = with_applicability(metadata)
+    scope = metadata["scope_manifest"]["scopes"][0]
+    contract = {"protocol": "checked-interval-process-v4"}
+    exact = {"available": True, "selection": selection, "reason": "verified complete-process decision",
+             "capture": False, "contract": contract, "contract_sha256": digest(contract),
+             "evidence_sha256": "e" * 64}
+    scope["exact_window"] = exact
+    record["requirements"][0].update(status="covered_by_checked_interval_attachment",
+                                      attachment=exact["contract_sha256"])
+    record["existing_exact_window"] = {key: value for key, value in exact.items() if key != "contract"}
+    seal(record)
+    save(metadata)
+    return record, exact
+
+
+@pytest.mark.parametrize("selection", ["native", "resident"])
+def test_measured_interval_coverage_is_transported_but_does_not_authorize_build(tmp_path, sources, selection):
+    metadata = package(tmp_path, sources, "one")
+    record, _ = with_measured_applicability(metadata, selection)
+    expected = copy.deepcopy(record)
+    validate_checked_execution_plans(metadata["scope_manifest"])
+    assert record == expected
+    # A linked coverage diagnostic cannot substitute for an executed build
+    # contract. The deliberately incomplete contract still blocks all edits.
+    with pytest.raises(LocalAdapterError, match="Exact-window"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+@pytest.mark.parametrize("change", [
+    lambda r, e: e.update(available=False),
+    lambda r, e: e.update(available=1),
+    lambda r, e: e.update(capture=True),
+    lambda r, e: e.update(selection="unknown"),
+    lambda r, e: e.update(selection=[]),
+    lambda r, e: e.update(contract={"protocol": "checked-interval-process-v3"}),
+    lambda r, e: e.update(contract=None),
+    lambda r, e: e.update(contract_sha256="0" * 64),
+    lambda r, e: e.update(evidence_sha256=None),
+    lambda r, e: r["requirements"][0].update(attachment="0" * 64),
+    lambda r, e: r["requirements"][0].pop("attachment"),
+])
+def test_measured_interval_coverage_rejects_detached_or_unavailable_evidence(tmp_path, sources, change):
+    metadata = package(tmp_path, sources, "one")
+    record, exact = with_measured_applicability(metadata)
+    change(record, exact)
+    record["existing_exact_window"] = {key: value for key, value in exact.items() if key != "contract"}
+    seal(record)
+    save(metadata)
+    with pytest.raises(ValueError, match="covered requirement differs"):
+        validate_checked_execution_plans(metadata["scope_manifest"])
+    unchanged(sources)
+
+
 def test_checked_plan_preserved_in_composition_without_placement_decisions(tmp_path, sources):
     first = package(tmp_path, sources, "first")
     second = package(tmp_path, sources, "second", source="consumer.f90")

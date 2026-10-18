@@ -214,6 +214,11 @@ content digest, exact plan/source/configuration/resource linkage and lack of
 execution or placement authority. Composition preserves it unchanged. Its
 compact existing-exact-window projection must match the authoritative attachment;
 it cannot add calibration or bypass the application build-contract requirement.
+The same schema also transports `covered_by_checked_interval_attachment` when
+the compiler has verified complete-process evidence. Each covered requirement
+must reference the exact available, non-capture interval contract and its
+evidence identity. This includes measured native decisions; coverage does not
+mean residency was selected. These diagnostics never authorize build edits.
 
 Capture facts use the compiler's versioned public JSON contract. They declare
 participation and canonical resource roots with storage lifetime, escape,
