@@ -31,6 +31,8 @@ if '--version' in sys.argv:
     print('receipt-test-compiler 1')
     sys.exit(0)
 args = sys.argv[1:]
+if '--remove' in args:
+    pathlib.Path(args[args.index('--remove')+1]).unlink()
 if '--fail' in args:
     print('gfortran -O3 -c invented.f90 -o invented.o')
     sys.exit(7)
@@ -121,6 +123,28 @@ def test_input_mutation_cannot_appear_as_unchanged_success(compiler, tmp_path):
     [record] = receipts(directory)
     assert record["status"] == "inputs_changed"
     assert record["inputs"] == [{"path": str(source), "sha256": before}]
+    with pytest.raises(ValueError, match="successful"):
+        read_receipts(directory)
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("removed", ["module", "compiler"])
+def test_disappearing_build_input_preserves_actual_exit_status(compiler, tmp_path, failed, removed):
+    module = tmp_path / "cached.mod"
+    module.write_text("old module")
+    target = module if removed == "module" else compiler
+    directory = tmp_path / "receipts"
+    argv = [str(compiler), "--remove", str(target), "-o", "object.o"]
+    if failed:
+        argv.append("--fail")
+    result = CommandRecorder(directory).run(argv, cwd=tmp_path, additional_inputs=[module],
+                                             stdout=subprocess.DEVNULL)
+    assert result.returncode == (7 if failed else 0)
+    [record] = receipts(directory)
+    assert record["returncode"] == result.returncode
+    assert record["status"] == "inputs_changed"
+    assert "error" not in record
+    assert not target.exists()
     with pytest.raises(ValueError, match="successful"):
         read_receipts(directory)
 

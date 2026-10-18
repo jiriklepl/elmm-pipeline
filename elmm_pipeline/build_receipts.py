@@ -33,6 +33,15 @@ def file_identity(path):
     return {"path": str(path), "sha256": digest}
 
 
+def _unchanged(item):
+    try:
+        return file_identity(item["path"])["sha256"] == item["sha256"]
+    except OSError:
+        # A failed compiler can remove a stale module file. Preserve its actual
+        # exit status while making the changed-input receipt unusable.
+        return False
+
+
 def read_receipts(directory):
     """Return successful, still-current execution records and receipt hashes."""
     records = []
@@ -210,8 +219,8 @@ class CommandRecorder:
             record["status"] = "completed"
             if output is not None and output.is_file():
                 record["outputs"] = [file_identity(output)]
-            if ((compiler is not None and file_identity(compiler["path"])["sha256"] != compiler["sha256"])
-                    or any(file_identity(item["path"])["sha256"] != item["sha256"] for item in record["inputs"])):
+            if ((compiler is not None and not _unchanged(compiler))
+                    or any(not _unchanged(item) for item in record["inputs"])):
                 record["status"] = "inputs_changed"
             return result
         except BaseException as error:
