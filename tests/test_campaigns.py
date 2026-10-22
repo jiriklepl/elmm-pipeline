@@ -209,7 +209,10 @@ def test_campaign_diagnostics_transport_separate_scope_packages(tmp_path, monkey
     (tmp_path / "config").mkdir()
     packages = [{"scope_manifest": {
         "schema_version": 1, "scope_count": 1, "automatic_estimate_available": False,
-        "scopes": [{"mode": "auto", "estimate_available": False, "gpu_leaves": ["renamed::leaf"]}]}},
+        "scopes": [{"mode": "auto", "estimate_available": False, "gpu_leaves": ["renamed::leaf"],
+                    "automatic_preflight": {"selection": "native", "successful": True,
+                        "caller_source_unchanged": True, "generated_owner_invoked": False,
+                        "contexts_created": 0}}]}},
         {"scope_manifest": {"schema_version": 1, "scope_count": 0, "scopes": []}}]
     write(tmp_path / "adapter.json", {"scope_packages": packages, "regions": []})
     monkeypatch.setattr("elmm_pipeline.campaigns.run.available", lambda: 4 * 2**30)

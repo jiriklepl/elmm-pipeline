@@ -289,10 +289,8 @@ def gpu_activity(log, tool, regions, *, scope_manifest=None, scope_packages=None
         for manifest in manifests:
             scopes = manifest.get("scopes", [])
             native = native and (manifest.get("schema_version") == 1
-                      and (manifest.get("scope_count") == 0 or
-                           manifest.get("automatic_estimate_available") is False and bool(scopes)
-                           and all(scope.get("mode") == "auto" and scope.get("estimate_available") is False
-                                   for scope in scopes)))
+                      and (manifest.get("scope_count") == 0 and not scopes or
+                           bool(scopes) and all(_native_source_preflight(scope) for scope in scopes)))
         if native and (kernels or scoped["kernel_launches"]):
             raise ValueError("CUDA launch contradicts the compiler's all-native source-scope contract")
         return {"verified": kernels + scoped["kernel_launches"] > 0,
@@ -307,3 +305,13 @@ def gpu_activity(log, tool, regions, *, scope_manifest=None, scope_packages=None
                 "offload_decisions": offload_decisions(log, regions, scope_manifest=scope_manifest,
                                                       scope_packages=scope_packages)}
     raise ValueError("GPU trace tool must be local")
+
+
+def _native_source_preflight(scope):
+    """Unavailable costs do not settle placement of a reached GPU query."""
+    preflight = scope.get("automatic_preflight")
+    return (scope.get("mode") == "auto" and isinstance(preflight, dict)
+            and preflight.get("selection") == "native" and preflight.get("successful") is True
+            and preflight.get("caller_source_unchanged") is True
+            and preflight.get("generated_owner_invoked") is False
+            and type(preflight.get("contexts_created")) is int and preflight["contexts_created"] == 0)

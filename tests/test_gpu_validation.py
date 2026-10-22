@@ -43,7 +43,8 @@ class GPUValidationTests(unittest.TestCase):
 
     def test_compiler_native_scope_contract_has_no_invented_runtime_calls(self):
         manifest = {"schema_version": 1, "scope_count": 1, "automatic_estimate_available": False,
-                    "scopes": [{"mode": "auto", "estimate_available": False}]}
+                    "scopes": [{"mode": "auto", "estimate_available": False,
+                                "automatic_preflight": native_preflight()}]}
         activity = gpu_activity("", "local", [], scope_manifest=manifest)
         self.assertTrue(native_policy_exercised(activity, []))
         self.assertFalse(activity["verified"])
@@ -51,7 +52,46 @@ class GPUValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "contradicts"):
             gpu_activity("FORT_SCOPED launch bytes=0\n", "local", [], scope_manifest=manifest)
         manifest["scopes"][0]["estimate_available"] = True
-        self.assertFalse(gpu_activity("", "local", [], scope_manifest=manifest)["compiler_native_selection"])
+        self.assertTrue(gpu_activity("", "local", [], scope_manifest=manifest)["compiler_native_selection"])
+
+    def test_unpriced_native_prefix_keeps_reached_gpu_placement_available(self):
+        manifest = {"schema_version": 1, "scope_count": 1, "automatic_estimate_available": False,
+                    "scopes": [{"mode": "auto", "estimate_available": False,
+                        "planning_reason": "original native prefix before context creation is unpriced",
+                        "gpu_leaves": ["renamed::producer"],
+                        "planning_segments": [
+                            {"gpu_leaves": [], "fresh_native_prefix": {"estimates_available": False}},
+                            {"gpu_leaves": ["renamed::producer"], "fresh_native_prefix": None}]}]}
+        before = json.dumps(manifest, sort_keys=True)
+        log = (scoped_decision() + "FORT_OFFLOAD entry=producer mode=scoped-scheduled gpu_units=1 cpu_units=1\n"
+               "FORT_SCOPED launch bytes=0\n")
+        result = gpu_activity(log, "local", [], scope_manifest=manifest)
+        self.assertTrue(result["verified"])
+        self.assertFalse(result["compiler_native_selection"])
+        self.assertFalse(native_policy_exercised(result, []))
+        self.assertEqual(result["kernel_launches"], 1)
+        self.assertEqual(json.dumps(manifest, sort_keys=True), before)
+
+    def test_native_contract_needs_successful_unchanged_source_preflight(self):
+        invalid = [{}, {"selection": "gpu"}, {"successful": False}, {"successful": 1},
+                   {"caller_source_unchanged": False}, {"generated_owner_invoked": True},
+                   {"contexts_created": 1}, {"contexts_created": False}]
+        for changes in invalid:
+            preflight = native_preflight() if changes else {}
+            preflight.update(changes)
+            manifest = {"schema_version": 1, "scope_count": 1, "automatic_estimate_available": False,
+                        "scopes": [{"mode": "auto", "estimate_available": False,
+                                    "automatic_preflight": preflight}]}
+            with self.subTest(changes=changes):
+                result = gpu_activity("FORT_SCOPED launch bytes=0\n", "local", [], scope_manifest=manifest)
+                self.assertTrue(result["verified"])
+                self.assertFalse(result["compiler_native_selection"])
+
+    def test_legacy_zero_scope_contract_still_rejects_cuda_launches(self):
+        manifest = {"schema_version": 1, "scope_count": 0, "scopes": []}
+        self.assertTrue(gpu_activity("", "local", [], scope_manifest=manifest)["compiler_native_selection"])
+        with self.assertRaisesRegex(ValueError, "contradicts"):
+            gpu_activity("FORT_RUNTIME kernel\n", "local", [], scope_manifest=manifest)
 
     def test_scoped_resource_fallback_uses_public_leaf_identity(self):
         region = {"entry": "scope_owner", "transformation": {"memory_model": "scoped"}}
@@ -373,7 +413,13 @@ class GPUValidationTests(unittest.TestCase):
 def scope_package(entry, *, available=False):
     return {"scope_manifest": {
         "schema_version": 1, "scope_count": 1, "automatic_estimate_available": available,
-        "scopes": [{"mode": "auto", "estimate_available": available, "gpu_leaves": [f"renamed::{entry}"]}]}}
+        "scopes": [{"mode": "auto", "estimate_available": available, "gpu_leaves": [f"renamed::{entry}"],
+                    **({"automatic_preflight": native_preflight()} if not available else {})}]}}
+
+
+def native_preflight():
+    return {"selection": "native", "successful": True, "caller_source_unchanged": True,
+            "generated_owner_invoked": False, "contexts_created": 0}
 
 
 def scoped_decision(**changes):
