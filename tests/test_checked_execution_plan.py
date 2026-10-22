@@ -313,6 +313,7 @@ def test_configured_source_identity_includes_dependencies_configuration_and_sort
 @pytest.mark.parametrize("tamper", [False, "capture", "identity"])
 def test_fresh_compiler_response_validates_requested_capture_facts(tmp_path, sources, tamper):
     metadata = package(tmp_path, sources, "fresh")
+    metadata["scope_manifest"]["scope_execution"] = "graph"
     facts = {"schema_version": 1, "participation": "serial", "captures": {}, "sources": sources[0]}
     plan = with_plan(metadata, facts=facts)
     expected = copy.deepcopy(plan)

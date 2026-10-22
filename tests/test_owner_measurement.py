@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import shutil
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -139,74 +137,34 @@ def test_resident_runtime_identity_is_authenticated(tmp_path):
         validate_owner_measurements(manifest)
 
 
-def test_public_compiler_measurement_variants_apply_and_compose(tmp_path):
-    from elmm_pipeline.local_adapter import compose_scope_packages, transform_scopes
-
-    original = Path(os.environ.get("ELMM_TEST_COMPILER_ROOT", Path(__file__).resolve().parents[2]))
-    if not (original / "compiler/__main__.py").is_file():
-        pytest.skip("Set ELMM_TEST_COMPILER_ROOT to an explicit compiler checkout")
-    compiler = tmp_path / "compiler-checkout"
-    shutil.copytree(original / "compiler", compiler / "compiler",
-                    ignore=shutil.ignore_patterns("__pycache__", ".*cache"))
-    source = tmp_path / "application.f90"
-    source.write_text("""module measurement_application
-contains
-subroutine step(a,b,n)
-integer,intent(in)::n
-real(8),intent(in)::a(n)
-real(8),intent(out)::b(n)
-integer::i
-!$omp parallel do
-do i=1,n
-b(i)=2*a(i)
-enddo
-!$omp end parallel do
-end subroutine
-subroutine invoke(a,b,n)
-integer,intent(in)::n
-real(8),intent(in)::a(n)
-real(8),intent(out)::b(n)
-call step(a,b,n)
-end subroutine
-end module
-""")
-    stable = {"storage": "stable", "initialized": "whole", "escapes": False, "allocation_changes": False}
-    facts = {"schema_version": 1, "participation": "serial", "captures": {
-        "argument::a": stable, "argument::b": {**stable, "initialized": "none"}}}
-    records = []
-    for variant in ("native", "resident"):
-        metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / variant,
-            entry="measurement_application::step", capture_facts=facts,
-            gpu_options={"gpu_policy": "sections", "scope_execution": "reached", "scope_measurement": variant})
-        manifest = metadata["scope_manifest"]
-        record = manifest["scopes"][0]["owner_measurement"]
-        records.append(record)
-        assert metadata["measurement_only"] is True and metadata["scope_measurement"] == variant
-        assert metadata["command"][metadata["command"].index("--scope-measurement") + 1] == variant
-        assert record["calibration_evidence"] is record["placement_authority"] is False
-        target = tmp_path / (variant + "-copy.f90")
-        target.write_bytes(source.read_bytes())
-        composition = compose_scope_packages([metadata], {str(source): target})
-        assert composition["measurement_only"] is True
-        assert "FORT_SCOPE_MEASUREMENT" in target.read_text()
-        if variant == "native":
-            assert manifest["runtime"] is None
-            assert metadata["gpu_sources"] == metadata["extra_sources"] == []
-            assert "fort_scope_owner_" not in target.read_text()
-        else:
-            assert manifest["runtime"] is not None and metadata["gpu_sources"]
-    assert records[0]["identity"] == records[1]["identity"]
-
+def test_public_compiler_rejects_removed_measurement_options_before_source_edits(tmp_path):
     from elmm_pipeline.adaptation import adapt_project
+    from elmm_pipeline.local_adapter import LocalAdapterError, transform_scopes
 
     application = tmp_path / "application"
     application.mkdir()
-    (application / source.name).write_bytes(source.read_bytes())
-    with patch("elmm_pipeline.gpu_toolchain.compile_gpu_sources", side_effect=AssertionError("native has no CUDA")):
-        adapter = adapt_project("local", application, Path(sys.executable), tmp_path / "native-adaptation",
-            compiler_root=compiler, target="gpu", memory_model="scoped",
-            gpu_options={"gpu_policy": "sections", "scope_execution": "reached", "scope_measurement": "native"},
-            scope_options={"entry": "measurement_application::step", "source": source.name, "capture_facts": facts})
-    assert adapter["measurement_only"] and adapter["scope_measurement"] == "native"
-    assert adapter["native_success"] is True and adapter["optimized_regions"] == 0
-    assert adapter["gpu_sources"] == adapter["extra_sources"] == []
+    source = application / "original.f90"
+    source.write_text("module measurement_application\ncontains\nsubroutine step(a,b,n)\n"
+                      "integer,intent(in)::n\nreal(8),intent(in)::a(n)\nreal(8),intent(out)::b(n)\ninteger::i\n"
+                      "!$omp parallel do\ndo i=1,n\nb(i)=2*a(i)\nenddo\n!$omp end parallel do\n"
+                      "end subroutine\nend module\n")
+    original = source.read_bytes()
+    stable = {"storage": "stable", "initialized": "whole", "escapes": False, "allocation_changes": False}
+    facts = {"schema_version": 1, "participation": "serial", "captures": {
+        "argument::a": stable, "argument::b": {**stable, "initialized": "none"}}}
+    for variant in ("native", "resident"):
+        options = {"gpu_policy": "sections", "scope_execution": "reached", "scope_measurement": variant}
+        output = tmp_path / variant
+        with patch("elmm_pipeline.local_adapter._invoke", side_effect=AssertionError("removed producer cannot run")), \
+                pytest.raises(LocalAdapterError, match="Retired public source options: scope_measurement"):
+            transform_scopes(source, tmp_path, Path(sys.executable), output,
+                entry="measurement_application::step", capture_facts=facts, gpu_options=options)
+        assert source.read_bytes() == original
+        assert not (output / "scope-transformation.json").exists()
+        with patch("elmm_pipeline.gpu_toolchain.compile_gpu_sources", side_effect=AssertionError("removed producer cannot build")), \
+                pytest.raises(LocalAdapterError, match="Retired public source options: scope_measurement"):
+            adapt_project("local", application, Path(sys.executable), tmp_path / (variant + "-adaptation"),
+                compiler_root=Path(__file__).resolve().parents[2], target="gpu", memory_model="scoped",
+                gpu_options=options, scope_options={"entry": "measurement_application::step",
+                                                  "source": source.name, "capture_facts": facts})
+        assert source.read_bytes() == original

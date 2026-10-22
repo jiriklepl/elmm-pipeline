@@ -44,7 +44,15 @@ def test_independent_pipeline_exports_leaves_without_grouping_decisions(tmp_path
                               numerical_sources=Path(report["package"]))
     manifest=metadata["scope_manifest"]
     assert manifest["scope_count"]==1,manifest["boundaries"]
-    assert manifest["scopes"][0]["gpu_leaves"]==["subject::finish","subject::prepare"]
+    plan = manifest["scopes"][0]["checked_execution_plan"]
+    selected = [region for child in manifest["child_numerical_regions"] for region in child["regions"]
+                if region["used"]]
+    assert selected
+    assert sorted(region["shared_computation"] for region in selected) == plan["gpu_leaves"]
+    assert manifest["scopes"][0]["gpu_leaves"] == plan["gpu_leaves"]
+    assert {item["procedure"] for item in manifest["numerical_sources"]} == {"subject::prepare", "subject::finish"}
+    replacement = Path(metadata["artifact_root"])/manifest["sources"][str(source)]["replacement"]
+    assert replacement.read_text().count("x(i)=y(i-1)+3") == 1
     assert "--numerical-sources" in metadata["command"]
     assert len(manifest["numerical_sources"])==2
     assert source.read_text()==SOURCE
@@ -81,7 +89,7 @@ def test_configured_source_package_keeps_original_includes_and_cpp_branch(tmp_pa
     destination.write_bytes(source.read_bytes())
     apply_scope_sources(metadata,{str(source):destination})
     assert '#include "precision.inc"' in destination.read_text()
-    assert "call fort_scope_owner_" in destination.read_text()
+    assert manifest["scopes"][0]["owner"] in destination.read_text()
     destination.write_bytes(source.read_bytes())
     include.write_text(include.read_text().replace("wp=8","wp=4"))
     before=destination.read_bytes()
@@ -125,7 +133,7 @@ end module
     manifest=metadata["scope_manifest"]
     assert manifest["scope_count"]==1,manifest["boundaries"]
     generated=Path(metadata["artifact_root"])/manifest["sources"][str(source)]["replacement"]
-    assert "lbound(a, 1)" in generated.read_text()
+    assert "lbound(a,1)" in "".join(generated.read_text().lower().split())
     # Verify extraction itself against the original Fortran for an empty A
     # and a nonempty B; hard-coded declared lower bounds would miss this branch.
     item=next(item for item in json.loads(Path(report["package"]).read_text())["entries"]

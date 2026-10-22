@@ -17,7 +17,9 @@ from elmm_pipeline.build_receipts import (
     snapshot_inputs,
     summarize_build,
 )
-from elmm_pipeline.local_adapter import apply_scope_sources, transform_scopes
+from elmm_pipeline.local_adapter import LocalAdapterError, apply_scope_sources, transform_scopes
+
+pytestmark = pytest.mark.cuda
 
 SOURCE = """module orbit_fields
 implicit none
@@ -100,7 +102,7 @@ def executed_origins(tmp_path_factory):
         if mode == "resident":
             metadata = transform_scopes(source, compiler, Path(sys.executable), build_root,
                 entry="orbit_fields::advance", capture_facts=facts,
-                gpu_options={"gpu_policy": "sections", "scope_execution": "reached"})
+                gpu_options={"gpu_policy": "sections", "scope_execution": "graph"})
             assert metadata["scope_manifest"]["scope_count"] == 1
             apply_scope_sources(metadata, {str(source): copied[str(source)]})
             generated = [(build_root / item["path"], item["language"])
@@ -161,7 +163,7 @@ def executed_origins(tmp_path_factory):
     return request
 
 
-def test_real_executed_origins_issue_capture_contracts_through_public_compiler(tmp_path, executed_origins):
+def test_real_executed_origins_keep_retired_capture_requests_out_of_public_compiler(tmp_path, executed_origins):
     assembled = requests.assemble(executed_origins, tmp_path / "request")
     assert assembled["placement_authority"] is False
     contracts = []
@@ -169,14 +171,21 @@ def test_real_executed_origins_issue_capture_contracts_through_public_compiler(t
         kwargs = requests.generation_inputs(assembled["session"], mode)
         assert kwargs["gpu_options"]["gpu_policy"] == "auto"
         assert kwargs["source_path"] == executed_origins["analysis"]["source"]["path"]
-        metadata = transform_scopes(output_dir=tmp_path / mode, **kwargs)
-        assert metadata["scope_manifest"]["scope_count"] == 1
-        assert "application_build" in metadata
-        scope, = metadata["scope_manifest"]["scopes"]
-        exact = scope["exact_window"]
-        assert exact["capture_variant"] == mode
-        assert exact["contract"]["protocol"] == "checked-interval-process-v4"
-        contracts.append(exact["contract"])
+        source = Path(kwargs["source_path"])
+        before = source.read_bytes()
+        output = tmp_path / mode
+        with pytest.raises(LocalAdapterError, match="Retired public source options: scope_cost"):
+            transform_scopes(output_dir=output, **kwargs)
+        assert source.read_bytes() == before
+        assert not (output / "scope-transformation.json").exists()
+        # Retained historical request transport remains authenticated, but no
+        # longer names a producer supported by the public graph compiler.
+        reference = assembled["scope_costs"][mode]
+        assert kwargs["gpu_options"]["scope_cost"] == reference["path"]
+        request = requests._read(reference)
+        assert request["calibration"] == mode
+        assert request["coverage"] == "checked_interval"
+        contracts.append({key: value for key, value in request.items() if key != "calibration"})
     assert contracts[0] == contracts[1]
 
 

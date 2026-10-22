@@ -124,11 +124,23 @@ def scoped_modeled_evidence(log):
     Resource sections, copies, exports and gates describe the modeled final
     schedule. Their records are distinct from observed CUDA execution events.
     The end record's completeness/truncation fields remain visible to readers.
-    Versioned transfer_statistics records describe completed execution at close;
-    preserving them does not itself verify a kernel launch.
+    Versioned runtime statistics preserve both complete close records and
+    incomplete abandonment records; preserving them never verifies a launch.
     """
+    statistics = {
+        "completion_statistics": (
+            ("event_records", "event_queries", "event_waits", "stream_waits", "created_events",
+             "reused_events", "independent_host_tasks"), ()),
+        "command_queue_statistics": (
+            ("accepted_tasks", "submissions", "conflict_flushes", "explicit_flushes", "pending_tasks",
+             "peak_pending_tasks", "copied_argument_bytes", "direct_submissions", "direct_kernels",
+             "graph_resource_fallbacks"), ("queue_enabled", "graphs_enabled")),
+        "graph_statistics": (
+            ("creations", "instantiations", "rebuilds", "submissions", "replays", "parameter_updates",
+             "logical_kernels", "live_graphs", "destructions"), ()),
+    }
     events = {"decision", "snapshot", "operation", "requirement", "copy", "export", "gate", "end",
-              "definition_validation", "transfer_statistics", "batch_statistics"}
+              "definition_validation", "transfer_statistics", "batch_statistics"} | statistics.keys()
 
     def object_fields(pairs):
         result = {}
@@ -172,6 +184,17 @@ def scoped_modeled_evidence(log):
                 or record.get("evidence") != "ordered_definition_preflight"
                 or record.get("mutates_live_state") is not False):
             raise ValueError("Scoped definition validation requires status, reason and a nonmutating proof")
+        if event in statistics:
+            counts, flags = statistics[event]
+            fields = {"schema_version", "context", "event", "stats_version", "complete", *counts, *flags}
+            if (record.keys() != fields
+                    or type(record.get("stats_version")) is not int or record["stats_version"] != 1
+                    or type(record.get("complete")) is not bool
+                    or any(type(record.get(field)) is not int or not 0 <= record[field] < 2**64
+                           for field in counts)
+                    or any(type(record.get(field)) is not int or record[field] not in (0, 1)
+                           for field in flags)):
+                raise ValueError("Scoped runtime statistics require exact versioned public counters and flags")
         if event == "transfer_statistics":
             counts = ("fallbacks", "pinned_uploads", "pinned_downloads", "pinned_upload_bytes", "pinned_download_bytes",
                       "packed_bytes", "unpacked_bytes", "tiles", "events", "event_waits", "staging_allocations",

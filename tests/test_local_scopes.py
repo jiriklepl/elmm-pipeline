@@ -122,7 +122,7 @@ print(json.dumps([str(p) for p in apply_scope_sources(metadata,mappings)]))
     result=checked([sys.executable,"-c",script,str(output/"scope-transformation.json"),str(mappings)],
                    cwd=directory,env={**os.environ,"PYTHONPATH":str(pipeline)})
     assert json.loads(result.stdout)==[str(destination)]
-    assert "fort_scope_owner_" in destination.read_text()
+    assert metadata["scope_manifest"]["scopes"][0]["owner"] in destination.read_text()
     assert source.read_text()==PROGRAM
 
 
@@ -142,7 +142,8 @@ def test_independent_compiler_packages_compose_without_ir_or_source_merging(inde
                 for index, (name, source) in enumerate(zip(("first", "second"), originals))]
     bundle = compose_scope_packages(packages, destinations)
     assert len(bundle["patched_sources"]) == 2
-    assert all("fort_scope_owner_" in path.read_text() for path in destinations.values())
+    assert all(package["scope_manifest"]["scopes"][0]["owner"] in destinations[str(source)].read_text()
+               for package, source in zip(packages, originals))
     common = [item for item in bundle["build_artifacts"] if item["role"] == "common_runtime"]
     assert len(common) == 3 and all(item["packages"] == [0, 1] for item in common)
     assert len(bundle["gpu_sources"]) == 5
@@ -152,16 +153,19 @@ def test_independent_compiler_packages_compose_without_ir_or_source_merging(inde
 def test_automatic_missing_profile_composes_authenticated_native_package(independent, tmp_path, execution):
     _, _, compiler, source, _, _ = independent
     output = tmp_path / "native-artifacts"
+    with pytest.raises(LocalAdapterError, match="Public source scopes require graph execution"):
+        transform_scopes(source, compiler, Path(sys.executable), output, entry="step", capture_facts=FACTS,
+                         gpu_options={"gpu_policy": "auto", "scope_execution": execution})
+    assert not output.exists()
     metadata = transform_scopes(source, compiler, Path(sys.executable), output, entry="step",
-                                capture_facts=FACTS,
-                                gpu_options={"gpu_policy": "auto", "scope_execution": execution})
+                                capture_facts=FACTS, gpu_options={"gpu_policy": "auto", "scope_execution": "graph"})
     manifest = metadata["scope_manifest"]
     assert metadata["compiler_report"]["supported"] is True
     assert metadata["compiler_report"]["outputs"] == ["scope-manifest.json"]
     assert metadata["changed"] is False
     assert metadata["gpu_sources"] == metadata["extra_sources"] == []
     assert manifest["schema_version"] == 1
-    assert manifest["scope_execution"] == execution
+    assert manifest["scope_execution"] == "graph"
     assert manifest["scope_count"] == 0
     assert manifest["scopes"] == manifest["source_edits"] == manifest["build_sources"] == []
     assert manifest["sources"] == manifest["artifacts_sha256"] == {}
@@ -204,12 +208,16 @@ def test_independent_adapter_transports_transfer_choice_and_compiler_reason(inde
 
 def test_independent_adapter_transports_reached_execution_without_choosing_segments(independent,tmp_path):
     _, _, compiler, source, _, _ = independent
+    with pytest.raises(LocalAdapterError, match="Public source scopes require graph execution"):
+        transform_scopes(source,compiler,Path(sys.executable),tmp_path/'retired-reached',entry='step',
+                         capture_facts=FACTS,gpu_options={'scope_execution':'reached'})
+    assert not (tmp_path/'retired-reached').exists()
     metadata = transform_scopes(source,compiler,Path(sys.executable),tmp_path/'reached',entry='step',
-                                capture_facts=FACTS,gpu_options={'scope_execution':'reached'})
+                                capture_facts=FACTS,gpu_options={'scope_execution':'graph'})
     argv = metadata['command']
-    assert argv[argv.index('--scope-execution')+1] == 'reached'
+    assert argv[argv.index('--scope-execution')+1] == 'graph'
     manifest = metadata['scope_manifest']
-    assert manifest['scope_execution'] == 'reached'
+    assert manifest['scope_execution'] == 'graph'
     assert manifest['scope_count'] == 1
     assert manifest['scopes'][0]['native_continuation'].startswith('original lexical scope')
     plan = manifest['scopes'][0]['checked_execution_plan']
@@ -217,7 +225,14 @@ def test_independent_adapter_transports_reached_execution_without_choosing_segme
     assert len(plan['execution_identity']) == 64
     assert plan['entry'] == manifest['entry'] == 'source_application::step'
     assert plan['sources'] == manifest['source_inputs']
-    assert plan['procedures'][0]['units'][0]['operations'] == manifest['scopes'][0]['planning_segments'][0]['operations']
+    owner = manifest['scopes'][0]
+    public_members = {plan['entry']: owner, **{item['procedure']: item for item in
+                      [*owner['module_coordinators'], *owner['internal_coordinators']]}}
+    assert set(public_members) == {item['procedure'] for item in plan['procedures']}
+    assert any(item['units'] for item in plan['procedures'])
+    for member in plan['procedures']:
+        assert [unit['operations'] for unit in member['units']] == [
+            unit['operations'] for unit in public_members[member['procedure']]['planning_segments']]
     assert metadata['compiler_report']['scopes'] == manifest
 
 
@@ -226,6 +241,19 @@ def test_independent_adapter_reuses_summary_cache_and_invalidates_changed_source
     source = tmp_path / "cached_application.f90"
     source.write_text(PROGRAM)
     cache = tmp_path / "new summary cache"
+
+    def native_effects():
+        # Graph admission deliberately avoids materializing a transitive
+        # closure. Exercise disk reuse through the existing public complete
+        # effects query, then keep graph transport and artifact checks below.
+        response = checked([sys.executable, "-m", "compiler", "--analyze-effects", "--kernel", "step",
+                            "--input", str(source), "--summary-cache", str(cache), "--json"],
+                           cwd=compiler, env={**os.environ, "PYTHONPATH": str(compiler)})
+        return json.loads(response.stdout)["effects"]
+
+    cold_effects, warm_effects = native_effects(), native_effects()
+    assert cold_effects["summary_cache"]["disk_writes"] > 0
+    assert warm_effects["summary_cache"]["disk_hits"] > 0
     packages = [transform_scopes(source, compiler, Path(sys.executable), tmp_path / f"generated_{index}",
                                  entry="step", capture_facts=FACTS, summary_cache=cache)
                 for index in range(2)]
@@ -234,9 +262,10 @@ def test_independent_adapter_reuses_summary_cache_and_invalidates_changed_source
         command = package["command"]
         assert command[command.index("--summary-cache") + 1] == str(cache.resolve())
         assert package["compiler_report"]["scopes"] == package["scope_manifest"]
+        assert package["scope_manifest"]["native_effects"]["summary_cache"]["disk_writes"] == 0
     assert cold["scope_count"] == warm["scope_count"] == 1
     assert cold["scopes"][0]["gpu_leaves"] == warm["scopes"][0]["gpu_leaves"]
-    assert warm["native_effects"]["summary_cache"]["disk_hits"] > 0
+    assert warm["native_effects"]["closure_materialization"] == "not_requested"
     kernels = [{unit["path"]: manifest["artifacts_sha256"][unit["path"]]
                 for unit in manifest["build_sources"] if unit["language"] == "cuda"}
                for manifest in (cold, warm)]
@@ -245,6 +274,8 @@ def test_independent_adapter_reuses_summary_cache_and_invalidates_changed_source
     assert records
     changed = PROGRAM.replace("b(i)=2*a(i)", "b(i)=5*a(i)")
     source.write_text(changed)
+    changed_effects = native_effects()
+    assert changed_effects["summary_cache"]["disk_writes"] > 0
     refreshed = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "changed",
                                  entry="step", capture_facts=FACTS, summary_cache=cache)["scope_manifest"]
     assert refreshed["scope_count"] == 1
@@ -264,7 +295,7 @@ def test_independent_adapter_accepts_original_descriptor_guards(independent, tmp
              "argument::a": {**FACTS["captures"]["argument::a"], "expected_descriptor": expected}}}
     metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "guarded",
                                 entry="step", capture_facts=facts,
-                                gpu_options={"scope_execution": "reached"})
+                                gpu_options={"scope_execution": "graph"})
     manifest = metadata["scope_manifest"]
     assert manifest["scope_count"] == 1
     assert manifest["capture_descriptor_expectations"]["schema_version"] == 1

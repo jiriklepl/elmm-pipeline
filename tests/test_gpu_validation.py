@@ -289,6 +289,87 @@ class GPUValidationTests(unittest.TestCase):
                 scoped_modeled_evidence("FORT_SCOPED evidence " + json.dumps({**record, **change}) + "\n")
 
 
+    def test_current_runtime_statistics_preserve_complete_and_abandoned_records(self):
+        statistics = {
+            "completion_statistics": ("event_records", "event_queries", "event_waits", "stream_waits",
+                                      "created_events", "reused_events", "independent_host_tasks"),
+            "command_queue_statistics": ("accepted_tasks", "submissions", "conflict_flushes", "explicit_flushes",
+                                         "pending_tasks", "peak_pending_tasks", "copied_argument_bytes",
+                                         "direct_submissions", "direct_kernels", "graph_resource_fallbacks"),
+            "graph_statistics": ("creations", "instantiations", "rebuilds", "submissions", "replays",
+                                 "parameter_updates", "logical_kernels", "live_graphs", "destructions"),
+        }
+        records = []
+        for context, (event, counters) in enumerate(statistics.items(), start=5):
+            for complete in (True, False):
+                record = {"schema_version": 1, "context": context, "event": event, "stats_version": 1,
+                          "complete": complete, **dict.fromkeys(counters, 0)}
+                record[counters[0]] = 2**64 - 1
+                if event == "command_queue_statistics":
+                    record.update(queue_enabled=int(complete), graphs_enabled=int(not complete),
+                                  pending_tasks=int(not complete), peak_pending_tasks=1)
+                records.append(record)
+        log = "".join("FORT_SCOPED evidence " + json.dumps(record) + "\n" for record in records)
+        activity = gpu_activity(log, "local", [])
+        self.assertEqual(activity["scoped_runtime"]["modeled_evidence"], records)
+        self.assertFalse(activity["verified"])
+        self.assertEqual(activity["kernel_launches"], 0)
+        self.assertEqual(activity["allocations"], 0)
+        self.assertEqual((activity["upload_bytes"], activity["download_bytes"]), (0, 0))
+
+    def test_current_runtime_statistics_reject_missing_unknown_or_wrong_typed_fields(self):
+        statistics = {
+            "completion_statistics": ("event_records", "event_queries", "event_waits", "stream_waits",
+                                      "created_events", "reused_events", "independent_host_tasks"),
+            "command_queue_statistics": ("accepted_tasks", "submissions", "conflict_flushes", "explicit_flushes",
+                                         "pending_tasks", "peak_pending_tasks", "copied_argument_bytes",
+                                         "direct_submissions", "direct_kernels", "graph_resource_fallbacks"),
+            "graph_statistics": ("creations", "instantiations", "rebuilds", "submissions", "replays",
+                                 "parameter_updates", "logical_kernels", "live_graphs", "destructions"),
+        }
+        for event, counters in statistics.items():
+            valid = {"schema_version": 1, "context": 5, "event": event, "stats_version": 1,
+                     "complete": True, **dict.fromkeys(counters, 0)}
+            flags = ("queue_enabled", "graphs_enabled") if event == "command_queue_statistics" else ()
+            valid.update(dict.fromkeys(flags, 1))
+            changes = [{"stats_version": value} for value in (True, 0, 2, "1")]
+            changes += [{"complete": value} for value in (0, 1, "true", None)]
+            changes += [{"context": value} for value in (True, -1, 2**64, "5")]
+            changes += [{"schema_version": value} for value in (True, 0, 2)]
+            changes += [{field: value} for field in counters for value in (True, -1, 2**64, 0.0)]
+            changes += [{field: value} for field in flags for value in (True, -1, 2, 0.0)]
+            changes.append({"unknown_counter": 0})
+            for change in changes:
+                with self.subTest(event=event, change=change), self.assertRaises(ValueError):
+                    scoped_modeled_evidence("FORT_SCOPED evidence " + json.dumps({**valid, **change}) + "\n")
+            for field in valid:
+                missing = {key: value for key, value in valid.items() if key != field}
+                with self.subTest(event=event, missing=field), self.assertRaises(ValueError):
+                    scoped_modeled_evidence("FORT_SCOPED evidence " + json.dumps(missing) + "\n")
+            encoded = json.dumps(valid)
+            duplicate = encoded[:-1] + ', "complete": false}'
+            nonfinite = encoded.replace('"' + counters[0] + '": 0', '"' + counters[0] + '": NaN')
+            for malformed in (duplicate, nonfinite):
+                with self.subTest(event=event, malformed=malformed), self.assertRaises(ValueError):
+                    scoped_modeled_evidence("FORT_SCOPED evidence " + malformed + "\n")
+
+    def test_runtime_statistics_do_not_double_count_actual_launches_and_transfers(self):
+        record = {"schema_version": 1, "context": 1, "event": "command_queue_statistics", "stats_version": 1,
+                  "complete": True, "queue_enabled": 1, "graphs_enabled": 1, "accepted_tasks": 1,
+                  "submissions": 1, "conflict_flushes": 0, "explicit_flushes": 1, "pending_tasks": 0,
+                  "peak_pending_tasks": 1, "copied_argument_bytes": 68, "direct_submissions": 1,
+                  "direct_kernels": 1, "graph_resource_fallbacks": 0}
+        log = ("FORT_SCOPED evidence " + json.dumps(record) + "\n"
+               "FORT_SCOPED upload buffer=4 generation=1 bytes=64\n"
+               "FORT_SCOPED download buffer=4 generation=1 bytes=32\n"
+               "FORT_SCOPED launch bytes=0\n")
+        activity = gpu_activity(log, "local", [])
+        self.assertEqual(activity["scoped_runtime"]["modeled_evidence"], [record])
+        self.assertTrue(activity["verified"])
+        self.assertEqual(activity["kernel_launches"], 1)
+        self.assertEqual((activity["upload_bytes"], activity["download_bytes"]), (64, 32))
+
+
 def scope_package(entry, *, available=False):
     return {"scope_manifest": {
         "schema_version": 1, "scope_count": 1, "automatic_estimate_available": available,

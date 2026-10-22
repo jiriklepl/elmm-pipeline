@@ -12,7 +12,7 @@ import pytest
 
 from elmm_pipeline.application_build import selection_builds, verify
 from elmm_pipeline.build import build
-from elmm_pipeline.local_adapter import LocalAdapterError, transform_scopes
+from elmm_pipeline.local_adapter import LocalAdapterError
 
 
 def test_public_verifier_transport_preserves_paths_and_blocks_failure(tmp_path):
@@ -107,6 +107,9 @@ def test_static_automatic_native_diagnostic_requires_no_selector_build():
 
 
 def test_scope_cost_transport_is_hashed_and_not_reinterpreted(tmp_path):
+    # Historical evidence remains an explicit private fixture protocol.
+    from elmm_pipeline._legacy_scopes import transform_scopes
+
     source = tmp_path / "source.f90"
     source.write_text("subroutine step\nend\n")
     cost = tmp_path / "cost.json"

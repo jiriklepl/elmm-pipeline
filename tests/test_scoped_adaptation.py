@@ -1,4 +1,4 @@
-"""Opt-in normal adaptation and build cache use independent public interfaces."""
+"""Graph source adaptation and build cache use independent public interfaces."""
 from __future__ import annotations
 
 import hashlib
@@ -12,11 +12,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from test_local_scopes import FACTS, PROGRAM
-
 from elmm_pipeline.adaptation import adapt_project
 from elmm_pipeline.cli import prepare_build, scoped_configuration
 from elmm_pipeline.gpu_validation import gpu_activity, native_policy_exercised
+from test_local_scopes import FACTS, PROGRAM
 
 
 @pytest.fixture(scope="module")
@@ -60,6 +59,7 @@ print(json.dumps(result))
     assert result.returncode == 0, result.stdout + result.stderr
     adapter = json.loads(result.stdout)
     manifest = adapter["scope_manifest"]
+    assert manifest["scope_execution"] == "graph"
     assert manifest["scope_count"] == (1 if policy == "sections" else 0)
     expected = [str(output / "compiler" / item["path"])
                 for item in adapter["scope_manifest"]["build_sources"]
@@ -69,6 +69,8 @@ print(json.dumps(result))
     assert adapter["coverage_enabled"] is False
     assert adapter["scope_extraction"]["numerical_extraction"]["entries"] == 2
     assert "--form-scopes" in adapter["scope_transformation"]["command"]
+    command = adapter["scope_transformation"]["command"]
+    assert command[command.index("--scope-execution") + 1] == "graph"
     activity = gpu_activity("", "local", adapter["regions"], scope_manifest=adapter["scope_manifest"])
     assert native_policy_exercised(activity, adapter["regions"]) is (policy == "auto")
     assert activity["verified"] is False
@@ -86,7 +88,7 @@ print(json.dumps(result))
         assert manifest["runtime"]["link_once"] is True
         assert len(adapter["gpu_sources"]) == 3
         assert adapter["changed_files"] == ["application.f90"]
-        assert "fort_scope_owner_" in source.read_text()
+        assert manifest["scopes"][0]["owner"] in source.read_text()
 
 
 def test_no_approved_scope_is_a_successful_native_application(independent_scoped_pipeline, tmp_path):
@@ -151,12 +153,17 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
     def adapt(_tool, project_root, _python, _output, **kwargs):
         assert kwargs["memory_model"] == "scoped"
         assert kwargs["gpu_options"]["scope_transfers"] == getattr(args, "scope_transfers", "direct")
-        assert kwargs["gpu_options"]["scope_execution"] == getattr(args, "scope_execution", "bounded")
-        assert kwargs["gpu_options"]["scope_measurement"] == getattr(args, "scope_measurement", None)
+        assert kwargs["gpu_options"]["scope_execution"] == "graph"
+        assert not {"scope_measurement", "scope_cost"} & kwargs["gpu_options"].keys()
         copied = kwargs["scope_options"]["capture_facts"]
         assert copied != facts
         body = json.loads(copied.read_text())
         assert body["sources"] == {str(project_root / "application.f90"): hashlib.sha256(source.read_bytes()).hexdigest()}
+        assert body["captures"] == FACTS["captures"]
+        if args.calibration_profile:
+            profile = Path(kwargs["gpu_options"]["calibration_profile"])
+            assert profile != args.calibration_profile
+            assert profile.read_bytes() == args.calibration_profile.read_bytes()
         seen.append(copied)
         return {"tool": "local", "regions": [], "native_success": True, "changed_files": []}
 
@@ -175,46 +182,51 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         second, _ = prepare_build("local", args, setup, {})
         worker = tmp_path / "elmm_pipeline/tool_workers/scope_worker.py"
         worker.write_text(worker.read_text() + "\n# changed capture export\n")
-        third, _ = prepare_build("local", args, setup, {})
+        third, worker_metadata = prepare_build("local", args, setup, {})
         args.scope_transfers = "pinned"
         fourth, _ = prepare_build("local", args, setup, {})
-        args.scope_execution = "reached"
-        fifth, reached_metadata = prepare_build("local", args, setup, {})
-        reached_cached, _ = prepare_build("local", args, setup, {})
-        assert reached_cached == fifth
+        args.scope_execution = "graph"
+        explicit_graph, _ = prepare_build("local", args, setup, {})
+        assert explicit_graph == fourth and len(seen) == 4
         args.gpu_policy = "sections"
-        args.scope_measurement = "native"
-        sixth, native_measurement = prepare_build("local", args, setup, {})
-        args.scope_measurement = "resident"
-        seventh, resident_measurement = prepare_build("local", args, setup, {})
+        fifth, sections_metadata = prepare_build("local", args, setup, {})
+        profile = tmp_path / "hardware.json"
+        profile.write_text('{"schema_version": 1}\n')
+        args.calibration_profile = profile
+        sixth, profile_metadata = prepare_build("local", args, setup, {})
+        profile_cached, _ = prepare_build("local", args, setup, {})
+        assert profile_cached == sixth and len(seen) == 6
+        profile.write_text(profile.read_text() + "\n")
+        seventh, changed_profile_metadata = prepare_build("local", args, setup, {})
     assert len(seen) == 7
     assert len({first.parent, second.parent, third.parent, fourth.parent, fifth.parent, sixth.parent, seventh.parent}) == 7
-    assert metadata["identity"]["scope"]["execution"] == "bounded"
-    assert reached_metadata["identity"]["scope"]["execution"] == "reached"
+    assert metadata["identity"]["scope"]["execution"] == "graph"
+    assert not {"measurement", "cost_sha256"} & metadata["identity"]["scope"].keys()
     assert metadata["identity"]["memory_model"] == "scoped"
     assert "scope_extraction.py" in metadata["identity"]["implementation"]
-    assert native_measurement["identity"]["scope"]["measurement"] == "native"
-    assert resident_measurement["identity"]["scope"]["measurement"] == "resident"
-    assert "owner_measurement.py" in resident_measurement["identity"]["implementation"]
+    assert metadata["identity"]["workers"] != worker_metadata["identity"]["workers"]
+    assert sections_metadata["identity"]["gpu_policy"] == "sections"
+    assert profile_metadata["identity"]["calibration_profile"] != changed_profile_metadata["identity"]["calibration_profile"]
+    assert changed_profile_metadata["identity"]["calibration_profile"] == {
+        "sha256": hashlib.sha256(profile.read_bytes()).hexdigest()}
 
 
-@pytest.mark.parametrize("variant", ["native", "resident"])
-def test_measurement_configuration_requires_sections_reached(tmp_path, variant):
+@pytest.mark.parametrize(("name", "value"), [
+    ("scope_execution", "bounded"), ("scope_execution", "reached"),
+    ("scope_measurement", "native"), ("scope_measurement", "resident"),
+    ("scope_cost", "absent-cost.json"),
+])
+def test_retired_scope_configuration_is_rejected_before_build(tmp_path, name, value):
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps(FACTS))
     args = SimpleNamespace(memory_model="scoped", scope_entry="step", scope_source="application.f90",
                            scope_facts=facts, target="gpu", tools=["baseline", "local"], gpu_policy="sections",
-                           scope_execution="reached", scope_measurement=variant)
-    assert scoped_configuration(args)["measurement"] == variant
-    args.gpu_policy = "auto"
-    with pytest.raises(ValueError, match="measurement requires"):
+                           scope_execution="graph")
+    setattr(args, name, value)
+    with pytest.raises(ValueError, match="Retired public|require graph"):
         scoped_configuration(args)
-    args.gpu_policy, args.scope_execution = "sections", "bounded"
-    with pytest.raises(ValueError, match="measurement requires"):
-        scoped_configuration(args)
-    args.scope_measurement = "unsupported"
-    with pytest.raises(ValueError, match="Unknown scope measurement"):
-        scoped_configuration(args)
+    assert json.loads(facts.read_text()) == FACTS
+    assert list(tmp_path.iterdir()) == [facts]
 
 
 @pytest.mark.parametrize("transfers", ["pinned", "coalesced"])
@@ -229,8 +241,9 @@ def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_
     assert scoped_configuration(args)["capture_facts"] == facts
     args.scope_transfers = transfers
     assert scoped_configuration(args)["transfers"] == transfers
-    args.scope_execution = "reached"
-    assert scoped_configuration(args)["execution"] == "reached"
+    assert scoped_configuration(args)["execution"] == "graph"
+    args.scope_execution = "graph"
+    assert scoped_configuration(args)["execution"] == "graph"
     args.memory_model = "call"
     args.scope_entry = args.scope_source = args.scope_facts = None
     with pytest.raises(ValueError, match="require --memory-model"):
@@ -372,10 +385,48 @@ result={'binary':str(binary),'adapter':adapter,
     if policy == "sections":
         assert activity["verified"]
         assert activity["kernel_launches"] == 4
-        # A transfers once per scope. B downloads for the native helper and
-        # uploads its update; C downloads at the host-visible scope boundary.
-        assert activity["upload_bytes"] == activity["download_bytes"] == 2 * (32 + 64) * 8
-        assert activity["scoped_runtime"]["events"]["upload"] == 4
+        scope, = adapter["scope_manifest"]["scopes"]
+        native, = [item for item in scope["module_coordinators"]
+                   if item["procedure"] == "source_application::native_scale"]
+        boundary, = native["boundaries"]
+        assert boundary["reason"] == "numerical effect requires typed authority for every original runtime guard"
+        assert boundary["execution"] == "publish and close when reached; original continuation once"
+        assert boundary["reopen"] is True
+        assert boundary["first_line"] == boundary["last_line"] == PROGRAM.splitlines().index("b=3*b") + 1
+        identities = {item["resource"]: item["registration_identity"]
+                      for item in scope["resource_bindings"]["resources"]}
+        a_id, b_id, c_id = (identities["argument::" + name] for name in ("a", "b", "c"))
+        ledger, context_sequence = {}, []
+        for line in (run.stdout + run.stderr).splitlines():
+            tokens = line.split()
+            if tokens[:1] != ["FORT_SCOPED"] or len(tokens) < 3:
+                continue
+            operation = tokens[1]
+            if operation not in {"create", "upload", "download", "launch", "close"}:
+                continue
+            fields = dict(token.split("=", 1) for token in tokens[2:])
+            assert fields["provenance_version"] == "1"
+            context = int(fields["context"])
+            context_sequence.append(context)
+            ledger.setdefault(context, []).append((operation, int(fields["buffer"]) if "buffer" in fields else None,
+                                                    int(fields["bytes"])))
+        expected = []
+        for n in (32, 64):
+            size = n * 8
+            # The native boundary publishes B and retires the producer epoch.
+            # Reopening for consume uploads A again; no cross-cut residency is claimed.
+            expected.extend([
+                [("create", None, 0), ("upload", a_id, size), ("launch", None, 0),
+                 ("download", b_id, size), ("close", None, 0)],
+                [("create", None, 0), ("upload", a_id, size), ("upload", b_id, size),
+                 ("launch", None, 0), ("download", c_id, size), ("close", None, 0)],
+            ])
+        assert list(ledger.values()) == expected
+        assert context_sequence == [context for context, events in ledger.items() for _ in events]
+        assert activity["upload_bytes"] == 3 * (32 + 64) * 8
+        assert activity["download_bytes"] == 2 * (32 + 64) * 8
+        assert activity["scoped_runtime"]["events"]["upload"] == 6
+        assert activity["scoped_runtime"]["events"]["create"] == activity["scoped_runtime"]["events"]["close"] == 4
         assert activity["scoped_runtime"]["events"]["download"] == 4
     else:
         assert native_policy_exercised(activity, adapter["regions"])

@@ -58,21 +58,19 @@ def scoped_configuration(args):
     """Validate explicit scope configuration without inferring capture facts."""
     model = getattr(args, "memory_model", "call")
     transfers = getattr(args, "scope_transfers", "direct")
-    execution = getattr(args, "scope_execution", "bounded")
-    measurement = getattr(args, "scope_measurement", None)
-    cost = getattr(args, "scope_cost", None)
+    execution = getattr(args, "scope_execution", None)
+    if getattr(args, "scope_measurement", None) is not None or getattr(args, "scope_cost", None) is not None:
+        raise ValueError("Retired public scope measurement/cost options")
     if transfers not in {"direct", "pinned", "pipelined", "auto", "coalesced"}:
         raise ValueError("Unknown scope transfer mode")
-    if execution not in {"bounded", "reached"}:
-        raise ValueError("Unknown scope execution mode")
-    if measurement not in (None, "native", "resident"):
-        raise ValueError("Unknown scope measurement variant")
+    if execution not in {None, "graph"}:
+        raise ValueError("Public source scopes require graph execution")
     values = {"entry": getattr(args, "scope_entry", None), "source": getattr(args, "scope_source", None),
               "source_files": getattr(args, "scope_source_file", None) or [],
               "capture_facts": getattr(args, "scope_facts", None),
               "effect_contracts": getattr(args, "scope_effect_contracts", None)}
     if model == "call":
-        if transfers != "direct" or execution != "bounded" or measurement is not None or cost is not None or any(values[key] for key in values):
+        if transfers != "direct" or execution is not None or any(values[key] for key in values):
             raise ValueError("--scope-* options require --memory-model scoped")
         return None
     if model != "scoped":
@@ -81,17 +79,13 @@ def scoped_configuration(args):
         raise ValueError("Scoped memory requires --target gpu and --tools local")
     if args.gpu_policy not in {"sections", "auto"}:
         raise ValueError("Scoped memory requires --gpu-policy sections or auto")
-    if measurement is not None and (args.gpu_policy != "sections" or execution != "reached"):
-        raise ValueError("Scope measurement requires --gpu-policy sections and --scope-execution reached")
     if not values["entry"] or not values["source"] or not values["capture_facts"]:
         raise ValueError("Scoped memory requires --scope-entry, --scope-source and --scope-facts")
     for key in ("capture_facts", "effect_contracts"):
         if values[key]:
             values[key] = Path(values[key]).resolve(strict=True)
     values["transfers"] = transfers
-    values["execution"] = execution
-    values["measurement"] = measurement
-    values["cost"] = Path(cost).resolve(strict=True) if cost is not None else None
+    values["execution"] = "graph"
     return values
 
 
@@ -120,9 +114,6 @@ def prepare_build(tool, args, setup_state, compilers):
                              "source_files": scope_options["source_files"],
                              "transfers": scope_options["transfers"],
                              "execution": scope_options["execution"],
-                             "measurement": scope_options["measurement"],
-                             "cost_sha256": (hashlib.sha256(scope_options["cost"].read_bytes()).hexdigest()
-                                             if scope_options["cost"] else None),
                              "capture_facts_sha256": hashlib.sha256(scope_options["capture_facts"].read_bytes()).hexdigest(),
                              "effect_contracts_sha256": (hashlib.sha256(scope_options["effect_contracts"].read_bytes()).hexdigest()
                                                           if scope_options["effect_contracts"] else None)}
@@ -159,8 +150,7 @@ def prepare_build(tool, args, setup_state, compilers):
     if stamp.is_file():
         data = json.loads(stamp.read_text())
         binary = directory / "bin" / "ELMM"
-        if (binary.is_file() and hashlib.sha256(binary.read_bytes()).hexdigest() == data["binary_sha256"]
-                and not (scope_options and scope_options["cost"])):
+        if binary.is_file() and hashlib.sha256(binary.read_bytes()).hexdigest() == data["binary_sha256"]:
             return binary, data
     if directory.exists():
         shutil.rmtree(directory)
@@ -171,11 +161,6 @@ def prepare_build(tool, args, setup_state, compilers):
         if scope_options:
             gpu_options["scope_transfers"] = scope_options["transfers"]
             gpu_options["scope_execution"] = scope_options["execution"]
-            gpu_options["scope_measurement"] = scope_options["measurement"]
-            if scope_options["cost"]:
-                copied_cost = directory / "scope-cost.json"
-                shutil.copy2(scope_options["cost"], copied_cost)
-                gpu_options["scope_cost"] = str(copied_cost)
         profile_path = getattr(args, "calibration_profile", None)
         if profile_path:
             copied_profile = directory / "calibration.json"
@@ -481,12 +466,8 @@ def main():
                          help="Local CUDA memory ownership; scoped uses compiler-owned source scopes")
     measure.add_argument("--scope-transfers", choices=("direct", "pinned", "pipelined", "auto", "coalesced"), default="direct",
                          help="Pass the scoped transfer mode to the compiler; independent of GPU placement")
-    measure.add_argument("--scope-execution", choices=("bounded", "reached"), default="bounded",
-                         help="Pass the opt-in reached source execution mode to the compiler")
-    measure.add_argument("--scope-measurement", choices=("native", "resident"),
-                         help="Diagnostic compiler-issued call timing; sections/reached only, no placement evidence")
-    measure.add_argument("--scope-cost", type=Path,
-                         help="Compiler-owned checked selection cost request; executed application build attestation required")
+    measure.add_argument("--scope-execution", choices=("graph",),
+                         help="Source scope execution; graph is implicit with scoped memory")
     measure.add_argument("--scope-entry", help="Explicit procedure or module::procedure for scoped execution")
     measure.add_argument("--scope-source", help="Entry source path relative to the application src/ tree")
     measure.add_argument("--scope-source-file", action="append", default=[],

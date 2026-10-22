@@ -120,7 +120,7 @@ native=mode.get('native',False)
 if native:artifacts={}
 hashes={name:digest(text) for name,text in artifacts.items()}
 runtime_hashes={'scoped_runtime.cu':hashes['scoped_runtime.cu']} if not native else {}
-manifest={'schema_version':1,'scope_count':0 if native else 1,
+manifest={'schema_version':1,'scope_execution':value('--scope-execution'),'scope_count':0 if native else 1,
  'scopes':[] if native else [{'owner':'qualified_companion','path':str(source),'first_line':1,'last_line':1,'gpu_leaves':['compiler_decision']}],
  'source_inputs':facts['sources'],'analysis_sources':analysis,
  'numerical_sources':sorted([{key:item[key] for key in ('procedure','path','entry','sha256')} for item in normalized['entries']],key=lambda item:item['procedure']),

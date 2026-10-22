@@ -377,6 +377,29 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
                      numerical_sources: Path | None = None,
                      analysis_sources: Path | None = None,
                      summary_cache: Path | None = None) -> dict:
+    """Consume the current graph source protocol; historical transport is private."""
+    options = dict(gpu_options or {})
+    retired = {"scope_cost", "scope_measurement"} & options.keys()
+    if retired:
+        raise LocalAdapterError("Retired public source options: " + ", ".join(sorted(retired)))
+    if options.get("scope_execution", "graph") != "graph":
+        raise LocalAdapterError("Public source scopes require graph execution")
+    options["scope_execution"] = "graph"
+    return _transform_scopes_protocol(
+        source_path, compiler_root, python, output_dir, entry=entry,
+        source_files=source_files, capture_facts=capture_facts, gpu_options=options,
+        effect_contracts=effect_contracts, numerical_sources=numerical_sources,
+        analysis_sources=analysis_sources, summary_cache=summary_cache,
+        legacy_protocol=False)
+
+
+def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: Path, output_dir: Path, *,
+                              entry: str, source_files=(), capture_facts: dict, gpu_options=None,
+                              effect_contracts: Path | None = None,
+                              numerical_sources: Path | None = None,
+                              analysis_sources: Path | None = None,
+                              summary_cache: Path | None = None,
+                              legacy_protocol: bool) -> dict:
     """Request approved source scopes; consume only versioned public artifacts.
 
     Capture facts belong to extraction/capture safety. This adapter does not
@@ -466,6 +489,10 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
             or not isinstance(report.get("outputs"),list)):
         raise LocalAdapterError("Compiler source-scope report is missing versioned scope/capture/artifact facts")
     _checked_execution_plans(manifest, capture_facts=facts)
+    if not legacy_protocol and manifest.get("scope_execution") != "graph":
+        raise LocalAdapterError("Compiler returned a non-graph source protocol")
+    if legacy_protocol and manifest.get("scope_execution") != options.get("scope_execution", "bounded"):
+        raise LocalAdapterError("Historical compiler source protocol differs from its explicit request")
     if _owner_measurements(manifest) != measurement:
         raise LocalAdapterError("Compiler scope measurement variant differs from its request")
     _check_descriptor_expectation_contract(manifest, facts)
