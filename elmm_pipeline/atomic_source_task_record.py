@@ -238,14 +238,17 @@ def _numerical(variant, team, index, descriptors):
 
 def validate_atomic_source_task(record, member, procedure, inputs, resources, *, owner, manifest, graph_execution, task_ordinal):
     _sealed(record, _TASK)
-    _require(type(record["version"]) is int and record["version"] in {2, 3}
+    _require(type(record["version"]) is int and record["version"] in {2, 3, 4}
              and record["kind"] == "original_atomic_conditional_joined_team"
              and record["pricing"] == "unpriced; explicit sections only", "atomic source task version or policy differs")
     _false(record, ("definitions_authorized", "placement_authorized", "motion_authorized"))
-    conditional = record["version"] == 3
     team = record["source_proof"]
+    projected = record["version"] == 4
+    _require(isinstance(team, dict) and type(team.get("version")) is int and team["version"] in {2, 3},
+             "atomic source task original team version differs")
+    conditional = team["version"] == 3
     _sealed(team, _TEAM | ({"conditional_affine_context_required"} if conditional else set()))
-    _require(type(team["version"]) is int and team["version"] == record["version"] and team["kind"] == "atomic_original_conditional_joined_team"
+    _require((projected or team["version"] == record["version"]) and team["kind"] == "atomic_original_conditional_joined_team"
              and team["procedure"] == member["procedure"] == procedure["procedure"]
              and team["source_graph"] == member["source_graph"] and team["source_inputs"] == inputs,
              "atomic source task original authority linkage differs")
@@ -349,13 +352,28 @@ def validate_atomic_source_task(record, member, procedure, inputs, resources, *,
                 _require(not (set(units[index]["writes"]) & {*units[other]["reads"], *units[other]["writes"]}
                               or set(units[other]["writes"]) & set(units[index]["reads"])), "atomic source cross-unit storage dependency differs")
     binding = record["execution_binding"]
-    _keys(binding, {"owner", "canonical_resources", "registration_slots"})
+    _keys(binding, {"owner", "canonical_resources", "registration_slots"}
+          | ({"call_projection"} if projected else set()))
     _require(binding["owner"] == owner and isinstance(binding["canonical_resources"], dict) and isinstance(binding["registration_slots"], dict)
              and set(binding["canonical_resources"]) == set(binding["registration_slots"]) == arrays,
              "atomic source physical root inventory differs")
+    projected_roots = None
+    from .source_task_call_record import (
+        require_single_association,
+        validate_call_projection,
+    )
+
+    if projected:
+        fields = [{"binding": descriptors[root], "written": root in writes} for root in sorted(arrays)]
+        projected_roots = validate_call_projection(binding["call_projection"], record, fields, procedure,
+                                                    resources, owner, manifest)
+    else:
+        require_single_association(procedure, owner, manifest)
     for root in arrays:
         physical = binding["canonical_resources"][root]
         _require(_text(physical) and physical in resources, "atomic source canonical physical root differs")
+        if projected:
+            _require(physical in projected_roots[root], "atomic source representative is outside its CALL projection")
         original = resources[physical]
         _require(type(binding["registration_slots"][root]) is int
                  and binding["registration_slots"][root] == original["registration_identity"]
@@ -379,7 +397,7 @@ def validate_atomic_source_task(record, member, procedure, inputs, resources, *,
                      "conditional SECTION alternatives do not share the same complete context")
             shared_context = context
             validate_provider(metadata, context)
-        _require(type(metadata["version"]) is int and metadata["version"] == record["version"] and metadata["kind"] == "atomic_original_team_alternative"
+        _require(type(metadata["version"]) is int and metadata["version"] == team["version"] and metadata["kind"] == "atomic_original_team_alternative"
                  and metadata["team_identity"] == team["identity"] and metadata["alternative_identity"] == variant["source"]["proof_identity"]
                  and metadata["preparation_identity"] == prep["preparation_identity"]
                  and metadata["physical_effect_identity"] == effects["proof_identity"] and metadata["source_read_identity"] == reads["proof_identity"]
@@ -431,9 +449,13 @@ def _graph(team, binding, arrays, writes, graph, ordinal):
     placements = [item for item in _placements(procedures[0].get("schedule")) if item.get("task") == task_id]
     _require(len(tasks) == len(placements) == 1, "atomic source task/schedule identity differs")
     task, placement = tasks[0], placements[0]
-    roots = sorted(binding["canonical_resources"][root] for root in arrays)
+    projection = binding.get("call_projection")
+    roots = (projection["conservative_effects"]["reads"] if projection is not None
+             else sorted(binding["canonical_resources"][root] for root in arrays))
+    write_roots = (projection["conservative_effects"]["may_writes"] if projection is not None
+                   else sorted(binding["canonical_resources"][root] for root in writes))
     _require(task.get("implementations") == ["gpu"] and task.get("reads") == task.get("metadata_reads") == roots
-             and task.get("may_writes") == sorted(binding["canonical_resources"][root] for root in writes)
+             and task.get("may_writes") == write_roots
              and task.get("ordered") is True and task.get("opaque") is False
              and task.get("scalar_writes") == task.get("lifetime_resources") == []
              and task.get("scalar_reads") == sorted(item["resource"] for item in team["bindings"]

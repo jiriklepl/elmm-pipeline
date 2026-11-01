@@ -47,8 +47,9 @@ def _slot(procedure, resource):
 
 def validate_conditional_return(record, epoch, plan, manifest, scope):
     version = record.get("version") if isinstance(record, dict) else None
-    _sealed(record, _RETURN | ({"root_selection"} if version == 2 else set()))
-    _require(type(version) is int and version in (1, 2) and record["kind"] == "checked_conditional_return"
+    _sealed(record, _RETURN | ({"root_selection"} if isinstance(record,dict) and "root_selection" in record else set())
+            | ({"native_call_preservation_policy_version"} if version == 3 else set()))
+    _require(type(version) is int and version in (1, 2, 3) and record["kind"] == "checked_conditional_return"
              and record["entry"] == plan["entry"] and record["source_inputs"] == epoch["source_inputs"]
              and _sha256(record["selection_identity"]), "conditional return source or version linkage differs")
     _false(record, ("escape_completion_assumed", "entry_definition_authority", "payload_access_authorized", "motion_authorized",
@@ -64,8 +65,12 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
              and type(control["module_control_version"]) is int and control["module_control_version"] == 5
              and control["propagation"] == "INOUT by original checked CALL; false is never rearmed in this invocation",
              "conditional return original ENTRY controls differ")
+    if version == 3:
+        _require(type(record["native_call_preservation_policy_version"]) is int
+                 and record["native_call_preservation_policy_version"] == 2,
+                 "conditional return native CALL preservation policy differs")
     selected_root = None
-    if version == 2:
+    if version == 2 or version == 3 and "root_selection" in record:
         selected_root = _selected_root(record, epoch, plan, manifest, scope)
     else:
         selection = manifest.get("native_ancestor_selection")
@@ -84,7 +89,7 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
     members = record["members"]
     _require(isinstance(members, list) and [m.get("procedure") for m in members if isinstance(m, dict)] == list(procedures),
              "conditional return complete member inventory differs")
-    if version == 1:
+    if selected_root is None:
         roots = selection["device_roots"]
         _require(isinstance(roots, list) and bool(roots), "conditional return requires its original selected roots")
         seen = set()
@@ -115,7 +120,8 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
     for member in members:
         _member(member, procedures[member["procedure"]], epoch_members[member["procedure"]], procedures, module, canonical, scope,
                 selected_root=selected_root if member["procedure"] == plan["entry"] else None,
-                resource_rows=resource_rows, scalar_uses=scalar_uses, source_edits=manifest.get("source_edits"))
+                resource_rows=resource_rows, scalar_uses=scalar_uses, source_edits=manifest.get("source_edits"),
+                return_record=record)
 
 
 
@@ -258,7 +264,7 @@ def _loop_entry(entry, nodes, procedure, coordinators, scope, source_edits):
 
 
 def _member(member, procedure, epoch_member, procedures, coordinators, canonical, scope, *, selected_root=None,
-            resource_rows=None, scalar_uses=None, source_edits=None):
+            resource_rows=None, scalar_uses=None, source_edits=None, return_record=None):
     _keys(member, {"procedure", "source_graph", "entry_exit", "routes"})
     name = procedure["procedure"]
     _require(member["source_graph"] == procedure["structured_summary_identity"], "conditional return member source graph differs")
@@ -298,13 +304,18 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
             _require(_sha256(route["proof_identity"]), "conditional return task proof identity differs")
             (checked_devices if kind == "checked_device" else checked_transfers).add(route["proof_identity"])
         elif kind == "reached_retirement":
-            _keys(route, base | {"lifetime", "rearm_allowed"} | ({"loop_entry"} if "loop_entry" in route else set()))
+            _keys(route, base | {"lifetime", "rearm_allowed"} | ({"loop_entry"} if "loop_entry" in route else set())
+                  | ({"call_preservation"} if "call_preservation" in route else set()))
             _require(route["lifetime"] == "proved_lifecycle" and route["rearm_allowed"] is True,
                      "conditional return cannot admit an unproved escape across invocations")
             if "loop_entry" in route:
                 identity = _loop_entry(route["loop_entry"], nodes, procedure, coordinators, scope, source_edits)
                 _require(identity not in loop_entries, "conditional return repeats a reached loop retirement")
                 loop_entries.add(identity)
+            if "call_preservation" in route:
+                _require(return_record is not None and return_record["version"] == 3 and "loop_entry" not in route,
+                         "native CALL preservation requires its distinct conditional return version")
+                _call_preservation(route["call_preservation"],nodes,member,procedure,coordinators,scope,source_edits,return_record)
             retirement += 1
         elif kind == "checked_child":
             _keys(route, base | {"procedure", "canonical_handles", "canonical_resources", "handle_forwarding"})
@@ -348,6 +359,125 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
              "conditional return device or identity-transfer coverage differs")
 
 
+
+def _call_preservation(value, nodes, member, procedure, coordinators, scope, source_edits, returned):
+    keys = {"identity","version","kind","procedure","source_graph","selected_node_ids","source_span",
+            "original_source","original_source_sha256","original_call","completion_identity","native_graph_identity",
+            "selection_identity","capture_facts_identity","entry_exit_identity","writable_actual_families","entry_rely","retirement",
+            "completion_scope","no_imports_or_publication","initial_quiescence_authorized","payload_access_authorized",
+            "stable_storage_authorized","entry_definition_authority","alias_authority","motion_authorized",
+            "cross_cut_replica_retention_authorized"}
+    _sealed(value,keys)
+    plan=scope["checked_execution_plan"]
+    name=procedure["procedure"]
+    _require(type(value["version"]) is int and value["version"]==2
+             and value["kind"]=="same_family_native_call_retirement" and value["procedure"]==name
+             and value["source_graph"]==procedure["structured_summary_identity"]
+             and value["selected_node_ids"]==nodes and len(nodes)==1
+             and value["selection_identity"]==returned["selection_identity"]
+             and value["capture_facts_identity"]==plan["capture_facts_identity"]
+             and value["entry_exit_identity"]==_digest(member["entry_exit"])
+             and _sha256(value["completion_identity"]) and _sha256(value["native_graph_identity"]),
+             "native CALL preservation source/admission linkage differs")
+    families=value["writable_actual_families"]
+    _require(isinstance(families,list) and all(_text(name) for name in families)
+             and families==sorted(set(families))
+             and set(families)<={row["resource"]for row in plan["resources"]},
+             "native CALL writable actuals escaped the inherited managed allocation family")
+    _require(value["entry_rely"]=="same conditional allocation-family access exclusion as first checked activation"
+             and value["retirement"]=="full owning domain before untouched original CALL; next activation remains fresh NONE"
+             and value["completion_scope"]=="normal return only" and value["no_imports_or_publication"] is True,
+             "native CALL preservation contract differs")
+    _false(value,("initial_quiescence_authorized","payload_access_authorized","stable_storage_authorized",
+                  "entry_definition_authority","alias_authority","motion_authorized","cross_cut_replica_retention_authorized"))
+    span=value["source_span"]
+    _require(isinstance(span,list) and len(span)==2 and all(type(n) is int for n in span)
+             and 1<=span[0]<=span[1] and _text(value["original_source"]) and _text(value["original_call"])
+             and value["original_source_sha256"]==sha256(value["original_source"].encode()).hexdigest(),
+             "native CALL preservation original source differs")
+    boundaries=[b for b in procedure["boundaries"] if [b.get("first_line"),b.get("last_line")]==span]
+    _require(len(boundaries)==1 and boundaries[0].get("call_preservation")==value
+             and boundaries[0].get("conditional_close") is None and boundaries[0].get("reopen") is True
+             and boundaries[0].get("lifecycle")=="proved_lifecycle" and "loop_entry" not in boundaries[0],
+             "native CALL preservation is detached from its exact boundary")
+    _require(isinstance(source_edits,list),"native CALL preservation requires its emitted edit")
+    edits=[e for e in source_edits if isinstance(e,dict) and e.get("source")==procedure["source"]
+           and [e.get("first_line"),e.get("last_line")]==span]
+    _require(len(edits)==1 and edits[0].get("source_sha256")==procedure["source_sha256"]
+             and isinstance(edits[0].get("replacement"),str),"native CALL preservation edit differs")
+    text=edits[0]["replacement"]; original=value["original_source"]
+    _require(text.endswith(original) and text.count(original)==1,"native CALL must execute unchanged exactly once after retirement")
+    context=(scope["owner"] if name==plan["entry"] else "fort_child_context_"+sha256(name.encode()).hexdigest()[:12])
+    _require(name==plan["entry"] or name in coordinators,"native CALL retirement lost its owning context")
+    prefix=[line.strip() for line in text[:-len(original)].splitlines()]
+    close="fort_close_status = fort_scope_resident_close_v1("+context+")"
+    reset=context+" = 0"
+    _require(prefix.count(close)==prefix.count(reset)==1 and prefix.index(close)<prefix.index(reset),
+             "native CALL retirement lost its full-domain close/reset before original work")
+    # The close must execute on exactly the authentic context path. Counting
+    # lines alone would accept an always-false wrapper or an inverted guard.
+    import re
+    expected=(["if (fort_borrowed_"+sha256(name.encode()).hexdigest()[:12]+") then"] if name!=plan["entry"] else [])
+    expected.append("if ("+context+" /= 0) then")
+    stack=[]
+    for line in prefix:
+        lower=line.lower()
+        if re.fullmatch(r"if\s*\(.*\)\s*then",lower):
+            stack.append(lower)
+        elif lower in {"else","else then"} or lower.startswith(("else if", "elseif")):
+            _require(bool(stack),"native CALL retirement has an unmatched alternative")
+            stack[-1]="alternative:"+lower
+        elif lower in {"endif","end if"}:
+            _require(bool(stack),"native CALL retirement has an unmatched guard")
+            stack.pop()
+        elif line in {close,reset}:
+            _require(stack==expected,"native CALL retirement changed its authentic context/borrowed guard")
+        _require(not re.match(r"(?:return|go\s*to|goto|exit|cycle|stop|error\s+stop)\b",lower),
+                 "native CALL retirement cannot bypass its mandatory close")
+    _require(not stack,"native CALL retirement has an unterminated wrapper")
+    position=prefix.index(close)
+    _require(prefix[position+1:position+3]==[
+        "if (fort_close_status /= FORT_SCOPE_OK) error stop 'lexical owner publication failed'",reset],
+        "native CALL retirement must stop after a failed publication before resetting context")
+    # Character actuals are outside this narrow preservation role. Normalize
+    # only insignificant source whitespace/comments/continuations, not tokens.
+    def original_call(text):
+        return re.sub(r"(?m)![^\n]*|[\s&]","",text).upper()
+    _require(original_call(value["original_source"])==original_call(value["original_call"])
+             and original_call(value["original_call"]).startswith("CALL"),
+             "native CALL preservation changed the exact original CALL spelling")
+
+
+def _projected_call_site(route, caller, callee, scope):
+    """Choose the exact original site from already authenticated source DAGs.
+
+    Equal forwarding can occur at multiple reached CALLs. Select by the
+    original node IDs first; canonical allocation maps never select a site.
+    Separate source-task projections may retain the same consistent edge.
+    """
+    candidates = []
+    projected_pair = False
+    for member in scope["checked_execution_plan"]["storage_epoch"]["members"]:
+        for task in member.get("source_device_tasks", []):
+            projection = task.get("execution_binding", {}).get("call_projection")
+            if projection is None:
+                continue
+            for edge in projection["calls"]:
+                projected_pair |= (edge["caller"], edge["callee"]) == (caller, callee)
+                if edge["selected_node_ids"] != route["selected_node_ids"]:
+                    continue
+                _require((edge["caller"], edge["callee"]) == (caller, callee)
+                         and edge["handle_bindings"] == route["handle_forwarding"],
+                         "conditional return projected original CALL linkage differs")
+                candidates.append(edge)
+    if not candidates:
+        _require(not projected_pair, "conditional return requires its exact projected original CALL site")
+        return None
+    _require(all(value == candidates[0] for value in candidates),
+             "conditional return has conflicting original CALL site projections")
+    return candidates[0]
+
+
 def _child(route, caller, procedures, coordinators, canonical, scope, resource_rows, scalar_uses):
     callee = route["procedure"]
     _require(_text(callee) and callee in coordinators and callee in procedures, "conditional return checked child differs")
@@ -358,7 +488,14 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
     _require(handles == expected and set(forward) == set(expected)
              and all(type(n) is int and n > 0 for n in [*handles.values(), *forward.values()]),
              "conditional return canonical registration or local-slot identity differs")
+    projected = _projected_call_site(route, caller, callee, scope)
     calls = [call for call in procedures[callee]["calls"] if call.get("caller") == caller and call.get("handle_bindings") == forward]
+    if projected is not None:
+        calls = [call for call in calls if (call.get("first_line"), call.get("last_line")) ==
+                 (projected["first_line"], projected["last_line"])
+                 and call.get("resource_mappings") == projected["resource_mappings"]]
+        _require(len(calls) == 1 and projected["caller_graph"] == procedures[caller]["structured_summary_identity"],
+                 "conditional return projected CALL differs from its exact retained companion site")
     _require(bool(calls), "conditional return child handles differ from the checked original CALL")
     parent_map = coordinators[caller]["resource_mappings"] if caller in coordinators else {root: root for root in canonical}
     matches = False
@@ -390,9 +527,15 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
             actuals = {**actuals, **{root: root for root in missing}}
         if all(parent_map.get(actuals[root], actuals[root]) == value for root, value in mappings.items()):
             matches = True
+            local_actuals = projected["source_call"]["resource_mapping"] if projected is not None else None
             for root, value in mappings.items():
                 slot = str(_slot(callee, root))
-                parent_slot = _slot(caller, actuals[root]) if caller in coordinators else canonical[value]
+                local = actuals[root]
+                if local_actuals is not None and root in local_actuals:
+                    local = local_actuals[root]
+                    _require(parent_map.get(local, local) == actuals[root],
+                             "conditional return projected local/canonical association differs")
+                parent_slot = _slot(caller, local) if caller in coordinators else canonical[value]
                 _require(forward[slot] == parent_slot, "conditional return child-to-parent local handles differ")
             break
     _require(matches, "conditional return child formal-to-canonical association differs")

@@ -133,14 +133,26 @@ def _graph_effects(graph, procedure, ordinal, effects):
 
 
 def validate_call_projection(value, record, fields, procedure, resources, owner, manifest):
+    # Atomic v4 retains the exact source team separately from this CALL
+    # transport. Its numerical alternatives and providers keep their versions.
+    atomic = record.get("kind") == "original_atomic_conditional_joined_team"
+    if atomic:
+        _require(type(record.get("version")) is int and record["version"] == 4
+                 and isinstance(record.get("source_proof"), dict),
+                 "source CALL projection requires projected atomic transport")
+        source = record["source_proof"]
+        source_identity = source.get("identity")
+    else:
+        source = record
+        source_identity = record.get("source_proof_identity")
     _keys(value, {"identity", "version", "kind", "owner", "procedure", "source_proof_identity", "field_slots",
                   "members", "calls", "field_roots", "root_registrations", "projection_semantics",
                   "conservative_effects", "runtime_validation"} | _FLAGS)
     _require(type(value["version"]) is int and value["version"] == 1
              and value["kind"] == "original_source_task_companion_projection"
              and _sha256(value["identity"]) and value["identity"] == _digest({k: v for k, v in value.items() if k != "identity"})
-             and value["owner"] == owner and value["procedure"] == procedure["procedure"] == record["procedure"]
-             and value["source_proof_identity"] == record["source_proof_identity"]
+             and value["owner"] == owner and value["procedure"] == procedure["procedure"] == source["procedure"]
+             and value["source_proof_identity"] == source_identity
              and all(value[k] is False for k in _FLAGS)
              and value["projection_semantics"] == "per-field effect closure; joint associations remain in the checked CALL DAG"
              and value["runtime_validation"] == "original reached registration and existing source access transaction validate each invocation",
@@ -289,8 +301,8 @@ def validate_call_projection(value, record, fields, procedure, resources, owner,
                "metadata_reads": sorted(actions), "must_writes": [], "overwrites": []}
     _require(value["conservative_effects"] == effects, "source CALL projection conservative effects differ")
     members = plan["storage_epoch"]["members"]
-    tasks = next(m["source_device_tasks"] for m in members if m["procedure"] == record["procedure"])
+    tasks = next(m["source_device_tasks"] for m in members if m["procedure"] == source["procedure"])
     positions = [i for i, task in enumerate(tasks) if task == record]
     _require(len(positions) == 1, "source CALL projection task position differs")
-    _graph_effects(scope.get("graph_execution"), record["procedure"], positions[0], effects)
+    _graph_effects(scope.get("graph_execution"), source["procedure"], positions[0], effects)
     return expected_roots
