@@ -1,0 +1,92 @@
+{
+  "version": 10,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 0,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base-shared",
+      "hidden": true,
+      "$comment": "PoisFFT builds shared libs by default, so do we",
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": "ON",
+        "POISSON_SOLVER_BUILD_FORTRAN": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "base-shared",
+      "description": "Debug build without MPI support",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "POISSON_SOLVER_USE_MPI": "OFF"
+      }
+    },
+    {
+      "name": "debug-mpi",
+      "inherits": "base-shared",
+      "description": "Debug build with MPI support",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "POISSON_SOLVER_USE_MPI": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base-shared",
+      "description": "Release build without MPI support",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "POISSON_SOLVER_USE_MPI": "OFF"
+      }
+    },
+    {
+      "name": "release-mpi",
+      "inherits": "base-shared",
+      "description": "Release build with MPI support",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "POISSON_SOLVER_USE_MPI": "ON"
+      }
+    },
+    {
+      "name": "release-benchmarks",
+      "inherits": "release",
+      "description": "Release build without MPI support, with the benchmarks target enabled",
+      "cacheVariables": {
+        "POISSON_SOLVER_ENABLE_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "release-mpi-benchmarks",
+      "inherits": "release-mpi",
+      "description": "Release build with MPI support, with the benchmarks target enabled",
+      "cacheVariables": {
+        "POISSON_SOLVER_ENABLE_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "release-sm86",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-sm86",
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "86",
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++-14",
+        "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++-14",
+        "CMAKE_Fortran_COMPILER": "/usr/bin/gfortran-15",
+        "POISSON_SOLVER_BUILD_TESTS": "OFF",
+        "POISSON_SOLVER_BUILD_EXAMPLES": "OFF",
+        "POISSON_SOLVER_BUILD_DOCS": "OFF",
+        "CMAKE_C_COMPILER": "/usr/bin/gcc-14"
+      }
+    }
+  ]
+}

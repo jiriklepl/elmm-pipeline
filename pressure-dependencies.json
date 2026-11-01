@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "provider": {
+    "source": "vendor/poisson-solver",
+    "origin_sha256": "0ac51125846ae3a0f14286239b122be38f8e98eff1b2d5068590b0ce540a14a0",
+    "source_manifest_sha256": "8bef810273cd17492ce608e74d82324393c5f406bf4372b552b6f3498951c2ba"
+  },
+  "VkFFT": {
+    "url": "https://github.com/DTolm/VkFFT.git",
+    "revision": "066a17c17068c0f11c9298d848c2976c71fad1c1"
+  },
+  "optional": true,
+  "cpu_setup_unchanged": true
+}

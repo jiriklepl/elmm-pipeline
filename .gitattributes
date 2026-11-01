@@ -1,0 +1,2 @@
+# Preserve the pinned provider and its recorded upstream patch byte for byte.
+vendor/poisson-solver/** -text -whitespace
