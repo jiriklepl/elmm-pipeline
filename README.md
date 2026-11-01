@@ -99,6 +99,44 @@ This discovers build inputs; execution on another architecture still requires
 its own hardware validation and calibration.
 
 
+### Explicit GPU pressure preparation
+
+The Python API `elmm_pipeline.gpu_pressure_lazy.prepare_lazy_poisfft_contract`
+prepares the explicitly selected lazy PoisFFT wrapper for a qualified GPU
+pressure backend. Supply the configured source export, matching Fortran
+compiler/backend receipt, numerical and receiver qualifications, and workspace
+cap. This is an implementation change; native comparison builds keep their CPU
+solver.
+
+Its optional `required_entry_read_prerequisite` is an absolute `path` and
+`sha256` reference to a reviewed unconditional read contract for the pinned
+library. Preparation binds that contract to the final provider, original call,
+RHS interior and all six layout checks, then issues a fresh source proof.
+The returned `prepared-contract.json` references the effect contract, capture
+facts, source proof and final provider manifest; use those together. Captures
+remain NONE: numerical agreement and `INTENT(IN)` do not establish entry reads.
+Omitting the prerequisite preserves the existing preparation behavior.
+
+An optional `provider_only_lifetime` request identifies an original call path,
+for example `{"version": 1, "call_path": ["$program::clmm",
+"timesteps::tmarchrk3", "pressure::pressurecorrection",
+"poissonsolvers::poiss_poisfft"]}`. Supply its matching
+`provider_retention_prerequisite` as well as the entry-read prerequisite. The
+retention review must bind the provider implementation and establish that its
+plan keeps only configuration, workspace and private completion state; it may
+not reuse application field pointers after completion and unregistration.
+The compiler checks the original call path and emits an automatic owner slot.
+Each checked solve borrows that slot, waits, publishes and unregisters every
+field before native work resumes. The plan and workspace can survive subsequent
+calls and allocation changes; application field replicas do not survive this
+boundary. Unselected callers continue through the standalone entry. A failure
+before submission disables the owner's GPU path; a failure after submission
+is fatal and cannot replay the original call.
+
+Preparation neither executes the solver nor establishes a longer storage
+lifetime. Fresh generated-code, execution and application correctness checks
+are required for each changed implementation.
+
 ### Local runtime policies and hardware calibration
 
 The local backend accepts `--gpu-policy always|sections|auto|chunked|hybrid`.
@@ -290,6 +328,18 @@ for combined diagnostic validation. Campaign adapters transport the same field.
 Approved entry identities are checked across the packages; an all-native
 contract applies only when every package establishes it. GPU activity and
 transfer counters still come from the separate runtime trace.
+
+For overlapping source files, the compiler's `compiler.scopes.compose` command
+can first merge checked edits in original source coordinates. The pipeline
+accepts that compiler-issued composition as one package. It validates each
+embedded component against its own original entry, source configuration,
+capture identity and provider lifetime contract, then checks the aggregate
+source/edit/build/artifact inventories. Configured dependencies from every
+component are checked before application sources are written. This preserves
+independent checked plans; it does not issue a new aggregate execution plan.
+Nested compositions, measurement variants and active priced-selection packages
+are rejected. Use the same original source identities when generating components;
+rewriting manifest paths or applying transforms to previous output is unsupported.
 
 New compiler CUDA build descriptors can declare the versioned
 `numerical_contract` `separate-arithmetic-v1`. The pipeline validates the exact
@@ -977,6 +1027,17 @@ measurements (seven near a gate, or `repetitions: 7`). Diagnostics run separatel
 planning construction, validation and selection have separate counters. Sealing
 requires successful guards, complete fields, halo checks, configured reports
 and current plots. A sealed snapshot is evidence, not automatic promotion.
+
+Prepared pressure backends with an authenticated kernel-cache identity use a
+private campaign directory per mode and backend manifest. The launcher records
+that policy and clears inherited `POISSON_SOLVER_KERNEL_CACHE_DIR`; older
+backends without the identity remain disabled. Directory validation performs no
+compilation or GPU work: all kernel-cache loading and population stays inside
+the application clock. Verification and profiles can populate the same cache.
+For rotated timings, prepare a fresh campaign cache before the excluded warmups,
+record its initial state, and report cold/warm startup separately; do not silently
+remove a populated cache during a campaign. See the
+[kernel-cache qualification](../benchmarks/reports/gpu-kernel-cache-20261031/README.md).
 
 Unmeasured construction has separate resource controls. `pipeline.py run --jobs`
 limits independent CUDA compilations and the subsequent SCons build. Those

@@ -5,6 +5,7 @@ import json
 import math
 import re
 
+from .scoped_compact_trace import COUNTERS, validate_compact_transfer, validate_modeled_compact_copy
 from .scoped_provenance import scoped_provenance
 
 TRACE_VARIABLES = ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE", "NVCOMPILER_ACC_NOTIFY", "NVCOMPILER_ACC_TIME",
@@ -140,7 +141,7 @@ def scoped_modeled_evidence(log):
              "logical_kernels", "live_graphs", "destructions"), ()),
     }
     events = {"decision", "snapshot", "operation", "requirement", "copy", "export", "gate", "end",
-              "definition_validation", "transfer_statistics", "batch_statistics"} | statistics.keys()
+              "definition_validation", "transfer_statistics", "batch_statistics", "compact_transfer"} | statistics.keys()
 
     def object_fields(pairs):
         result = {}
@@ -175,6 +176,16 @@ def scoped_modeled_evidence(log):
         event = record.get("event")
         if type(context) is not int or not 0 <= context < 2**64 or not isinstance(event, str) or event not in events:
             raise ValueError("Scoped evidence requires a valid context and public event")
+        domain_fields = {"domain_version", "domain", "domain_role"}
+        has_domain = bool(domain_fields & record.keys())
+        if has_domain:
+            domain, role = record.get("domain"), record.get("domain_role")
+            if (not domain_fields <= record.keys()
+                    or type(record.get("domain_version")) is not int or record["domain_version"] != 1
+                    or type(domain) is not int or not 0 < domain < 2**64
+                    or role not in ("storage", "execution") or not context
+                    or (context == domain) != (role == "storage")):
+                raise ValueError("Scoped evidence requires complete versioned residency domain attribution")
         if event == "end" and (type(record.get("rows")) is not int or record["rows"] < 0
                                or type(record.get("complete")) is not bool or type(record.get("truncated")) is not bool):
             raise ValueError("Scoped evidence end requires row and completeness fields")
@@ -187,6 +198,8 @@ def scoped_modeled_evidence(log):
         if event in statistics:
             counts, flags = statistics[event]
             fields = {"schema_version", "context", "event", "stats_version", "complete", *counts, *flags}
+            if has_domain:
+                fields |= domain_fields
             if (record.keys() != fields
                     or type(record.get("stats_version")) is not int or record["stats_version"] != 1
                     or type(record.get("complete")) is not bool
@@ -228,6 +241,10 @@ def scoped_modeled_evidence(log):
                     or (record["applied"] and (not record["available"] or not record["batches"]
                                               or record["completed_batches"] != record["batches"]))):
                 raise ValueError("Scoped batch statistics require finalized versioned public counters and costs")
+        if event == "compact_transfer":
+            validate_compact_transfer(record)
+        else:
+            validate_modeled_compact_copy(record)
         finite(record)
         records.append(record)
     return records
@@ -285,15 +302,22 @@ def gpu_activity(log, tool, regions, *, scope_manifest=None, scope_packages=None
         scoped = scoped_runtime_activity(log)
         manifests = _scope_manifests(scope_manifest, scope_packages)
         scoped["source_provenance"] = scoped_provenance(log, manifests)
+        observed = scoped["source_provenance"]["totals"]
+        graph_counts = {name: observed[name] for name in ("graph_submissions", "graph_kernel_submissions")
+                        if name in observed}
+        scoped.update(graph_counts)
+        copy_counts = {name: observed[name] for name in COUNTERS if name in observed}
+        scoped.update(copy_counts)
+        graph_kernels = graph_counts.get("graph_kernel_submissions", 0)
         native = bool(manifests)
         for manifest in manifests:
             scopes = manifest.get("scopes", [])
             native = native and (manifest.get("schema_version") == 1
                       and (manifest.get("scope_count") == 0 and not scopes or
                            bool(scopes) and all(_native_source_preflight(scope) for scope in scopes)))
-        if native and (kernels or scoped["kernel_launches"]):
+        if native and (kernels or scoped["kernel_launches"] or graph_kernels):
             raise ValueError("CUDA launch contradicts the compiler's all-native source-scope contract")
-        return {"verified": kernels + scoped["kernel_launches"] > 0,
+        return {**graph_counts, **copy_counts, "verified": kernels + scoped["kernel_launches"] + graph_kernels > 0,
                 "kernel_launches": kernels + scoped["kernel_launches"], "probe_kernel_launches": 0,
                 "upload_bytes": upload + scoped["upload_bytes"], "download_bytes": download + scoped["download_bytes"],
                 "allocations": len(re.findall(r"(?<![A-Za-z0-9_])FORT_RUNTIME alloc\b", log)) + scoped["allocations"],

@@ -153,3 +153,22 @@ def test_completion_requires_this_target_and_an_integer_exit_status(tmp_path, va
     write(marker, value)
     with pytest.raises(RuntimeError, match='invalid.*completion'):
         profiling.wait_completion(marker, 'expected', time.monotonic()+1)
+
+
+def test_profile_command_requests_individual_graph_nodes_once(tmp_path):
+    argv = profiling.command("nsys", tmp_path / "capture", "application", ["output_dir=output/"], 2)
+    assert argv.count("--cuda-graph-trace=node") == 1
+    assert argv[-2:] == ["application", "output_dir=output/"]
+
+
+@pytest.mark.parametrize("seconds", [1, 30, 120])
+def test_profile_command_accepts_explicit_bounded_full_capture(tmp_path, seconds):
+    argv = profiling.command("nsys", tmp_path / "capture", "application", [], seconds)
+    assert "--duration=" + str(seconds) in argv
+    assert argv.count("--cuda-graph-trace=node") == 1
+
+
+@pytest.mark.parametrize("seconds", [0, 121, True, 120.0])
+def test_profile_command_rejects_invalid_or_unbounded_capture(tmp_path, seconds):
+    with pytest.raises(ValueError, match="between one and 120"):
+        profiling.command("nsys", tmp_path / "capture", "application", [], seconds)

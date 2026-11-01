@@ -54,7 +54,7 @@ def clean_environment(threads):
     env = dict(os.environ)
     # ELMM environment overrides must not silently replace the selected inputs.
     for key in list(env):
-        if key.startswith("ELMM_"):
+        if key.startswith("ELMM_") or key == "POISSON_SOLVER_KERNEL_CACHE_DIR":
             del env[key]
     env.update(OMP_NUM_THREADS=str(threads), OMP_DYNAMIC="FALSE",
                OMP_SCHEDULE="static", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "kind": "actual transport trace captured from an independently qualified CUDA correctness client",
+  "trace_sha256": "2c167b59b6585b3965f54d2d5c9235d183881c1626557f93991b5e22d13c608e",
+  "binary_sha256": "dec65fb8b89c0770d0bd289f2535efaba3dfc302fa477774fdcf6fe97ee5caf7",
+  "capture": "/tmp/fortran-compact-runtime-01/evidence-capture-01/completion.json",
+  "performance_or_application_claim": false
+}

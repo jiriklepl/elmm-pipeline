@@ -245,7 +245,7 @@ def test_bounded_profile_continues_application_and_disables_sampling():
     assert "--trace=cuda,nvtx" in argv
     assert "--sample=none" in argv and "--cpuctxsw=none" in argv
     assert argv[-2:] == ["/frozen/program", "x=1"]
-    for seconds in (0, 31, -1, 1.5, True):
+    for seconds in (0, 121, -1, 1.5, True):
         with pytest.raises(ValueError, match="duration"):
             profile_command("nsys", "capture", "program", [], seconds)
 

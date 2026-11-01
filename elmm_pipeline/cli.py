@@ -203,6 +203,7 @@ def prepare_build(tool, args, setup_state, compilers):
                    extra_sources=[Path(p) for p in adapter.get("extra_sources", [])],
                    patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
                    gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain,
+                   **({"pressure_backend": adapter["pressure_backend"]} if "pressure_backend" in adapter else {}),
                    **({"application_build": adapter["application_build"]} if "application_build" in adapter else {}))
     data = {"identity": key_data, "adapter": adapter,
             "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),

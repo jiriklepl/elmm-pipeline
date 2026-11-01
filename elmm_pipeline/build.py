@@ -188,6 +188,7 @@ def build(
     gpu_sources: list[GPUSource] | list[dict] | None = None,
     gpu_options: dict | None = None,
     application_build: dict | None = None,
+    pressure_backend: dict | None = None,
 ) -> Path:
     """Build double-precision ELMM and return the absolute executable path.
 
@@ -222,11 +223,42 @@ def build(
     for path in sources:
         if not path.is_file() or path.suffix.lower() not in {".f90", ".f", ".cpp", ".cc", ".c"}:
             raise ValueError(f"Missing or unsupported generated source: {path}")
+    pressure = None
+    if pressure_backend is not None:
+        if application_build is not None:
+            raise ValueError("Exact-window application verification does not support external pressure objects")
+        from .gpu_pressure_build import require_pressure_backend
+        selected_fortran = shutil.which(os.environ.get("FC", "gfortran"))
+        if selected_fortran is None:
+            raise ValueError("Pressure backend requires an explicit available native Fortran compiler")
+        pressure = require_pressure_backend(pressure_backend, fortran=selected_fortran)
+        for name in pressure["extra_sources"]:
+            path = Path(name).resolve(strict=True)
+            if any(value.name == path.name for value in sources):
+                raise ValueError("Pressure interface module must be provided exactly once")
+            sources.append(path)
     patched = [Path(path).resolve() for path in (patched_sources or [])]
     for path in patched:
         if not path.is_file() or path.suffix.lower() not in {".f90", ".f"}:
             raise ValueError(f"Missing or unsupported patched Fortran source: {path}")
     gpu_units = validate_gpu_sources(gpu_sources or [])
+    if pressure is not None:
+        from .gpu_pressure_build import pressure_runtime_cuda_binding
+        runtime = pressure["runtime"]
+        runtime_matches = [(unit, binding) for unit in gpu_units
+                           if (binding := pressure_runtime_cuda_binding(unit, runtime["scoped_runtime.cu"])) is not None]
+        if (len(runtime_matches) != 1
+                or sum(file_identity(path)["sha256"] == runtime["scoped_memory.f90"]["sha256"] for path in sources) != 1):
+            raise ValueError("Pressure backend requires exactly one matching compiler runtime C++/Fortran source")
+        runtime_unit, pressure_runtime_binding = runtime_matches[0]
+        actual_header = Path(runtime_unit["source"]).parent / "scoped_runtime.h"
+        if not actual_header.is_file() or file_identity(actual_header)["sha256"] != runtime["scoped_runtime.h"]["sha256"]:
+            raise ValueError("Pressure backend requires the matching header beside its selected runtime source")
+        if "scoped_source_quote.hpp" in runtime:
+            actual_quote = Path(runtime_unit["source"]).parent / "scoped_source_quote.hpp"
+            if (not actual_quote.is_file()
+                    or file_identity(actual_quote)["sha256"] != runtime["scoped_source_quote.hpp"]["sha256"]):
+                raise ValueError("Pressure backend requires the matching quote header beside its selected runtime source")
     if {unit["source"] for unit in gpu_units} & {str(path) for path in sources}:
         raise ValueError("GPU sources must not also appear among GNU host extra_sources")
 
@@ -273,6 +305,15 @@ def build(
         "pipeline_interfaces = []",
         f"pipeline_patched_sources = set({sorted({str(path) for path in patched})!r})",
     ]
+    if pressure is not None:
+        injection.extend([
+            f"env.AppendUnique(FORTRANPATH={pressure['include_dirs']!r})",
+            f"env.AppendUnique(F90PATH={pressure['include_dirs']!r})",
+            f"pipeline_extra += [env.File(p) for p in {pressure['objects']!r}]",
+            f"env.AppendUnique(LIBPATH={pressure['library_dirs']!r})",
+            f"env.AppendUnique(LIBS={pressure['libraries']!r})",
+            f"env.AppendUnique(RPATH={pressure['rpaths']!r})",
+        ])
     for index, source in enumerate(sources):
         target = build_dir / "extra" / f"{index:03d}_{source.stem}"
         injection.append(
@@ -356,6 +397,9 @@ def build(
     script = source_dir / "SConstruct.pipeline"
     script.write_text(original.replace(anchor, "\n".join(injection) + "\n" + anchor), encoding="utf-8")
     build_inputs = {**input_hashes, **{str(path): file_identity(path)["sha256"] for path in (script, recorder_module)}}
+    if pressure is not None:
+        build_inputs.update({entry["path"]: entry["sha256"] for entry in pressure["inputs"]})
+        build_inputs[pressure_backend["manifest"]] = pressure_backend["sha256"]
     env = _python_environment()
     env["LIBRARY_PATH"] = str(fftw_library_dir) + (
         os.pathsep + env["LIBRARY_PATH"] if env.get("LIBRARY_PATH") else ""
@@ -377,6 +421,9 @@ def build(
                       "extra_sources": [str(path) for path in sources],
                       "patched_sources": [str(path) for path in patched],
                       "command_receipts": str(receipt_directory)}
+    if pressure is not None:
+        build_manifest["pressure_backend"] = pressure_backend
+        build_manifest["pressure_runtime_source"] = pressure_runtime_binding
     if gpu_build:
         build_manifest["gpu"] = gpu_build
     (build_dir / "build-command.json").write_text(
@@ -396,6 +443,9 @@ def build(
         if snapshot_inputs(input_roots, exclude=[build_dir]) != input_hashes:
             raise ValueError("Source/header inventory changed during compilation")
         directories = [receipt_directory]
+        if pressure is not None:
+            require_pressure_backend(pressure_backend, fortran=selected_fortran)
+            directories.append(pressure["command_receipts"])
         if gpu_build:
             directories.append(gpu_build["command_receipts"])
         receipt = summarize_build(binary, directories, build_inputs)

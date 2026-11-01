@@ -18,6 +18,8 @@ from .guard import available
 from .identity import digest, read, write
 from .launch_environment import apply_launch_environment, launch_environment_values
 from .prepare import check, validate_cpu_placement
+from .prepared_modes import load_adapter
+from .pressure_cache import apply_pressure_cache
 from .targets import evaluate_target, target_seconds
 from .transfers import aggregate_final_statistics
 
@@ -57,6 +59,7 @@ def run_one(root, state, case, mode, directory, *, traced):
     env = environment(state["threads"], traced=traced and mode["name"] != "native",
                       cpu_placement=state.get("cpu_placement"),
                       openmp_launch_environment=state.get("openmp_launch_environment"))
+    cache = apply_pressure_cache(root, state, mode, env)
     if directory.exists():
         raise ValueError("existing run evidence is immutable: " + str(directory))
     shutil.copytree(root / case["config"], directory)
@@ -82,9 +85,10 @@ def run_one(root, state, case, mode, directory, *, traced):
               "environment": {key: env.get(key) for key in ("OMP_NUM_THREADS", "OMP_DYNAMIC", "OMP_PLACES",
                   "OMP_PROC_BIND", "GOMP_CPU_AFFINITY", "CUDA_VISIBLE_DEVICES")},
               "openmp_launch_environment": launch_environment_values(env),
+              "pressure_kernel_cache": cache,
               "diagnostic_wall_seconds" if traced else "wall_seconds": wall}
     if traced:
-        adapter = read(root / mode["adapter"]) if "adapter" in mode else {}
+        adapter = load_adapter(root / mode["adapter"]) if "adapter" in mode else {}
         record["activity"] = gpu_activity(result.stdout + result.stderr, "local", adapter.get("regions", []),
                                            scope_manifest=adapter.get("scope_manifest"),
                                            scope_packages=adapter.get("scope_packages"))

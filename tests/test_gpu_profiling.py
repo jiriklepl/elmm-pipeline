@@ -73,6 +73,102 @@ class GPUProfilingTests(unittest.TestCase):
         self.assertFalse(metrics["available"])
         self.assertIn("Could not read", metrics["reason"])
 
+    def test_old_mixed_trace_reports_graph_aggregates_without_inventing_kernels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "gpu.sqlite"
+            self.fixture(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute('CREATE TABLE CUPTI_ACTIVITY_KIND_GRAPH_TRACE (start INTEGER, "end" INTEGER)')
+                connection.executemany('INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES (?,?)',
+                                       [(-1000, 20000), (0, 5000)])
+            metrics = parse_nsys_sqlite(path)
+        self.assertTrue(metrics["available"])
+        self.assertEqual(metrics["status"], "partial")
+        self.assertFalse(metrics["kernel_inventory_complete"])
+        self.assertEqual(metrics["kernel_count"], 2)
+        self.assertAlmostEqual(metrics["kernel_seconds"], 0.000010)
+        self.assertEqual(metrics["graph_aggregate_count"], 2)
+        self.assertAlmostEqual(metrics["graph_aggregate_seconds"], 0.000026)
+        self.assertAlmostEqual(metrics["gpu_span_seconds"], 0.000021)
+        self.assertTrue(metrics["graph_timing_available"])
+        self.assertIsNone(metrics["graph_node_kernel_count"])
+
+    def test_graph_only_capture_has_no_individual_kernel_count_or_duration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "graph.sqlite"
+            with sqlite3.connect(path) as connection:
+                connection.execute('CREATE TABLE CUPTI_ACTIVITY_KIND_GRAPH_TRACE (start INTEGER, "end" INTEGER)')
+                connection.execute('INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES (1000, 8000)')
+            metrics = parse_nsys_sqlite(path)
+        self.assertEqual(metrics["status"], "partial")
+        self.assertTrue(metrics["graph_timing_available"])
+        self.assertFalse(metrics["kernel_timing_available"])
+        self.assertIsNone(metrics["kernel_count"])
+        self.assertIsNone(metrics["kernel_seconds"])
+        self.assertIsNone(metrics["transfer_seconds"])
+        self.assertEqual(metrics["graph_aggregate_count"], 1)
+        self.assertAlmostEqual(metrics["gpu_span_seconds"], 0.000007)
+
+    def test_node_trace_excludes_null_and_zero_ids_without_certifying_full_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "nodes.sqlite"
+            self.fixture(path, copies=False)
+            with sqlite3.connect(path) as connection:
+                connection.execute('ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL ADD COLUMN graphNodeId INTEGER')
+                connection.execute('UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET graphNodeId=0 WHERE start=1000')
+                connection.execute('UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET graphNodeId=8 WHERE start=2000')
+                connection.execute('INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (9000, 10000, 1, NULL)')
+            metrics = parse_nsys_sqlite(path)
+        self.assertEqual(metrics["status"], "ok")
+        self.assertEqual(metrics["kernel_count"], 3)
+        self.assertEqual(metrics["graph_node_kernel_count"], 1)
+        self.assertAlmostEqual(metrics["kernel_seconds"], 0.000011)
+        self.assertIsNone(metrics["graph_aggregate_count"])
+        self.assertIsNone(metrics["graph_aggregate_seconds"])
+        self.assertIsNone(metrics["kernel_inventory_complete"])
+
+    def test_direct_zero_ids_have_no_graph_nodes_in_older_concurrent_kernel_table(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "direct.sqlite"
+            self.fixture(path, copies=False)
+            with sqlite3.connect(path) as connection:
+                connection.execute('ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL ADD COLUMN graphNodeId INTEGER')
+                connection.execute('UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET graphNodeId=0')
+                connection.execute('ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL RENAME TO CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL')
+            metrics = parse_nsys_sqlite(path)
+        self.assertEqual(metrics["kernel_count"], 2)
+        self.assertEqual(metrics["graph_node_kernel_count"], 0)
+        self.assertAlmostEqual(metrics["kernel_seconds"], 0.000010)
+        self.assertIsNone(metrics["kernel_inventory_complete"])
+
+    def test_aggregate_and_node_rows_remain_separate_even_when_they_overlap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "mixed.sqlite"
+            self.fixture(path)
+            with sqlite3.connect(path) as connection:
+                connection.execute('ALTER TABLE CUPTI_ACTIVITY_KIND_KERNEL ADD COLUMN graphNodeId INTEGER')
+                connection.execute('UPDATE CUPTI_ACTIVITY_KIND_KERNEL SET graphNodeId=3')
+                connection.execute('CREATE TABLE CUPTI_ACTIVITY_KIND_GRAPH_TRACE (start INTEGER, "end" INTEGER)')
+                connection.execute('INSERT INTO CUPTI_ACTIVITY_KIND_GRAPH_TRACE VALUES (0,10000)')
+            metrics = parse_nsys_sqlite(path)
+        self.assertEqual(metrics["kernel_count"], 2)
+        self.assertEqual(metrics["graph_node_kernel_count"], 2)
+        self.assertAlmostEqual(metrics["kernel_seconds"], 0.000010)
+        self.assertAlmostEqual(metrics["graph_aggregate_seconds"], 0.000010)
+        self.assertFalse(metrics["kernel_inventory_complete"])
+
+    def test_empty_graph_table_does_not_invent_aggregate_activity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "empty_graph.sqlite"
+            self.fixture(path, copies=False)
+            with sqlite3.connect(path) as connection:
+                connection.execute('CREATE TABLE CUPTI_ACTIVITY_KIND_GRAPH_TRACE (start INTEGER, "end" INTEGER)')
+            metrics = parse_nsys_sqlite(path)
+        self.assertEqual(metrics["status"], "ok")
+        self.assertIsNone(metrics["graph_aggregate_count"])
+        self.assertFalse(metrics["graph_timing_available"])
+        self.assertIsNone(metrics["kernel_inventory_complete"])
+
     def test_missing_profiler_does_not_run_application(self):
         with tempfile.TemporaryDirectory() as temporary, \
              patch("elmm_pipeline.gpu_profiling.shutil.which", return_value=None), \
@@ -97,6 +193,7 @@ class GPUProfilingTests(unittest.TestCase):
                     self.fixture(prefix.with_suffix(".sqlite"))
                     prefix.with_suffix(".nsys-rep").touch()
                     kwargs["stdout"].write("application result\n")
+                    self.assertEqual(argv.count("--cuda-graph-trace=node"), 1)
                     self.assertIn("--sample=none", argv)
                     self.assertIn("--cpuctxsw=none", argv)
                     self.assertEqual(argv[-2:], ["/bin/application", "--option"])

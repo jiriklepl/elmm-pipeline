@@ -349,6 +349,8 @@ class GPUValidationTests(unittest.TestCase):
                     record.update(queue_enabled=int(complete), graphs_enabled=int(not complete),
                                   pending_tasks=int(not complete), peak_pending_tasks=1)
                 records.append(record)
+                records.append({**record, "domain_version": 1, "domain": context, "domain_role": "storage"})
+                records.append({**record, "domain_version": 1, "domain": context + 10, "domain_role": "execution"})
         log = "".join("FORT_SCOPED evidence " + json.dumps(record) + "\n" for record in records)
         activity = gpu_activity(log, "local", [])
         self.assertEqual(activity["scoped_runtime"]["modeled_evidence"], records)
@@ -356,6 +358,30 @@ class GPUValidationTests(unittest.TestCase):
         self.assertEqual(activity["kernel_launches"], 0)
         self.assertEqual(activity["allocations"], 0)
         self.assertEqual((activity["upload_bytes"], activity["download_bytes"]), (0, 0))
+
+    def test_evidence_rejects_incomplete_or_inconsistent_domain_attribution(self):
+        # Domain metadata links the execution context to its storage owner.
+        # It does not assert execution or replace lifecycle trace validation.
+        records = [
+            {"schema_version": 1, "context": 5, "event": "end", "rows": 0,
+             "complete": True, "truncated": False},
+            {"schema_version": 1, "context": 5, "event": "graph_statistics", "stats_version": 1,
+             "complete": False, **dict.fromkeys(("creations", "instantiations", "rebuilds", "submissions",
+                "replays", "parameter_updates", "logical_kernels", "live_graphs", "destructions"), 0)},
+        ]
+        for record in records:
+            valid = {**record, "domain_version": 1, "domain": 2, "domain_role": "execution"}
+            changes = [{"domain_version": value} for value in (True, 0, 2, "1")]
+            changes += [{"domain": value} for value in (True, 0, -1, 2**64, 2.0, "2")]
+            changes += [{"domain_role": value} for value in (None, "unknown", "storage")]
+            changes += [{"domain": 5}, {"context": 0}]
+            for change in changes:
+                with self.subTest(event=record["event"], change=change), self.assertRaises(ValueError):
+                    scoped_modeled_evidence("FORT_SCOPED evidence " + json.dumps({**valid, **change}) + "\n")
+            for field in ("domain_version", "domain", "domain_role"):
+                missing = {key: value for key, value in valid.items() if key != field}
+                with self.subTest(event=record["event"], missing=field), self.assertRaises(ValueError):
+                    scoped_modeled_evidence("FORT_SCOPED evidence " + json.dumps(missing) + "\n")
 
     def test_current_runtime_statistics_reject_missing_unknown_or_wrong_typed_fields(self):
         statistics = {

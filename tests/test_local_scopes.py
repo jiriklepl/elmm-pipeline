@@ -12,7 +12,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from elmm_pipeline.local_adapter import (
     LocalAdapterError,
     apply_scope_sources,
@@ -96,11 +95,26 @@ print(json.dumps(metadata))
     return directory,pipeline,compiler,source,output,json.loads(response.stdout)
 
 
+def assert_fixture_cuda_inventory(metadata, output, module="source_application"):
+    manifest = metadata["scope_manifest"]
+    assert set(manifest["scopes"][0]["gpu_leaves"]) == {
+        f"{module}::{name}#region1" for name in ("produce", "native_scale", "consume")}
+    units = [item for item in manifest["build_sources"] if item["language"] == "cuda"]
+    assert [item["role"] for item in units].count("common_runtime") == 1
+    assert [item["role"] for item in units].count("shared_entry") == 3
+    sources = [str(output / item["path"]) for item in units]
+    assert [item["source"] for item in metadata["gpu_sources"]] == sources
+    assert len(sources) == len(set(sources))
+    for item in units:
+        assert hashlib.sha256((output / item["path"]).read_bytes()).hexdigest() == \
+            manifest["artifacts_sha256"][item["path"]]
+
+
 def test_independent_checkouts_form_and_apply_public_scope(independent,tmp_path):
     directory,pipeline,_compiler,source,output,metadata=independent
     assert metadata["scope_manifest"]["scope_count"]==1
     assert metadata["scope_manifest"]["runtime"]["link_once"]
-    assert len(metadata["gpu_sources"])==3 # two entries and one common runtime
+    assert_fixture_cuda_inventory(metadata, output)
     expected = [str(output / item["path"]) for item in metadata["scope_manifest"]["build_sources"]
                 if item["language"] == "fortran" and item["role"] != "original_source"]
     assert metadata["extra_sources"] == expected
@@ -146,7 +160,13 @@ def test_independent_compiler_packages_compose_without_ir_or_source_merging(inde
                for package, source in zip(packages, originals))
     common = [item for item in bundle["build_artifacts"] if item["role"] == "common_runtime"]
     assert len(common) == 3 and all(item["packages"] == [0, 1] for item in common)
-    assert len(bundle["gpu_sources"]) == 5
+    for index, (name, package) in enumerate(zip(("first", "second"), packages)):
+        assert_fixture_cuda_inventory(package, tmp_path / f"artifacts_{index}", f"{name}_application")
+    cuda = [item for item in bundle["build_artifacts"] if item["language"] == "cuda"]
+    assert [item["role"] for item in cuda].count("common_runtime") == 1
+    assert [item["role"] for item in cuda].count("shared_entry") == 6
+    assert [item["source"] for item in bundle["gpu_sources"]] == [item["source"] for item in cuda]
+    assert len({item["source"] for item in cuda}) == len(cuda)
 
 
 @pytest.mark.parametrize("execution", ["bounded", "reached"])
@@ -221,7 +241,8 @@ def test_independent_adapter_transports_reached_execution_without_choosing_segme
     assert manifest['scope_count'] == 1
     assert manifest['scopes'][0]['native_continuation'].startswith('original lexical scope')
     plan = manifest['scopes'][0]['checked_execution_plan']
-    assert plan['schema_version'] == 1
+    assert plan['schema_version'] == 2
+    assert_fixture_cuda_inventory(metadata, tmp_path / 'reached')
     assert len(plan['execution_identity']) == 64
     assert plan['entry'] == manifest['entry'] == 'source_application::step'
     assert plan['sources'] == manifest['source_inputs']
@@ -369,7 +390,9 @@ print(json.dumps(compile_gpu_sources(metadata['gpu_sources'],Path(sys.argv[2]),{
     result=checked([sys.executable,"-c",script,str(output/"scope-transformation.json"),str(tmp_path)],
                    cwd=directory,env={**os.environ,"PYTHONPATH":str(pipeline)})
     linked=json.loads(result.stdout)
-    assert len(linked["objects"])==3
+    assert_fixture_cuda_inventory(metadata, output)
+    assert len(linked["objects"]) == len(metadata["gpu_sources"])
+    assert len(set(linked["objects"])) == len(linked["objects"])
     objects=[]
     # The common modules precede interfaces which USE them. SCons discovers
     # those dependencies in production; this manual linker fixture uses the

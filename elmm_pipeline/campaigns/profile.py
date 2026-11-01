@@ -21,6 +21,7 @@ from .identity import digest, write
 from .launch_environment import launch_environment_values
 from .prepare import check
 from .run import environment
+from .pressure_cache import apply_pressure_cache
 
 
 # The profiler may return when collection ends while its target keeps running.
@@ -67,9 +68,9 @@ def wait_completion(path, token, deadline):
 
 
 def command(profiler, prefix, binary, arguments, seconds):
-    if type(seconds) is not int or not 1 <= seconds <= 30:
-        raise ValueError("capture duration must be between one and thirty seconds")
-    return [str(profiler), "profile", "--trace=cuda,nvtx", "--sample=none", "--cpuctxsw=none",
+    if type(seconds) is not int or not 1 <= seconds <= 120:
+        raise ValueError("capture duration must be between one and 120 seconds")
+    return [str(profiler), "profile", "--trace=cuda,nvtx", "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none",
             "--backtrace=none", "--cudabacktrace=none", "--resolve-symbols=false",
             "--cuda-memory-usage=false", "--cuda-event-trace=false", "--cuda-trace-all-apis=false",
             "--cuda-flush-interval=0", "--duration=" + str(seconds), "--kill=none", "--export=sqlite",
@@ -92,13 +93,14 @@ def profile(root, output, *, case, mode, profiler, seconds=2):
                         *selected_case["configuration"]["runtime_arguments"]]
     argv = command(executable, prefix, sys.executable,
                    [str(target), str(completion), str(application_log), token, *application_argv], seconds)
+    env = environment(state["threads"], traced=False, cpu_placement=state.get("cpu_placement"),
+                      openmp_launch_environment=state.get("openmp_launch_environment"))
+    env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
+    cache = apply_pressure_cache(root, state, selected_mode, env)
     shutil.copytree(root / selected_case["config"], output)
     if any(path.exists() for path in (target, completion, application_log)):
         raise ValueError("configuration collides with profiler target completion files")
     target.write_text(TARGET_WRAPPER)
-    env = environment(state["threads"], traced=False, cpu_placement=state.get("cpu_placement"),
-                      openmp_launch_environment=state.get("openmp_launch_environment"))
-    env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     record = {"schema_version": 1, "status": "in_progress", "case": case, "mode": mode,
               "argv": argv, "cwd": str(output), "campaign_sha256": digest(root / "campaign.json"),
               "profiler_sha256": digest(executable), "helper_sha256": digest(__file__),
@@ -109,6 +111,7 @@ def profile(root, output, *, case, mode, profiler, seconds=2):
               "phase_timer_enabled": False, "runtime_trace_enabled": False, "timing_sample": False,
               "threads": state["threads"], "gpu_uuid": state["selected_gpu_uuid"],
               "openmp_launch_environment": launch_environment_values(env),
+              "pressure_kernel_cache": cache,
               "coverage": "bounded trace; full-run device totals require independent count/byte agreement",
               "overlap_claimed": False, "durations_are_additive_application_budget": False}
     write(output / "report.json", record)

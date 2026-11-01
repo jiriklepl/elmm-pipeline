@@ -23,6 +23,10 @@ import uuid
 def _empty_metrics(reason: str) -> dict:
     return {"available": False, "status": "unavailable", "reason": reason,
             "kernel_seconds": None, "kernel_count": None,
+            "graph_aggregate_seconds": None, "graph_aggregate_count": None,
+            "graph_node_kernel_count": None, "graph_timing_available": False,
+            "kernel_inventory_complete": None,
+            "kernel_inventory_reason": "No independent full-application kernel coverage check was performed",
             "transfer_seconds": None, "transfer_count": None,
             "h2d_bytes": None, "d2h_bytes": None, "transfer_bytes": None,
             "gpu_span_seconds": None, "kernels": [], "transfers": [],
@@ -36,6 +40,8 @@ def parse_nsys_sqlite(path: Path) -> dict:
     Missing activity tables or empty tables stay unavailable (None), avoiding
     an apparent zero-cost GPU result when CUPTI tracing was unsupported. Kernel
     and transfer availability are recorded separately for compute-only traces.
+    Graph aggregates remain separate and mark the kernel inventory incomplete;
+    node activity alone does not prove that the whole application was captured.
     """
     path = path.resolve()
     metrics = _empty_metrics("No CUDA kernel activity was recorded")
@@ -61,6 +67,13 @@ def parse_nsys_sqlite(path: Path) -> dict:
                     starts.append(first)
                     ends.append(last)
                     columns = {row[1] for row in connection.execute(f"PRAGMA table_info({kernel_table})")}
+                    if "graphNodeId" in columns:
+                        # CUPTI uses zero for non-graph launches; Nsight
+                        # exports may instead represent that absence as NULL.
+                        metrics["graph_node_kernel_count"] = connection.execute(
+                            f'SELECT COUNT(*) FROM {kernel_table} '
+                            'WHERE graphNodeId IS NOT NULL AND graphNodeId != 0'
+                        ).fetchone()[0]
                     name_column = next((name for name in ("demangledName", "shortName") if name in columns), None)
                     if name_column and "StringIds" in tables:
                         rows = connection.execute(
@@ -70,6 +83,22 @@ def parse_nsys_sqlite(path: Path) -> dict:
                         )
                         metrics["kernels"] = [{"name": name, "count": count, "seconds": duration / 1e9}
                                               for name, count, duration in rows]
+            if "CUPTI_ACTIVITY_KIND_GRAPH_TRACE" in tables:
+                count, nanoseconds, first, last = connection.execute(
+                    'SELECT COUNT(*), SUM("end"-start), MIN(start), MAX("end") '
+                    'FROM CUPTI_ACTIVITY_KIND_GRAPH_TRACE'
+                ).fetchone()
+                if count:
+                    # Default graph tracing records aggregate intervals instead
+                    # of constituent kernels. These may overlap node/copy events;
+                    # never add their durations or counts to kernel totals.
+                    metrics.update(available=True, status="partial",
+                                   reason="CUDA graph aggregates omit individual graph kernel activity",
+                                   graph_aggregate_count=count, graph_aggregate_seconds=nanoseconds / 1e9,
+                                   graph_timing_available=True, kernel_inventory_complete=False,
+                                   kernel_inventory_reason="Graph aggregates prevent a complete individual-kernel inventory")
+                    starts.append(first)
+                    ends.append(last)
             if "CUPTI_ACTIVITY_KIND_MEMCPY" in tables:
                 rows = connection.execute(
                     'SELECT copyKind, COUNT(*), SUM("end"-start), SUM(bytes), MIN(start), MAX("end") '
@@ -136,7 +165,7 @@ def profile_command(
         return metrics["reason"] + "\n", 0.0, metrics
     prefix = directory / ("gpu-profile-" + uuid.uuid4().hex[:8])
     log_path = prefix.with_suffix(".log")
-    command = [profiler, "profile", "--trace=cuda", "--sample=none", "--cpuctxsw=none",
+    command = [profiler, "profile", "--trace=cuda", "--cuda-graph-trace=node", "--sample=none", "--cpuctxsw=none",
                "--export=sqlite", "--force-overwrite=true", "--output=" + str(prefix), *map(str, binary_args)]
     (directory / "gpu-profile-command.json").write_text(
         json.dumps({"argv": command, "cwd": str(cwd.resolve()), "timeout_seconds": timeout,

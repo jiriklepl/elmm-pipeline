@@ -32,6 +32,15 @@ def _checked_execution_plans(manifest, *, capture_facts=None):
         raise LocalAdapterError(str(error)) from error
 
 
+def _pressure_backend(manifest):
+    from .gpu_pressure_build import pressure_backend_from_manifest
+
+    try:
+        return pressure_backend_from_manifest(manifest)
+    except ValueError as error:
+        raise LocalAdapterError(str(error)) from error
+
+
 def _numerical_build_fields(item):
     if not isinstance(item, dict):
         raise LocalAdapterError("Compiler numerical build metadata requires a source descriptor")
@@ -541,6 +550,9 @@ def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: P
             raise LocalAdapterError("Normalized source changed while its compiler scope artifacts were prepared")
     metadata={"tool":"local","memory_model":"scoped","entry":entry,"changed":bool(manifest["scope_count"]),
               "command":command,"compiler_report":report,"scope_manifest":manifest,"artifact_root":str(output_dir)}
+    pressure = _pressure_backend(manifest)
+    if pressure is not None:
+        metadata["pressure_backend"] = pressure
     if cost_path is not None:
         metadata["scope_cost"] = {"path": str(cost_path), "sha256": cost_identity}
     from .application_build import selection_builds
@@ -584,11 +596,12 @@ def _prepare_scope_sources(metadata, destinations):
     _owner_measurements(manifest)
     root=Path(metadata["artifact_root"]).resolve(strict=True)
     prepared=[]
-    dependencies=manifest.get("analysis_sources") or {}
-    for source,digest in dependencies.get("dependencies",{}).items():
-        dependency=Path(destinations.get(source,source)).resolve(strict=True)
-        if hashlib.sha256(dependency.read_bytes()).hexdigest()!=digest:
-            raise LocalAdapterError("Configured source dependency changed before applying approved scope: "+source)
+    for component in manifest.get("component_manifests", [manifest]):
+        dependencies=component.get("analysis_sources") or {}
+        for source,digest in dependencies.get("dependencies",{}).items():
+            dependency=Path(destinations.get(source,source)).resolve(strict=True)
+            if hashlib.sha256(dependency.read_bytes()).hexdigest()!=digest:
+                raise LocalAdapterError("Configured source dependency changed before applying approved scope: "+source)
     for source,digest in manifest["source_inputs"].items():
         path=Path(destinations.get(source,source)).resolve(strict=True)
         if hashlib.sha256(path.read_bytes()).hexdigest()!=digest:
@@ -638,6 +651,8 @@ def _scope_package_build(metadata):
     manifest = metadata["scope_manifest"]
     _require_supported_scope_build(manifest)
     _checked_execution_plans(manifest)
+    if metadata.get("pressure_backend") != _pressure_backend(manifest):
+        raise LocalAdapterError("Scope pressure backend differs from its checked epoch")
     measurement = _owner_measurements(manifest)
     try:
         root = Path(metadata["artifact_root"]).resolve(strict=True)
@@ -737,8 +752,10 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
     if any(selection_builds(package.get("scope_manifest", {})) for package in packages):
         raise LocalAdapterError("Priced selection bundles require one compiler-issued package and its complete build attestation")
     replacements, artifacts, artifact_hashes, runtime = {}, {}, {}, None
+    pressure_requests = []
     for index, metadata in enumerate(packages):
         package_runtime, build, package_hashes = _scope_package_build(metadata)
+        pressure_requests.append(metadata.get("pressure_backend"))
         if package_runtime is not None:
             if runtime is not None and package_runtime != runtime:
                 raise LocalAdapterError("Scope packages require exactly matching runtime identities and artifacts")
@@ -766,9 +783,20 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
                 previous["packages"].append(index)
             else:
                 artifacts[name] = {**item, "packages": [index]}
+    from .gpu_pressure_build import combine_pressure_backends
+    from .original_worksharing_record import (
+        validate_original_worksharing_package_constraints,
+    )
+
+    try:
+        validate_original_worksharing_package_constraints(package["scope_manifest"] for package in packages)
+        pressure = combine_pressure_backends(pressure_requests)
+    except ValueError as error:
+        raise LocalAdapterError(str(error)) from error
     for destination, content in replacements.items():
         destination.write_bytes(content)
     return {"schema_version": 1, "tool": "local", "memory_model": "scoped",
+            **({"pressure_backend": pressure} if pressure is not None else {}),
             **({"measurement_only": True} if any(p["scope_manifest"].get("scope_measurement") for p in packages) else {}),
             "scope_packages": packages, "runtime": runtime, "build_artifacts": list(artifacts.values()),
             "patched_sources": [str(path) for path in replacements],

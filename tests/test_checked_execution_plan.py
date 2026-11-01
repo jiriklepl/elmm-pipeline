@@ -9,10 +9,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
 from elmm_pipeline.checked_execution_plan import validate_checked_execution_plans
-from elmm_pipeline.local_adapter import LocalAdapterError, apply_scope_sources, compose_scope_packages, transform_scopes
-from test_scope_composition import package, save, sources, unchanged  # noqa: F401 - shared fixture
+from elmm_pipeline.local_adapter import (
+    LocalAdapterError,
+    apply_scope_sources,
+    compose_scope_packages,
+    transform_scopes,
+)
+from test_scope_composition import package, save, unchanged
+from test_scope_composition import sources as _shared_sources
+
+sources = _shared_sources
 
 
 def digest(value):
@@ -222,7 +229,9 @@ def test_checked_plan_preserved_in_composition_without_placement_decisions(tmp_p
 
 @pytest.mark.parametrize("change,reason", [
     (lambda p: p.update(schema_version=True), "schema version"),
-    (lambda p: p.update(schema_version=2), "schema version"),
+    (lambda p: p.update(schema_version=6), "schema version"),
+    (lambda p: p.update(schema_version=4), "complete v4 schema"),
+    (lambda p: p.update(schema_version=5), "complete v5 schema"),
     (lambda p: p.update(unknown_field="unsupported"), "complete v1 schema"),
     (lambda p: p.pop("policy"), "complete v1 schema"),
     (lambda p: p.update(configuration_identity="bad"), "SHA256"),
@@ -348,5 +357,324 @@ def test_checked_plan_cannot_authorize_exact_window_build_contract(tmp_path, sou
     metadata["scope_manifest"]["scopes"][0]["exact_window"] = {"schema_version": exact_window_version}
     save(metadata)
     with pytest.raises(LocalAdapterError, match="Exact-window"):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+def seal_epoch_plan(plan):
+    epoch = plan["storage_epoch"]
+    for member in epoch["members"]:
+        for transfer in member["storage_transfers"]:
+            seal(transfer)
+        for task in member.get("device_tasks", []):
+            seal(task)
+    seal(epoch)
+    plan["execution_identity"] = digest({
+        "execution_identity_version": 2,
+        **{key: copy.deepcopy(plan[key]) for key in ("entry", "sources", "source_inputs_identity", "configuration_identity",
+                                                     "capture_facts_identity", "resources", "numerical_invocations", "gpu_leaves")},
+        "procedures": [{"procedure": row["procedure"], "emission_identity": row["emission_identity"]}
+                       for row in plan["procedures"]], "storage_epoch_identity": epoch["identity"],
+    })
+    seal(plan)
+
+
+def with_epoch(metadata, *, opaque=False, transfer=False):
+    plan = with_plan(metadata)
+    plan["schema_version"] = 2
+    if opaque:
+        plan["procedures"][0]["units"][0]["resources"] = {}
+    if transfer:
+        plan["resources"].append({"resource": "argument::b", "registration_identity": 2, "descriptor": {"rank": 1}})
+        plan["procedures"][0]["units"][0]["resources"]["argument::b"] = "argument::b"
+    procedure = plan["procedures"][0]
+    procedure["boundaries"] = [{"first_line": 2, "last_line": 2, "reason": "original opaque mutation",
+                                "execution": "publish and close when reached; original continuation once", "reopen": True}]
+    resources = []
+    for original in plan["resources"]:
+        facts = ({"storage": "opaque host reservation", "lifetime": "original checked native access",
+                  "device_replica_authorized": False, "initialization_authorized": False} if opaque else
+                 {"storage": "stable", "lifetime": "invocation", "allocation_changes": False, "escapes": False,
+                  "device_replica_authorized": True})
+        resources.append({**copy.deepcopy(original), **facts})
+    epoch = {
+        "version": 1, "entry": plan["entry"],
+        "source_inputs": {"schema_version": 1, "sources": copy.deepcopy(plan["sources"]),
+                          "dependencies": {}, "configuration": None, "entries": []},
+        "resources": resources,
+        "members": [{"procedure": procedure["procedure"], "source_graph": procedure["structured_summary_identity"],
+                     "units": [{"ordinal": unit["ordinal"], "selected_node_ids": copy.deepcopy(unit["selected_node_ids"]),
+                                "canonical_resources": copy.deepcopy(unit["resources"])} for unit in procedure["units"]],
+                     "retirement_cuts": copy.deepcopy(procedure["boundaries"]), "storage_transfers": []}],
+        "activation": "first reached managed access; no descriptor evaluation on zero-trip paths",
+        "lifetime": "checked original invocation between mandatory retirement cuts",
+        "generation": "runtime-checked allocation generation; never inferred from address reuse",
+        "readonly": "add a valid replica; preserve other current replicas",
+        "writes": "invalidate only overlapping regions after ordered completion",
+        "return": "checked children borrow; unmanaged return publishes observable storage",
+        "definitions_authorized": False, "placement_authorized": False, "cross_cut_retention_authorized": False,
+    }
+    plan["storage_epoch"] = epoch
+    if transfer:
+        associations = []
+        for formal, resource in (("left", "argument::a"), ("right", "argument::b")):
+            associations.append({"formal": formal, "actual": resource.split("::")[-1], "entry_definition_kill": False,
+                "formal_descriptor": {"name": formal, "resource": "argument::" + formal, "type": "real", "kind": 8,
+                    "rank": 1, "intent": "inout", "attributes": ["allocatable", "intent"], "lower_bounds": ["1"],
+                    "shape": [{"kind": "Deferred_Shape_Spec", "source": ":", "bounds": [None, None]}]},
+                "actual_type": {"type": "real", "kind": 8, "rank": 1, "storage_resource": resource, "declaring_type": None}})
+        call = {"schema_version": 1, "procedure": "source::exchange", "target": "exchange", "source_kind": "module",
+            "formal_arguments": ["left", "right"], "actual_arguments": ["a", "b"], "associations": associations,
+            "original_arguments": [{"position": index, "formal": formal, "keyword": None, "actual": actual}
+                                   for index, (formal, actual) in enumerate((("left", "a"), ("right", "b")))],
+            "actual_evaluation": "unchanged original call position and guards", "effect_authority": False,
+            "capture_authority": False, "alias_authority": False, "completion_authority": False, "execution_authority": False}
+        epoch["members"][0]["storage_transfers"].append({"version": 1, "procedure": plan["entry"],
+            "source_graph": procedure["structured_summary_identity"], "selected_node_ids": [plan["entry"] + "/body/1"],
+            "callee": "source::exchange", "source_inputs": copy.deepcopy(epoch["source_inputs"]), "call": call,
+            "body": ["CALL move_alloc(left, temporary)", "CALL move_alloc(right, left)", "CALL move_alloc(temporary, right)"],
+            "resources": ["argument::a", "argument::b"],
+            "transition": "exchange allocation associations; physical generations and replicas survive",
+            "payload_reads": False, "payload_writes": False, "initialization_authorized": False,
+            "runtime_guard": "both current layouts match opposite live allocations after the original call",
+            "on_unproved_mutation": "publish and retire before original source operation"})
+    seal_epoch_plan(plan)
+    save(metadata)
+    return plan
+
+
+@pytest.mark.parametrize("variant", ["managed", "opaque", "transfer"])
+def test_v2_storage_epoch_transports_exact_source_lifetime_without_execution_authority(tmp_path, sources, variant):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_epoch(metadata, opaque=variant == "opaque", transfer=variant == "transfer")
+    expected = copy.deepcopy(plan)
+    validate_checked_execution_plans(metadata["scope_manifest"])
+    bundle = compose_scope_packages([metadata], sources[1])
+    assert bundle["scope_packages"][0]["scope_manifest"]["scopes"][0]["checked_execution_plan"] == expected
+    assert expected["storage_epoch"]["definitions_authorized"] is False
+    assert expected["storage_epoch"]["placement_authorized"] is False
+    assert expected["storage_epoch"]["cross_cut_retention_authorized"] is False
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    (lambda e: e.update(extra=True), "complete v1 schema"),
+    (lambda e: e.update(version=True), "unsupported version"),
+    (lambda e: e.update(entry="foreign"), "entry differs"),
+    (lambda e: e["source_inputs"].update(extra=True), "source inputs"),
+    (lambda e: e["source_inputs"]["sources"].clear(), "source inputs"),
+    (lambda e: e.update(definitions_authorized=True), "cannot authorize"),
+    (lambda e: e.update(placement_authorized=0), "cannot authorize"),
+    (lambda e: e.update(cross_cut_retention_authorized=True), "cannot authorize"),
+    (lambda e: e.update(readonly="invalidate other replicas"), "lifetime policy"),
+    (lambda e: e.update(resources=[]), "canonical resources"),
+    (lambda e: e["resources"][0].update(registration_identity=True), "canonical descriptor"),
+    (lambda e: e["resources"][0]["descriptor"].update(rank=True), "canonical descriptor"),
+    (lambda e: e["resources"][0].update(allocation_changes=True), "capture facts"),
+    (lambda e: e["resources"][0].update(escapes=0), "capture facts"),
+    (lambda e: e["resources"][0].update(initialization_authorized=True), "capture facts"),
+    (lambda e: e.update(members=[]), "members differ"),
+    (lambda e: e["members"][0].update(extra=True), "complete member"),
+    (lambda e: e["members"][0].update(source_graph="0" * 64), "source graph"),
+    (lambda e: e["members"][0]["units"][0].update(ordinal=False), "selected units"),
+    (lambda e: e["members"][0]["units"][0].update(selected_node_ids=["foreign"]), "selected units"),
+    (lambda e: e["members"][0]["units"][0]["canonical_resources"].clear(), "canonical mappings"),
+    (lambda e: e["members"][0].update(retirement_cuts=[]), "mandatory retirement cuts"),
+    (lambda e: e["members"][0].update(storage_transfers={}), "storage transfer records"),
+])
+def test_v2_epoch_mutation_rejected_before_edits_even_with_resealed_identities(tmp_path, sources, change, reason):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_epoch(metadata)
+    change(plan["storage_epoch"])
+    # A malformed transfer container is intentionally not normalized by the test's seal helper.
+    if isinstance(plan["storage_epoch"]["members"], list) and all(isinstance(m.get("storage_transfers"), list) for m in plan["storage_epoch"]["members"]):
+        seal_epoch_plan(plan)
+    else:
+        seal(plan["storage_epoch"])
+        seal(plan)
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="storage epoch .*" + reason):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    (lambda t: t.update(extra=True), "complete v1 schema"),
+    (lambda t: t.update(version=True), "unsupported version"),
+    (lambda t: t.update(source_graph="0" * 64), "source linkage"),
+    (lambda t: t.update(selected_node_ids=["foreign/body/1"]), "original call selection"),
+    (lambda t: t.update(resources=["argument::a", "argument::a"]), "distinct original storage"),
+    (lambda t: t.update(payload_reads=True), "payload access"),
+    (lambda t: t.update(payload_writes=0), "payload access"),
+    (lambda t: t.update(initialization_authorized=True), "payload access"),
+    (lambda t: t.update(runtime_guard="unchecked"), "transition policy"),
+    (lambda t: t["call"].update(extra=True), "exact original call schema"),
+    (lambda t: t["call"].update(execution_authority=True), "cannot grant"),
+    (lambda t: t["call"].update(capture_authority=0), "cannot grant"),
+    (lambda t: t["call"]["original_arguments"][0].update(position=False), "argument order"),
+    (lambda t: t["call"]["associations"][0].update(entry_definition_kill=True), "association differs"),
+    (lambda t: t["call"]["associations"][0]["formal_descriptor"].update(intent="out"), "allocatable INOUT"),
+    (lambda t: t["call"]["associations"][0]["actual_type"].update(storage_resource="foreign"), "actual storage"),
+    (lambda t: t["call"]["associations"][0]["actual_type"].update(rank=True), "numeric descriptor"),
+    (lambda t: t["body"].__setitem__(1, "CALL move_alloc(left,right)"), "MOVE_ALLOC order"),
+])
+def test_v2_storage_transfer_cannot_expand_payload_or_source_authority(tmp_path, sources, change, reason):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_epoch(metadata, transfer=True)
+    change(plan["storage_epoch"]["members"][0]["storage_transfers"][0])
+    seal_epoch_plan(plan)
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="storage transfer .*" + reason):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+def test_v2_epoch_and_execution_digests_are_both_required_and_v1_cannot_gain_epoch(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_epoch(metadata)
+    plan["storage_epoch"]["identity"] = "0" * 64
+    seal(plan)
+    with pytest.raises(ValueError, match="storage epoch identity differs"):
+        validate_checked_execution_plans(metadata["scope_manifest"])
+    seal_epoch_plan(plan)
+    plan["execution_identity"] = "0" * 64
+    seal(plan)
+    with pytest.raises(ValueError, match="storage epoch execution identity differs"):
+        validate_checked_execution_plans(metadata["scope_manifest"])
+    plan["schema_version"] = 1
+    seal(plan)
+    with pytest.raises(ValueError, match="complete v1 schema"):
+        validate_checked_execution_plans(metadata["scope_manifest"])
+
+
+def with_device_task(metadata, *, pressure_backend=None):
+    """An explicit protocol fixture with temporary provider artifacts, never execution evidence."""
+    plan = with_epoch(metadata)
+    epoch, procedure = plan["storage_epoch"], plan["procedures"][0]
+    root = Path(metadata["artifact_root"]).parent / (Path(metadata["artifact_root"]).name + "-provider-fixture")
+    root.mkdir()
+    implementation, qualification, provider_path = (root / name for name in ("implementation.source", "qualification.json", "provider.json"))
+    implementation.write_text("explicit synthetic provider fixture; not an executable\n")
+    qualification.write_text('{"fixture_only":true,"execution_evidence":false}\n')
+    body = "e" * 64
+    descriptor = {"name": "a", "resource": "argument::a", "type": "real", "kind": 8, "rank": 1, "intent": "inout",
+                  "attributes": ["intent"], "lower_bounds": ["1"],
+                  "shape": [{"kind": "Assumed_Shape_Spec", "source": ":", "bounds": [None, None]}]}
+    call = {"schema_version": 1, "procedure": "source::original", "target": "original", "source_kind": "module",
+        "formal_arguments": ["a"], "actual_arguments": ["a"],
+        "original_arguments": [{"position": 0, "formal": "a", "keyword": None, "actual": "a"}],
+        "associations": [{"formal": "a", "actual": "a", "formal_descriptor": descriptor,
+            "actual_type": {"type": "real", "kind": 8, "rank": 1, "storage_resource": "argument::a", "declaring_type": None},
+            "entry_definition_kill": False}],
+        "actual_evaluation": "unchanged original call position and guards", "effect_authority": False,
+        "capture_authority": False, "alias_authority": False, "completion_authority": False, "execution_authority": False}
+    upper = {"descriptor": "size", "formal": "a", "axis": 1, "offset": 0}
+    contract = {"version": 1, "source": {"sha256": procedure["source_sha256"], "span": [1, 1],
+        "call_sha256": "f" * 64, "callee": "source::original", "callee_body_sha256": body},
+        "resources": [{"formal": "a", "effects": [{"kind": "read", "lower": [0], "upper": [copy.deepcopy(upper)]},
+                                                    {"kind": "overwrite", "lower": [0], "upper": [copy.deepcopy(upper)]}]}],
+        "configuration": [{"component": "extent", "kind": "size", "values": [copy.deepcopy(upper)]}]}
+    provider = {"version": 1, "kind": "external_device_provider",
+        "fortran": {"module": "provider", "config_type": "config", "create": "create", "execute": "execute", "destroy": "destroy"},
+        "artifacts": {str(implementation): hashlib.sha256(implementation.read_bytes()).hexdigest()},
+        "numerical_contract": {"identity": "c" * 64,
+            "qualification": {"path": str(qualification), "sha256": hashlib.sha256(qualification.read_bytes()).hexdigest()},
+            "original_bodies": [body], "task_contracts": [digest({"original_body": body, "resources": contract["resources"],
+                                                                 "configuration": contract["configuration"]})]},
+        "execution": {"stream": "supplied", "completion": "same_stream", "workspace": "domain_claim", "fallback": "prework_only"}}
+    if pressure_backend is not None:
+        provider["pressure_backend"] = copy.deepcopy(pressure_backend)
+    provider_path.write_text(json.dumps(provider, sort_keys=True) + "\n")
+    contract["provider_manifest"] = {"path": str(provider_path), "sha256": hashlib.sha256(provider_path.read_bytes()).hexdigest()}
+    task = {"version": 1, "procedure": plan["entry"], "source_graph": procedure["structured_summary_identity"],
+        "selected_node_ids": [plan["entry"] + "/body/1"], "source_inputs": copy.deepcopy(epoch["source_inputs"]),
+        "call": call, "contract": contract, "provider": provider, "canonical_resources": {"a": "argument::a"},
+        "source_effects": {"summary_identity": "d" * 64, "summary_version": 22, "complete": True,
+                           "effects": {"a": ["overwrite", "read"]}, "host_effects": False, "persistent_state": False},
+        "source_association_authorized": True, "definitions_authorized": False, "placement_authorized": False,
+        "numerical_equivalence": "explicit supplied adapter qualification",
+        "lifetime": "existing checked capture and current caller-owned domain only",
+        "position": "exact original reached CALL; no motion or eager descriptor reads"}
+    epoch["members"][0]["device_tasks"] = [task]
+    seal_epoch_plan(plan)
+    metadata["scope_manifest"]["scopes"][0]["external_device_tasks"] = copy.deepcopy([task])
+    save(metadata)
+    return plan
+
+
+def test_v2_explicit_device_task_transports_without_granting_placement_or_definitions(tmp_path, sources):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_device_task(metadata)
+    expected = copy.deepcopy(plan)
+    validate_checked_execution_plans(metadata["scope_manifest"])
+    bundle = compose_scope_packages([metadata], sources[1])
+    assert bundle["scope_packages"][0]["scope_manifest"]["scopes"][0]["checked_execution_plan"] == expected
+    task, = expected["storage_epoch"]["members"][0]["device_tasks"]
+    assert task["definitions_authorized"] is False
+    assert task["placement_authorized"] is False
+    assert task["source_association_authorized"] is True
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    (lambda t: t.update(extra=True), "exact record fields"),
+    (lambda t: t.update(version=True), "version or identity"),
+    (lambda t: t.update(source_graph="0" * 64), "source linkage"),
+    (lambda t: t.update(selected_node_ids=["foreign/body/1"]), "call selection"),
+    (lambda t: t.update(definitions_authorized=True), "cannot authorize"),
+    (lambda t: t.update(placement_authorized=0), "cannot authorize"),
+    (lambda t: t["call"].update(execution_authority=True), "cannot grant"),
+    (lambda t: t["call"]["associations"][0].update(entry_definition_kill=True), "array descriptors"),
+    (lambda t: t["call"]["associations"][0]["formal_descriptor"].update(intent="out"), "array descriptors"),
+    (lambda t: t["call"]["associations"][0]["formal_descriptor"].update(lower_bounds=[]), "descriptor shape"),
+    (lambda t: t["call"]["associations"][0]["formal_descriptor"]["shape"][0].update(bounds=[True]), "descriptor axis"),
+    (lambda t: t.update(canonical_resources={"a": "foreign"}), "canonical storage"),
+    (lambda t: t["contract"]["source"].update(sha256="0" * 64), "call/body identity"),
+    (lambda t: t["contract"]["resources"][0]["effects"][0].update(lower=[]), "half-open boxes"),
+    (lambda t: t["contract"]["resources"][0]["effects"][0]["upper"][0].update(axis=True), "descriptor expression"),
+    (lambda t: t["contract"]["resources"][0]["effects"][0]["upper"][0].update(formal="foreign"), "descriptor expression"),
+    (lambda t: t["source_effects"].update(complete=False), "cannot erase"),
+    (lambda t: t["source_effects"].update(persistent_state=True), "cannot erase"),
+    (lambda t: t["source_effects"].update(host_effects=0), "cannot erase"),
+    (lambda t: t["source_effects"].update(summary_version=True), "cannot erase"),
+    (lambda t: t["source_effects"]["effects"].update(a=["read"]), "omits or invents"),
+    (lambda t: t["contract"]["configuration"][0].update(kind="unknown"), "configuration component"),
+    (lambda t: t["contract"]["configuration"][0].update(values=[-1]), "INTEGER configuration"),
+    (lambda t: t["contract"]["resources"][0]["effects"][0].update(lower=[1]), "lost its exact boxes"),
+    (lambda t: t["contract"]["configuration"][0].update(values=[1]), "lost its exact boxes"),
+])
+def test_v2_device_task_rejects_detachment_or_widened_authority_before_edits(tmp_path, sources, change, reason):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_device_task(metadata)
+    task = plan["storage_epoch"]["members"][0]["device_tasks"][0]
+    change(task)
+    seal_epoch_plan(plan)
+    metadata["scope_manifest"]["scopes"][0]["external_device_tasks"] = copy.deepcopy([task])
+    save(metadata)
+    with pytest.raises(LocalAdapterError, match="device task .*" + reason):
+        apply_scope_sources(metadata, sources[1])
+    unchanged(sources)
+
+
+@pytest.mark.parametrize("kind", ["provider", "implementation", "qualification", "duplicate", "scope_copy", "empty"])
+def test_v2_device_task_artifacts_and_duplicate_transports_are_authenticated(tmp_path, sources, kind):
+    metadata = package(tmp_path, sources, "one")
+    plan = with_device_task(metadata)
+    member = plan["storage_epoch"]["members"][0]
+    task = member["device_tasks"][0]
+    if kind == "provider":
+        Path(task["contract"]["provider_manifest"]["path"]).write_text("{}\n")
+    elif kind == "implementation":
+        Path(next(iter(task["provider"]["artifacts"]))).write_text("changed\n")
+    elif kind == "qualification":
+        Path(task["provider"]["numerical_contract"]["qualification"]["path"]).unlink()
+    elif kind == "duplicate":
+        member["device_tasks"].append(copy.deepcopy(task))
+        seal_epoch_plan(plan)
+    elif kind == "scope_copy":
+        metadata["scope_manifest"]["scopes"][0]["external_device_tasks"][0]["placement_authorized"] = True
+    else:
+        member["device_tasks"] = []
+        seal_epoch_plan(plan)
+    save(metadata)
+    with pytest.raises(LocalAdapterError):
         apply_scope_sources(metadata, sources[1])
     unchanged(sources)

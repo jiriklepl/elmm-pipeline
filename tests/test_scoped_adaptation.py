@@ -15,7 +15,7 @@ import pytest
 from elmm_pipeline.adaptation import adapt_project
 from elmm_pipeline.cli import prepare_build, scoped_configuration
 from elmm_pipeline.gpu_validation import gpu_activity, native_policy_exercised
-from test_local_scopes import FACTS, PROGRAM
+from test_local_scopes import FACTS, PROGRAM, assert_fixture_cuda_inventory
 
 
 @pytest.fixture(scope="module")
@@ -86,7 +86,7 @@ print(json.dumps(result))
         assert "coverage unverified" in activity["native_selection_evidence"]
     else:
         assert manifest["runtime"]["link_once"] is True
-        assert len(adapter["gpu_sources"]) == 3
+        assert_fixture_cuda_inventory(adapter, output / "compiler")
         assert adapter["changed_files"] == ["application.f90"]
         assert manifest["scopes"][0]["owner"] in source.read_text()
 
@@ -261,9 +261,9 @@ def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_
 def test_real_normal_scopes_build_and_execute_full_fields(independent_scoped_pipeline, tmp_path, policy):
     """Exercise extraction, real CUDA checks, SCons dependencies and coherence.
 
-    A native read/modify/write helper between GPU leaves must see the producer's
-    current output, and its update must feed the GPU consumer. Two shapes and
-    negative host bounds exercise complete fields and registration lifetimes.
+    The ordinary array helper between GPU leaves is also offloadable. Its
+    update must feed the consumer while all three calls share resident data.
+    Two shapes and negative host bounds exercise fields and storage lifetimes.
     """
     directory, pipeline, compiler = independent_scoped_pipeline
     scons_python = Path(os.environ.get("ELMM_TEST_SCONS_PYTHON",
@@ -384,19 +384,15 @@ result={'binary':str(binary),'adapter':adapter,
     (tmp_path / "integration-activity.json").write_text(json.dumps(activity, indent=2) + "\n")
     if policy == "sections":
         assert activity["verified"]
-        assert activity["kernel_launches"] == 4
+        assert activity["kernel_launches"] == 6
         scope, = adapter["scope_manifest"]["scopes"]
-        native, = [item for item in scope["module_coordinators"]
+        helper, = [item for item in scope["module_coordinators"]
                    if item["procedure"] == "source_application::native_scale"]
-        boundary, = native["boundaries"]
-        assert boundary["reason"] == "numerical effect requires typed authority for every original runtime guard"
-        assert boundary["execution"] == "publish and close when reached; original continuation once"
-        assert boundary["reopen"] is True
-        assert boundary["first_line"] == boundary["last_line"] == PROGRAM.splitlines().index("b=3*b") + 1
+        assert helper["boundaries"] == []
         identities = {item["resource"]: item["registration_identity"]
                       for item in scope["resource_bindings"]["resources"]}
         a_id, b_id, c_id = (identities["argument::" + name] for name in ("a", "b", "c"))
-        ledger, context_sequence = {}, []
+        ledger, domain_sequence = {}, []
         for line in (run.stdout + run.stderr).splitlines():
             tokens = line.split()
             if tokens[:1] != ["FORT_SCOPED"] or len(tokens) < 3:
@@ -407,26 +403,28 @@ result={'binary':str(binary),'adapter':adapter,
             fields = dict(token.split("=", 1) for token in tokens[2:])
             assert fields["provenance_version"] == "1"
             context = int(fields["context"])
-            context_sequence.append(context)
-            ledger.setdefault(context, []).append((operation, int(fields["buffer"]) if "buffer" in fields else None,
+            assert fields["domain_version"] == "1"
+            domain = int(fields["domain"])
+            role = fields["domain_role"]
+            assert (role == "storage" and context == domain) if operation in {"download", "close"} else (
+                role == "execution" and context != domain)
+            domain_sequence.append(domain)
+            ledger.setdefault(domain, []).append((operation, int(fields["buffer"]) if "buffer" in fields else None,
                                                     int(fields["bytes"])))
-        expected = []
-        for n in (32, 64):
+        assert len(ledger) == 2
+        for events, n in zip(ledger.values(), (32, 64), strict=True):
             size = n * 8
-            # The native boundary publishes B and retires the producer epoch.
-            # Reopening for consume uploads A again; no cross-cut residency is claimed.
-            expected.extend([
-                [("create", None, 0), ("upload", a_id, size), ("launch", None, 0),
-                 ("download", b_id, size), ("close", None, 0)],
-                [("create", None, 0), ("upload", a_id, size), ("upload", b_id, size),
-                 ("launch", None, 0), ("download", c_id, size), ("close", None, 0)],
-            ])
-        assert list(ledger.values()) == expected
-        assert context_sequence == [context for context, events in ledger.items() for _ in events]
-        assert activity["upload_bytes"] == 3 * (32 + 64) * 8
+            # A uploads once; B stays on device through scale and consume.
+            # Only the final unmanaged return publishes B and C.
+            assert events[:5] == [("create", None, 0), ("upload", a_id, size),
+                                  ("launch", None, 0), ("launch", None, 0), ("launch", None, 0)]
+            assert sorted(events[5:-1]) == sorted([("download", b_id, size), ("download", c_id, size)])
+            assert events[-1] == ("close", None, 0)
+        assert domain_sequence == [domain for domain, events in ledger.items() for _ in events]
+        assert activity["upload_bytes"] == (32 + 64) * 8
         assert activity["download_bytes"] == 2 * (32 + 64) * 8
-        assert activity["scoped_runtime"]["events"]["upload"] == 6
-        assert activity["scoped_runtime"]["events"]["create"] == activity["scoped_runtime"]["events"]["close"] == 4
+        assert activity["scoped_runtime"]["events"]["upload"] == 2
+        assert activity["scoped_runtime"]["events"]["create"] == activity["scoped_runtime"]["events"]["close"] == 2
         assert activity["scoped_runtime"]["events"]["download"] == 4
     else:
         assert native_policy_exercised(activity, adapter["regions"])
