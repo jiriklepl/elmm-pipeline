@@ -104,7 +104,7 @@ class DomainTrace:
         state["failed"] = row["failed"]
         state["lifecycle"].append(row)
 
-    def operation(self, fields, event, amount, *, tagged, compact=None):
+    def _attribution(self, fields, event, *, tagged):
         keys = {"domain_version", "domain", "domain_role"}
         if not keys & fields.keys():
             return
@@ -128,6 +128,19 @@ class DomainTrace:
             state["pending_create"] = context
         elif context != state["active_context"]:
             raise ValueError("operation belongs to a detached residency borrower")
+        return state, role
+
+    def modeled(self, fields):
+        """Check a decision's active attachment without counting an operation."""
+        target = self._attribution(fields, "copy_pricing", tagged=True)
+        if target is not None and int(fields["device"]) != target[0]["device"]:
+            raise ValueError("modeled copy pricing has inconsistent residency device")
+
+    def operation(self, fields, event, amount, *, tagged, compact=None):
+        target = self._attribution(fields, event, tagged=tagged)
+        if target is None:
+            return
+        state, role = target
         counts = state[role]
         counts["events"] += 1
         if event in {"upload", "download"}:

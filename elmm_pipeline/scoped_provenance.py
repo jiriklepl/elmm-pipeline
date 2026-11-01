@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 
 from .scoped_compact_trace import compact_from_line, count_compact, provenance_fields
+from .scoped_copy_pricing import pricing_from_line
+from .scoped_copy_pricing import provenance_fields as pricing_provenance_fields
 from .scoped_domain_trace import DomainTrace
 
 FIELDS = ("owner", "procedure", "segment", "operation", "implementation", "boundary")
@@ -139,9 +141,17 @@ def scoped_provenance(log, manifests):
     domains = DomainTrace(lambda fields: _identities(fields, records, used))
     unknown = {field: _counters() for field in FIELDS}
     versioned, legacy = 0, 0
+    pricing = []
     for line in log.splitlines():
         if line.startswith("FORT_SCOPED domain "):
             domains.lifecycle(line.removeprefix("FORT_SCOPED domain "))
+            continue
+        modeled = pricing_from_line(line)
+        if modeled is not None:
+            fields = pricing_provenance_fields(modeled)
+            _identities(fields, records, used)
+            domains.modeled(fields)
+            pricing.append(modeled)
             continue
         compact = compact_from_line(line)
         if compact is not None:
@@ -209,6 +219,8 @@ def scoped_provenance(log, manifests):
                           "actual API submissions and coherence commits; no device durations or policy inference")}
     if domains.available:
         result["residency_domains"] = domains.report()
+    if pricing:
+        result["modeled_copy_pricing"] = pricing
     if "copy_dma_calls" in total:
         result["physical_copy_semantics"] = (
             "compact_physical_operations counts original physical rectangles before batching; "

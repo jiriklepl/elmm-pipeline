@@ -6,6 +6,7 @@ import math
 import re
 
 from .scoped_compact_trace import COUNTERS, validate_compact_transfer, validate_modeled_compact_copy
+from .scoped_copy_pricing import validate_copy_pricing
 from .scoped_provenance import scoped_provenance
 
 TRACE_VARIABLES = ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE", "NVCOMPILER_ACC_NOTIFY", "NVCOMPILER_ACC_TIME",
@@ -141,7 +142,7 @@ def scoped_modeled_evidence(log):
              "logical_kernels", "live_graphs", "destructions"), ()),
     }
     events = {"decision", "snapshot", "operation", "requirement", "copy", "export", "gate", "end",
-              "definition_validation", "transfer_statistics", "batch_statistics", "compact_transfer"} | statistics.keys()
+              "definition_validation", "transfer_statistics", "batch_statistics", "compact_transfer", "copy_pricing"} | statistics.keys()
 
     def object_fields(pairs):
         result = {}
@@ -243,6 +244,8 @@ def scoped_modeled_evidence(log):
                 raise ValueError("Scoped batch statistics require finalized versioned public counters and costs")
         if event == "compact_transfer":
             validate_compact_transfer(record)
+        elif event == "copy_pricing":
+            validate_copy_pricing(record)
         else:
             validate_modeled_compact_copy(record)
         finite(record)
