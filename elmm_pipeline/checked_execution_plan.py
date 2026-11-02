@@ -249,11 +249,13 @@ def _validate_plan(plan, manifest, scope, capture_facts):
 def _validate_epoch(epoch, plan, manifest, capture_facts, scope):
     fields = _EPOCH_FIELDS | ({"return_contract"} if plan["schema_version"] == 3 else set())
     _require(isinstance(epoch, dict) and type(epoch.get("version")) is int
-             and epoch["version"] in (1, 2, 3), "storage epoch has an unsupported version")
-    if epoch["version"] == 2 or epoch["version"] == 3 and "private_allocation_obligations" in epoch:
+             and epoch["version"] in (1, 2, 3, 4), "storage epoch has an unsupported version")
+    if epoch["version"] == 2 or epoch["version"] in (3, 4) and "private_allocation_obligations" in epoch:
         fields = fields | {"private_allocation_obligations"}
-    if epoch["version"] == 3:
+    if epoch["version"] == 3 or epoch["version"] == 4 and "original_worksharing_storage_obligations" in epoch:
         fields = fields | {"original_worksharing_storage_obligations"}
+    if epoch["version"] == 4:
+        fields = fields | {"native_opaque_accesses"}
     allowed = (fields | {"supported_path_epoch"} if plan["schema_version"] == 5
                else fields | {"selected_position_epoch"})
     _require(isinstance(epoch, dict) and (set(epoch) == allowed if plan["schema_version"] in (4, 5)
@@ -305,7 +307,7 @@ def _validate_epoch(epoch, plan, manifest, capture_facts, scope):
                      "storage epoch private allocation overlaps a registration or lacks its declaring identity")
             keys.append((item["descriptor_procedure"], item["descriptor_identity"]))
         _require(keys == sorted(set(keys)), "storage epoch private allocation obligations repeat or change order")
-    if epoch["version"] == 3:
+    if "original_worksharing_storage_obligations" in epoch:
         from .original_worksharing_record import validate_original_worksharing
 
         validate_original_worksharing(epoch, plan)
@@ -379,6 +381,9 @@ def _validate_epoch(epoch, plan, manifest, capture_facts, scope):
                                      graph_execution=scope.get("graph_execution"), task_ordinal=ordinal)
                 _require(task["identity"] not in seen_tasks, "source device task repeats an original team")
                 seen_tasks.add(task["identity"])
+    from .native_opaque_access_record import validate_native_opaque_accesses
+
+    validate_native_opaque_accesses(epoch, plan, manifest, scope)
     if plan["schema_version"] == 5:
         from .supported_path_epoch_record import validate_supported_path_epoch
 

@@ -132,31 +132,8 @@ def _graph_effects(graph, procedure, ordinal, effects):
     _require(len(found) == 1, "source CALL projection task graph lost or repeated its source task")
 
 
-def validate_call_projection(value, record, fields, procedure, resources, owner, manifest):
-    # Atomic v4 retains the exact source team separately from this CALL
-    # transport. Its numerical alternatives and providers keep their versions.
-    atomic = record.get("kind") == "original_atomic_conditional_joined_team"
-    if atomic:
-        _require(type(record.get("version")) is int and record["version"] == 4
-                 and isinstance(record.get("source_proof"), dict),
-                 "source CALL projection requires projected atomic transport")
-        source = record["source_proof"]
-        source_identity = source.get("identity")
-    else:
-        source = record
-        source_identity = record.get("source_proof_identity")
-    _keys(value, {"identity", "version", "kind", "owner", "procedure", "source_proof_identity", "field_slots",
-                  "members", "calls", "field_roots", "root_registrations", "projection_semantics",
-                  "conservative_effects", "runtime_validation"} | _FLAGS)
-    _require(type(value["version"]) is int and value["version"] == 1
-             and value["kind"] == "original_source_task_companion_projection"
-             and _sha256(value["identity"]) and value["identity"] == _digest({k: v for k, v in value.items() if k != "identity"})
-             and value["owner"] == owner and value["procedure"] == procedure["procedure"] == source["procedure"]
-             and value["source_proof_identity"] == source_identity
-             and all(value[k] is False for k in _FLAGS)
-             and value["projection_semantics"] == "per-field effect closure; joint associations remain in the checked CALL DAG"
-             and value["runtime_validation"] == "original reached registration and existing source access transaction validate each invocation",
-             "source CALL projection identity or authority differs")
+def validate_call_inventory(value, local_fields, procedure, resources, owner, manifest, *, require_calls=False):
+    """The existing checked companion DAG, shared by numeric and opaque roles."""
     contexts = [s for s in manifest.get("scopes", []) if isinstance(s, dict)
                 and isinstance(s.get("checked_execution_plan"), dict)
                 and s["checked_execution_plan"].get("entry") == owner
@@ -182,6 +159,9 @@ def validate_call_projection(value, record, fields, procedure, resources, owner,
                  "source CALL projection member source differs")
         _slots(node["resource_slots"])
         coordinator = coordinators.get(name, {})
+        if node["parameterized"]:
+            _require(procedures[name]["calls"] == coordinator.get("calls"),
+                     "source CALL projection original array association or companion site inventory differs")
         _require(node["parameterized"] is (coordinator.get("parameterized_handles") is True),
                  "source CALL projection namespace differs from its existing companion ABI")
         if not node["parameterized"]:
@@ -198,13 +178,14 @@ def validate_call_projection(value, record, fields, procedure, resources, owner,
     _require(list(nodes) == sorted(nodes) and procedure["procedure"] in nodes,
              "source CALL projection member order or leaf differs")
     _slots(value["field_slots"])
-    local_fields = {f["binding"]["resource"]: f for f in fields}
     leaf = nodes[procedure["procedure"]]
     _require(set(value["field_slots"]) == set(local_fields)
              and all(leaf["resource_slots"].get(k) == v for k, v in value["field_slots"].items()),
              "source CALL projection field slots differ")
     edges = value["calls"]
-    _require(isinstance(edges, list) and bool(edges), "source CALL projection requires its complete original CALL DAG")
+    _require(isinstance(edges, list) and (bool(edges) if require_calls else
+                 bool(edges) or not any(node["parameterized"] for node in nodes.values())),
+             "source CALL projection requires its complete original CALL DAG")
     incoming, edge_keys, selections = {name: [] for name in nodes}, [], set()
     for edge in edges:
         _keys(edge, {"caller", "callee", "first_line", "last_line", "selected_node_ids", "caller_graph",
@@ -286,6 +267,37 @@ def validate_call_projection(value, record, fields, procedure, resources, owner,
             slot = nodes[edge["callee"]]["resource_slots"][local]
             _require(_text(canonical) and canonical in roots(edge["caller"], edge["handle_bindings"][str(slot)]),
                      "source CALL projection canonical representative is outside its original slot closure")
+    return expected_roots, scope, plan
+
+
+def validate_call_projection(value, record, fields, procedure, resources, owner, manifest):
+    # Atomic v4 retains the exact source team separately from this CALL
+    # transport. Its numerical alternatives and providers keep their versions.
+    atomic = record.get("kind") == "original_atomic_conditional_joined_team"
+    if atomic:
+        _require(type(record.get("version")) is int and record["version"] == 4
+                 and isinstance(record.get("source_proof"), dict),
+                 "source CALL projection requires projected atomic transport")
+        source = record["source_proof"]
+        source_identity = source.get("identity")
+    else:
+        source = record
+        source_identity = record.get("source_proof_identity")
+    _keys(value, {"identity", "version", "kind", "owner", "procedure", "source_proof_identity", "field_slots",
+                  "members", "calls", "field_roots", "root_registrations", "projection_semantics",
+                  "conservative_effects", "runtime_validation"} | _FLAGS)
+    _require(type(value["version"]) is int and value["version"] == 1
+             and value["kind"] == "original_source_task_companion_projection"
+             and _sha256(value["identity"]) and value["identity"] == _digest({k: v for k, v in value.items() if k != "identity"})
+             and value["owner"] == owner and value["procedure"] == procedure["procedure"] == source["procedure"]
+             and value["source_proof_identity"] == source_identity
+             and all(value[k] is False for k in _FLAGS)
+             and value["projection_semantics"] == "per-field effect closure; joint associations remain in the checked CALL DAG"
+             and value["runtime_validation"] == "original reached registration and existing source access transaction validate each invocation",
+             "source CALL projection identity or authority differs")
+    local_fields = {f["binding"]["resource"]: f for f in fields}
+    expected_roots, scope, plan = validate_call_inventory(
+        value, local_fields, procedure, resources, owner, manifest, require_calls=True)
     actions = {}
     for local, field in local_fields.items():
         for root in expected_roots[local]:
