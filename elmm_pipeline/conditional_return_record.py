@@ -514,6 +514,12 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
                         if nested.get("caller") == callee and isinstance(nested.get("resource_mappings"), dict)
                         for value in nested["resource_mappings"].values() if isinstance(value, str))
             used.update(scalar_uses.get(callee, ()))
+            # Typed native reservations are absent from managed unit resources.
+            # Their exact operation/source/call/epoch links were checked by
+            # validate_native_opaque_accesses before conditional return.
+            used.update(access["resource"] for unit in procedures[callee]["units"]
+                        for operation in unit["operations"].get("native_operations", ())
+                        for access in (operation.get("native_opaque_accesses") or {}).get("accesses", ()))
             bindings = scope.get("resource_bindings")
             _require(isinstance(bindings, dict)
                      and isinstance(bindings.get("resources"), list)
