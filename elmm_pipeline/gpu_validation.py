@@ -169,9 +169,12 @@ class _InlineNativeFallbacks:
             local = {record["id"] for record in component.get("runtime_provenance", {}).get("records", ())}
             if not {fields[key] for key in ("owner", "procedure", "segment", "implementation")} <= local:
                 continue
-            regions = list(component.get("inline_numerical_regions", {}).get("regions", ()))
-            regions += [region for child in component.get("child_numerical_regions", ())
-                        for region in child.get("regions", ())]
+            # Catalog ownership authenticates serial-loop completions, whose
+            # existing record deliberately has no procedure field. Keep that
+            # source relationship instead of flattening it out of the reader.
+            catalogs = [(component.get("entry"), component.get("inline_numerical_regions", {}))]
+            catalogs += [(child.get("procedure"), child)
+                         for child in component.get("child_numerical_regions", ())]
             for scope in component.get("scopes", ()):
                 plan = scope.get("checked_execution_plan", {})
                 if caller.get("procedure") not in {p.get("procedure") for p in plan.get("procedures", ())}:
@@ -181,10 +184,22 @@ class _InlineNativeFallbacks:
                     owner_route = self.borrowed_owner_routes(scope, plan, owner, caller)
                     if owner_route is None:
                         continue
-                for region in regions:
+                regions = [(catalog_owner, region) for catalog_owner, catalog in catalogs
+                           for region in catalog.get("regions", ())]
+                for catalog_owner, region in regions:
+                    completion = region.get("completion", {})
+                    declared = completion.get("procedure")
+                    owner_matches = catalog_owner is None or catalog_owner == caller.get("procedure")
+                    if "procedure" in completion:
+                        completion_matches = owner_matches and declared == caller.get("procedure")
+                    else:
+                        serial = {"available": True, "caller_contract": "serial_source_scope",
+                                  "reason": "original serial counted loop completes before continuation"}
+                        completion_matches = (catalog_owner == caller.get("procedure")
+                                              and completion.get("available") is True and completion == serial)
                     if (region.get("entry") == worker["procedure"]
                             and worker.get("source") == "inline:" + str(region.get("source_identity"))
-                            and region.get("completion", {}).get("procedure") == caller.get("procedure")
+                            and completion_matches
                             and all(type(region.get(key)) is int and type(segment.get(key)) is int
                                     for key in ("first_line", "last_line"))
                             and segment["first_line"] <= region["first_line"] <= region["last_line"] <= segment["last_line"]):

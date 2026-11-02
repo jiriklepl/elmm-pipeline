@@ -258,3 +258,89 @@ def test_borrowed_owner_cannot_borrow_component_membership_or_another_call(chang
         published['handle_bindings'] = deepcopy(handles)
     with pytest.raises(ValueError):
         offload_decisions('\n'.join(lines), [], scope_manifest=manifest)
+
+
+def serial_catalog_fixture(catalog):
+    """Use the exact existing serial-loop completion shape and catalog owner."""
+    manifest, lines = borrowed_fixture() if catalog == 'child' else fixture()
+    completion = {'available': True, 'caller_contract': 'serial_source_scope',
+                  'reason': 'original serial counted loop completes before continuation'}
+    regions = manifest['inline_numerical_regions']['regions']
+    regions[0]['completion'] = completion
+    if catalog == 'child':
+        manifest['entry'] = 'root::entry'
+        manifest['inline_numerical_regions']['regions'] = []
+        manifest['child_numerical_regions'] = [{'procedure': PROCEDURE, 'regions': regions}]
+    else:
+        manifest['entry'] = PROCEDURE
+    return manifest, lines
+
+
+@pytest.mark.parametrize('catalog', ['root', 'child'])
+@pytest.mark.parametrize('reason', ['resource', 'boundary'])
+def test_serial_loop_without_completion_procedure_uses_exact_catalog_owner(catalog, reason):
+    manifest, lines = serial_catalog_fixture(catalog)
+    before = deepcopy(manifest)
+    lines[-1] = lines[-1].replace('native-scoped-resource', 'native-scoped-' + reason)
+    result = gpu_activity('\n'.join(lines), 'local', [], scope_manifest=manifest)
+    row, = result['offload_decisions']['authenticated_inline_fallbacks']
+    assert row['entry'] == ENTRY and row['gpu_execution_confirmed'] is False
+    assert result['verified'] is False and result['kernel_launches'] == 0
+    assert manifest == before
+
+
+@pytest.mark.parametrize('change', ['wrong_catalog_owner', 'missing_catalog_owner',
+    'wrong_present_procedure', 'null_present_procedure', 'missing_available', 'integer_available',
+    'unavailable', 'missing_contract', 'foreign_contract', 'missing_reason', 'foreign_reason',
+    'extra_completion_field', 'missing_route', 'foreign_source', 'outside_span'])
+def test_serial_catalog_cannot_replace_completion_or_source_authority(change):
+    manifest, lines = serial_catalog_fixture('child')
+    catalog = manifest['child_numerical_regions'][0]
+    region = catalog['regions'][0]
+    completion = region['completion']
+    if change == 'wrong_catalog_owner':
+        catalog['procedure'] = 'foreign::caller'
+    elif change == 'missing_catalog_owner':
+        catalog.pop('procedure')
+    elif change == 'wrong_present_procedure':
+        completion['procedure'] = 'foreign::caller'
+    elif change == 'null_present_procedure':
+        completion['procedure'] = None
+    elif change == 'missing_available':
+        completion.pop('available')
+    elif change == 'integer_available':
+        completion['available'] = 1
+    elif change == 'unavailable':
+        completion['available'] = False
+    elif change == 'missing_contract':
+        completion.pop('caller_contract')
+    elif change == 'foreign_contract':
+        completion['caller_contract'] = 'unknown'
+    elif change == 'missing_reason':
+        completion.pop('reason')
+    elif change == 'foreign_reason':
+        completion['reason'] = 'unproved completion'
+    elif change == 'extra_completion_field':
+        completion['execution_authorized'] = True
+    elif change == 'missing_route':
+        manifest['scopes'][0]['checked_execution_plan']['procedures'][2]['calls'] = []
+    elif change == 'foreign_source':
+        region['source_identity'] = 'a' * 64
+    else:
+        region['last_line'] += 1
+    with pytest.raises(ValueError):
+        gpu_activity('\n'.join(lines), 'local', [], scope_manifest=manifest)
+
+
+def test_present_completion_keeps_legacy_catalog_ownership_when_unspecified():
+    manifest, lines = fixture()
+    assert 'entry' not in manifest and 'procedure' not in manifest['inline_numerical_regions']
+    row, = offload_decisions('\n'.join(lines), [], scope_manifest=manifest)['authenticated_inline_fallbacks']
+    assert row['entry'] == ENTRY
+
+
+def test_present_completion_cannot_contradict_an_explicit_catalog_owner():
+    manifest, lines = fixture()
+    manifest['entry'] = 'foreign::owner'
+    with pytest.raises(ValueError):
+        offload_decisions('\n'.join(lines), [], scope_manifest=manifest)
