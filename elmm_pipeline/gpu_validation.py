@@ -4,10 +4,16 @@ from __future__ import annotations
 import json
 import math
 import re
+from hashlib import sha256
 
-from .scoped_compact_trace import COUNTERS, validate_compact_transfer, validate_modeled_compact_copy
+from .scoped_compact_trace import (
+    COUNTERS,
+    validate_compact_transfer,
+    validate_modeled_compact_copy,
+)
 from .scoped_copy_pricing import validate_copy_pricing
-from .scoped_provenance import scoped_provenance
+from .scoped_domain_trace import DomainTrace
+from .scoped_provenance import FIELDS, HASH, _identities, _registry, scoped_provenance
 
 TRACE_VARIABLES = ("FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE", "NVCOMPILER_ACC_NOTIFY", "NVCOMPILER_ACC_TIME",
                    "PGI_ACC_NOTIFY", "PGI_ACC_TIME", "CUDA_LAUNCH_BLOCKING")
@@ -40,6 +46,165 @@ def _scope_manifests(scope_manifest, scope_packages):
     return manifests
 
 
+class _InlineNativeFallbacks:
+    """Correlate an unnamed inline worker with its exact reached source slot.
+
+    This is policy attribution only. Neither a requested CUDA implementation nor
+    a resource miss establishes a submitted kernel or payload operation.
+    """
+
+    def __init__(self, manifests):
+        self.records, _supported = _registry(manifests)
+        self.used = set()
+        self.domains = DomainTrace(lambda fields: _identities(fields, self.records, self.used))
+        self.components = [component for manifest in manifests
+                           for component in manifest.get("component_manifests", [manifest])]
+
+    def lifecycle(self, line):
+        if line.startswith("FORT_SCOPED domain "):
+            self.domains.lifecycle(line.removeprefix("FORT_SCOPED domain "))
+
+    def borrowed_owner_routes(self, scope, plan, owner, caller):
+        """Use the existing checked companion CALL and coordinator receipts."""
+        procedures = {row["procedure"]: row for row in plan.get("procedures", ())}
+        name = owner.get("procedure")
+        member = procedures.get(name)
+        called = procedures.get(caller.get("procedure"))
+        sources = plan.get("sources", {})
+        if (owner.get("lifetime") != "borrowed helper storage epoch" or member is None
+                or called is None or len(procedures) != len(plan.get("procedures", ()))
+                or any(owner.get(key) != member.get(key) for key in ("source", "source_sha256"))
+                or any(caller.get(key) != called.get(key) for key in ("source", "source_sha256"))
+                or any(not HASH.fullmatch(str(row.get("structured_summary_identity", "")))
+                       or sources.get(row.get("source")) != row.get("source_sha256") for row in (member, called))):
+            return None
+
+        def digest(row):
+            return sha256(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+        def route(start, target):
+            pending, seen = [(start, [])], set()
+            while pending:
+                current, path = pending.pop(0)
+                if current == target:
+                    return path
+                if current in seen or current not in procedures:
+                    continue
+                seen.add(current)
+                parent = procedures[current]
+                if (not HASH.fullmatch(str(parent.get("structured_summary_identity", "")))
+                        or sources.get(parent.get("source")) != parent.get("source_sha256")):
+                    raise ValueError("Borrowed inline owner lost its checked caller graph")
+                for child_name, child in procedures.items():
+                    coordinators = [row for row in scope.get("module_coordinators", ())
+                                    if row.get("procedure") == child_name]
+                    if len(coordinators) != 1 or coordinators[0].get("parameterized_handles") is not True:
+                        continue
+                    coordinator = coordinators[0]
+                    for call in child.get("calls", ()):
+                        if call.get("caller") != current or call not in coordinator.get("calls", ()):
+                            continue
+                        first, last = call.get("first_line"), call.get("last_line")
+                        handles, mappings = call.get("handle_bindings"), call.get("resource_mappings")
+                        if (type(first) is not int or type(last) is not int or not 1 <= first <= last
+                                or not HASH.fullmatch(str(child.get("structured_summary_identity", "")))
+                                or sources.get(child.get("source")) != child.get("source_sha256")
+                                or not isinstance(handles, dict) or not handles
+                                or any(not isinstance(key, str) or not re.fullmatch(r"[1-9][0-9]*", key)
+                                       or type(value) is not int or value <= 0 for key, value in handles.items())
+                                or not isinstance(mappings, dict)
+                                or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                                       for key, value in mappings.items())):
+                            continue
+                        edge = {"caller": current, "callee": child_name, "first_line": first, "last_line": last,
+                                "caller_source": parent["source"], "caller_source_sha256": parent["source_sha256"],
+                                "caller_graph": parent["structured_summary_identity"],
+                                "callee_graph": child["structured_summary_identity"],
+                                "checked_call_identity": digest(call), "coordinator_identity": digest(coordinator),
+                                "handle_bindings": handles, "resource_mappings": mappings}
+                        pending.append((child_name, [*path, edge]))
+            return None
+
+        root_path = route(plan.get("entry"), name)
+        worker_path = route(name, caller.get("procedure"))
+        if root_path is None or worker_path is None:
+            return None
+        return {"kind": "checked borrowed helper storage epoch", "owner_graph": member["structured_summary_identity"],
+                "root_to_owner": root_path, "owner_to_caller": worker_path}
+
+    def attribution(self, previous, raw_entry, mode, gpu, cpu, unit_kind, line_number):
+        if (mode not in {"native-scoped-resource", "native-scoped-boundary"}
+                or (gpu, cpu, unit_kind) != ("0", "1", "regions")
+                or not previous.startswith("FORT_SCOPED position ")):
+            raise ValueError("Offload policy trace entry is absent from the build manifest and lacks an exact preceding inline source position")
+        fields = {}
+        for token in previous.removeprefix("FORT_SCOPED position ").split():
+            key, separator, value = token.partition("=")
+            if not separator or key in fields:
+                raise ValueError("Malformed inline fallback source position")
+            fields[key] = value
+        if (set(fields) != {"bytes", "provenance_version", "context", "domain_version", "domain", "domain_role", *FIELDS}
+                or fields["bytes"] != "0" or fields["provenance_version"] != "1"
+                or fields["domain_version"] != "1" or fields["domain_role"] != "execution"
+                or any(not re.fullmatch(r"[1-9][0-9]*", fields[key]) or int(fields[key]) >= 2**64
+                       for key in ("context", "domain"))
+                or any(not HASH.fullmatch(fields[key]) for key in ("owner", "procedure", "segment", "implementation"))):
+            raise ValueError("Inline fallback requires exact versioned source/domain attribution")
+        _identities(fields, self.records, self.used)
+        self.domains.operation(fields, "position", 0, tagged=True)
+        owner, caller, segment, implementation = (self.records[fields[key]]
+                                                 for key in ("owner", "procedure", "segment", "implementation"))
+        worker = self.records.get(implementation.get("procedure_id"), {})
+        if (worker.get("kind") != "procedure" or implementation.get("backend") != "cuda"
+                or type(implementation.get("region")) is not int or implementation["region"] < 0
+                or any(worker.get(key) != implementation.get(key) for key in ("procedure", "source", "numerical_identity"))
+                or not HASH.fullmatch(str(worker.get("numerical_identity", "")))
+                or not isinstance(worker.get("procedure"), str)
+                or worker["procedure"].rsplit("::", 1)[-1].lower() != raw_entry
+                or segment.get("procedure") != caller.get("procedure")
+                or any(segment.get(key) != caller.get(key) for key in ("source", "source_sha256"))):
+            raise ValueError("Inline fallback worker/source provenance relationship differs")
+        matches = {}
+        for component in self.components:
+            local = {record["id"] for record in component.get("runtime_provenance", {}).get("records", ())}
+            if not {fields[key] for key in ("owner", "procedure", "segment", "implementation")} <= local:
+                continue
+            regions = list(component.get("inline_numerical_regions", {}).get("regions", ()))
+            regions += [region for child in component.get("child_numerical_regions", ())
+                        for region in child.get("regions", ())]
+            for scope in component.get("scopes", ()):
+                plan = scope.get("checked_execution_plan", {})
+                if caller.get("procedure") not in {p.get("procedure") for p in plan.get("procedures", ())}:
+                    continue
+                owner_route = None
+                if plan.get("entry") != owner.get("procedure"):
+                    owner_route = self.borrowed_owner_routes(scope, plan, owner, caller)
+                    if owner_route is None:
+                        continue
+                for region in regions:
+                    if (region.get("entry") == worker["procedure"]
+                            and worker.get("source") == "inline:" + str(region.get("source_identity"))
+                            and region.get("completion", {}).get("procedure") == caller.get("procedure")
+                            and all(type(region.get(key)) is int and type(segment.get(key)) is int
+                                    for key in ("first_line", "last_line"))
+                            and segment["first_line"] <= region["first_line"] <= region["last_line"] <= segment["last_line"]):
+                        match = {"entry": worker["procedure"], "raw_entry": raw_entry,
+                                 "owner": fields["owner"], "procedure": fields["procedure"],
+                                 "segment": fields["segment"], "implementation": fields["implementation"],
+                                 "worker_procedure": implementation["procedure_id"],
+                                 "numerical_identity": worker["numerical_identity"],
+                                 "source_identity": region["source_identity"],
+                                 "first_line": region["first_line"], "last_line": region["last_line"]}
+                        if owner_route is not None:
+                            match["borrowed_owner_route"] = owner_route
+                        matches[json.dumps(match, sort_keys=True)] = match
+        if len(matches) != 1:
+            raise ValueError("Inline fallback is absent from its exact owning source component")
+        return {**next(iter(matches.values())), "log_line": line_number, "context": int(fields["context"]),
+                "domain": int(fields["domain"]), "mode": mode, "gpu_units": 0, "cpu_units": 1,
+                "unit_kind": "regions", "gpu_execution_confirmed": False}
+
+
 def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None):
     """Separate policy decisions from evidence that a CUDA kernel ran."""
     entries = {region["entry"].lower() for region in regions}
@@ -56,11 +221,32 @@ def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None)
     per_entry = {}
     unit_counts = {}
     reasons = {}
-    for entry, mode, gpu, cpu, unit_kind in re.findall(pattern, log):
+    prefix = r"(?<![A-Za-z0-9_])FORT_OFFLOAD[ \t]+entry=([A-Za-z][A-Za-z0-9_]*)"
+    inline = (_InlineNativeFallbacks(manifests) if any(match[1].lower() not in entries
+              for match in re.finditer(prefix, log)) else None)
+    attributed, previous = [], ""
+    observed = []
+    for number, line in enumerate(log.splitlines(), 1):
+        if inline is not None:
+            inline.lifecycle(line)
+        matches = list(re.finditer(pattern, line))
+        for claim in re.finditer(prefix, line):
+            if claim[1].lower() not in entries and not any(match.start() == claim.start() for match in matches):
+                raise ValueError("Malformed unknown inline offload policy row")
+        for match in matches:
+            entry, mode, gpu, cpu, unit_kind = match.groups()
+            unit_kind = unit_kind or "regions"
+            if entry.lower() not in entries:
+                if match.start() != 0 or match.end() != len(line):
+                    raise ValueError("Inline fallback requires one complete policy trace row")
+                attribution = inline.attribution(previous, entry.lower(), mode, gpu, cpu, unit_kind, number)
+                attributed.append(attribution)
+                entry = attribution["entry"]
+            observed.append((entry, mode, gpu, cpu, unit_kind))
+        previous = line
+    for entry, mode, gpu, cpu, unit_kind in observed:
         entry = entry.lower()
         unit_kind = unit_kind or "regions"
-        if entry not in entries:
-            raise ValueError("Offload policy trace contains an entry absent from the build manifest")
         if (mode.startswith("native-scoped-") or mode == "scoped-scheduled") and not manifests:
             raise ValueError("Scoped offload trace requires its public source-scope manifest")
         if mode.startswith("native-scoped-"):
@@ -82,6 +268,7 @@ def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None)
         record["cpu_units"] += cpu
         record["modes"][mode] = record["modes"].get(mode, 0) + 1
     return {"calls": sum(counts.values()), "modes": counts, "entries": per_entry, "unit_counts": unit_counts,
+            **({"authenticated_inline_fallbacks": attributed} if attributed else {}),
             "native_reasons": reasons,
             "gpu_units": sum(value["gpu_units"] for value in per_entry.values()),
             "cpu_units": sum(value["cpu_units"] for value in per_entry.values())}
