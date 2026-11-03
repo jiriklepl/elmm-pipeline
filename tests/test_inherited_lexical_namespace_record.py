@@ -47,7 +47,7 @@ def test_serialized_selected_owner_keeps_native_and_managed_descendant_uses(issu
     validate_checked_execution_plans(report)
     scope = report["scopes"][0]
     used = _projected_implicit_uses(scope, "hierarchical::middle")
-    assert {"hierarchical::weights", "hierarchical::left", "hierarchical::right"} <= used
+    assert "hierarchical::weights" in used
     assert _projected_implicit_uses(scope, "hierarchical::producer") == set()
     assert scope["checked_execution_plan"]["storage_epoch"]["return_contract"]["root_selection"]
     assert report == before

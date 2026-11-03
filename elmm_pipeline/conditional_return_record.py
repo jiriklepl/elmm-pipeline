@@ -126,7 +126,9 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
                  and row.get("structured_summary_identity") == procedures[name]["structured_summary_identity"]
                  and row.get("interface") == "original_module_entry_v1"
                  and row.get("native_abi") == "original entry; compiler-control arguments are never referenced"
-                 and isinstance(row.get("resource_mappings"), dict), "conditional return companion ENTRY ABI differs")
+                 and isinstance(row.get("resource_mappings"), dict)
+                 and row.get("calls") == [call for call in procedures[name]["calls"] if "handle_bindings" in call],
+                 "conditional return companion ENTRY ABI or CALL inventory differs")
     from .source_task_call_record import validate_lexical_namespace
 
     all_coordinators = {**module, **lexical}
@@ -154,11 +156,15 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
     resource_rows, scalar_uses = validate_scalar_element_reservations(
         scope, plan, manifest, epoch, members, all_coordinators)
     epoch_members = {m["procedure"]: m for m in epoch["members"]}
+    relations = []
     for member in members:
-        _member(member, procedures[member["procedure"]], epoch_members[member["procedure"]], procedures, all_coordinators, canonical, scope,
+        relations.extend(_member(member, procedures[member["procedure"]], epoch_members[member["procedure"]], procedures, all_coordinators, canonical, scope,
                 selected_root=selected_root if member["procedure"] == plan["entry"] else None,
-                resource_rows=resource_rows, scalar_uses=scalar_uses, source_edits=manifest.get("source_edits"),
-                return_record=record)
+                resource_rows=resource_rows, source_edits=manifest.get("source_edits"), return_record=record))
+    uses = _closed_implicit_uses(relations, procedures, scalar_uses, scope)
+    for relation in relations:
+        _require(relation["implicit"] <= uses[relation["callee"]],
+                 "conditional return child formal-to-canonical association differs")
 
 
 
@@ -302,7 +308,7 @@ def _loop_entry(entry, nodes, procedure, coordinators, scope, source_edits):
 
 
 def _member(member, procedure, epoch_member, procedures, coordinators, canonical, scope, *, selected_root=None,
-            resource_rows=None, scalar_uses=None, source_edits=None, return_record=None):
+            resource_rows=None, source_edits=None, return_record=None):
     _keys(member, {"procedure", "source_graph", "entry_exit", "routes"})
     name = procedure["procedure"]
     _require(member["source_graph"] == procedure["structured_summary_identity"], "conditional return member source graph differs")
@@ -318,6 +324,7 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
     _require(isinstance(routes, list), "conditional return requires all original execution routes")
     covered, unit_ordinals, native_ordinals, retirement = set(), set(), set(), 0
     checked_devices, checked_transfers, children, lexical_children, loop_entries = set(), set(), [], [], set()
+    relations = []
     for route in routes:
         _require(isinstance(route, dict) and _text(route.get("kind")), "conditional return route differs")
         kind, nodes = route["kind"], route.get("selected_node_ids")
@@ -358,13 +365,15 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
             retirement += 1
         elif kind == "checked_child":
             _keys(route, base | {"procedure", "canonical_handles", "canonical_resources", "handle_forwarding"})
-            _child(route, name, procedures, coordinators, canonical, scope, resource_rows, scalar_uses)
+            relations.append(_child(route, name, procedures, coordinators, canonical, scope, resource_rows))
             children.append(route)
         elif kind == "checked_lexical_child":
             _keys(route, base | {"procedure", "source_call", "namespace_owner"})
             _require(return_record is not None and return_record["version"] == 4,
                      "conditional return lexical child requires its distinct policy version")
             _lexical_child(route, name, procedures, coordinators)
+            relations.append({"caller": name, "callee": route["procedure"], "resources": None,
+                              "explicit": set(), "implicit": set()})
             lexical_children.append(route)
         elif kind == "checked_condition":
             _keys(route, base | {"summary_identity"})
@@ -406,6 +415,7 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
         device_ids.add(identity)
     _require(checked_devices == device_ids and checked_transfers == {t["identity"] for t in epoch_member["storage_transfers"]},
              "conditional return device or identity-transfer coverage differs")
+    return relations
 
 
 def _lexical_child(route, caller, procedures, coordinators):
@@ -551,9 +561,6 @@ def _projected_implicit_uses(scope, procedure):
     """
     used = set()
     epoch = scope["checked_execution_plan"]["storage_epoch"]
-    procedures = {row["procedure"]: row for row in scope["checked_execution_plan"]["procedures"]}
-    coordinators = {row["procedure"]: row for row in scope.get("module_coordinators", [])}
-    returned = {row["procedure"]: row for row in epoch["return_contract"]["members"]}
     projections = [(row["procedure"], row["call_projection"]) for row in epoch.get("native_opaque_accesses", [])]
     projections.extend((member["procedure"], projection) for member in epoch["members"]
                        for task in member.get("source_device_tasks", [])
@@ -567,21 +574,6 @@ def _projected_implicit_uses(scope, procedure):
             incoming[edge["callee"]].append(edge)
         seeds = [(leaf, slot, set(projection["field_roots"][local]))
                  for local, slot in projection["field_slots"].items()]
-        # Existing numeric units and exact immediate actual mappings already
-        # justify direct implicit captures. Carry those same global identities
-        # through the authenticated projection, including empty intermediate
-        # wrappers; the projection supplies every traversed slot association.
-        for name, node in nodes.items():
-            direct = {root for unit in procedures[name]["units"] for root in unit["resources"].values()}
-            direct.update(value for child_name, child in procedures.items() for call in child["calls"]
-                          if call.get("caller") == name and isinstance(call.get("resource_mappings"), dict)
-                          and call in coordinators.get(child_name, {}).get("calls", [])
-                          and any(route.get("kind") == "checked_child" and route.get("procedure") == child_name
-                                  and route.get("handle_forwarding") == call.get("handle_bindings")
-                                  for route in returned[name]["routes"])
-                          for value in call["resource_mappings"].values() if isinstance(value, str))
-            seeds.extend((name, slot, {root}) for root, slot in node["resource_slots"].items()
-                         if root in direct and not root.startswith("argument::"))
         for start, slot, canonical in seeds:
             pending = [(start, slot)]
             seen = set()
@@ -601,7 +593,60 @@ def _projected_implicit_uses(scope, procedure):
     return used
 
 
-def _child(route, caller, procedures, coordinators, canonical, scope, resource_rows, scalar_uses):
+def _closed_implicit_uses(relations, procedures, scalar_uses, scope):
+    """Close uses only after every existing original CALL route is checked.
+
+    The first phase has checked selections, associations, descriptors and slot
+    forwarding. This finite closure discharges its remaining use obligations;
+    it issues no new CALL, capture, allocation or payload authority.
+    """
+    from heapq import heappop, heappush
+
+    uses, parents, children = {}, {name: [] for name in procedures}, {name: [] for name in procedures}
+    for name, procedure in procedures.items():
+        direct = {root for unit in procedure["units"] for root in unit["resources"].values()}
+        direct.update(scalar_uses.get(name, ()))
+        direct.update(access["resource"] for unit in procedure["units"]
+                      for operation in unit["operations"].get("native_operations", ())
+                      for access in (operation.get("native_opaque_accesses") or {}).get("accesses", ()))
+        direct.update(_projected_implicit_uses(scope, name))
+        uses[name] = {root for root in direct if not root.startswith("argument::")}
+    for relation in relations:
+        caller, callee = relation["caller"], relation["callee"]
+        _require(caller in procedures and callee in procedures and caller != callee,
+                 "conditional return checked CALL relation has a foreign member or cycle")
+        parents[callee].append(relation)
+        children[caller].append(callee)
+        uses[caller].update(root for root in relation["explicit"] if not root.startswith("argument::"))
+    reached, pending = set(), [scope["checked_execution_plan"]["entry"]]
+    while pending:
+        name = pending.pop()
+        if name not in reached:
+            reached.add(name)
+            pending.extend(children[name])
+    _require(reached == set(procedures), "conditional return checked CALL relation has a disconnected member")
+    remaining = {name: len(callees) for name, callees in children.items()}
+    ready = []
+    for name, count in remaining.items():
+        if count == 0:
+            heappush(ready, name)
+    completed = set()
+    while ready:
+        name = heappop(ready)
+        completed.add(name)
+        for relation in parents[name]:
+            caller, resources = relation["caller"], relation["resources"]
+            forwarded = uses[name] if resources is None else {
+                root for root, canonical in resources.items() if root == canonical and root in uses[name]}
+            uses[caller].update(forwarded)
+            remaining[caller] -= 1
+            if remaining[caller] == 0:
+                heappush(ready, caller)
+    _require(completed == set(procedures), "conditional return checked CALL relation contains a cycle")
+    return uses
+
+
+def _child(route, caller, procedures, coordinators, canonical, scope, resource_rows):
     callee = route["procedure"]
     _require(_text(callee) and callee in coordinators and callee in procedures, "conditional return checked child differs")
     mappings, handles, forward = (route[key] for key in ("canonical_resources", "canonical_handles", "handle_forwarding"))
@@ -623,42 +668,31 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
     parent_namespace = _context_member(caller, scope, coordinators)
     parent_map = (coordinators[parent_namespace]["resource_mappings"] if parent_namespace in coordinators
                   else {root: root for root in canonical})
-    matches = False
     for call in calls:
         actuals = call.get("resource_mappings")
         if not isinstance(actuals, dict):
             continue
+        # An unused actual in an empty child has no retained resource slot.
+        # Only associations already needed by the checked child seed a use.
+        explicit = {mappings[root] for root in actuals if root in mappings}
         missing = set(mappings) - set(actuals)
         if missing:
             # Implicit module captures have no dummy/actual association. Their
-            # original roots must occur independently in this child's emitted
-            # units or direct child actuals, with the same canonical descriptor.
-            # Never manufacture a missing explicit argument association.
-            used = {root for unit in procedures[callee]["units"] for root in unit["resources"]}
-            used.update(value for child in procedures.values() for nested in child["calls"]
-                        if nested.get("caller") == callee and isinstance(nested.get("resource_mappings"), dict)
-                        for value in nested["resource_mappings"].values() if isinstance(value, str))
-            used.update(scalar_uses.get(callee, ()))
-            # Typed native reservations are absent from managed unit resources.
-            # Their exact operation/source/call/epoch links were checked by
-            # validate_native_opaque_accesses before conditional return.
-            used.update(access["resource"] for unit in procedures[callee]["units"]
-                        for operation in unit["operations"].get("native_operations", ())
-                        for access in (operation.get("native_opaque_accesses") or {}).get("accesses", ()))
-            used.update(_projected_implicit_uses(scope, callee))
+            # global identity, descriptors and slots are checked immediately.
+            # Only evidence of an actual use is deferred until all original
+            # child routes pass the same checks; explicit formals stay exact.
             bindings = scope.get("resource_bindings")
             _require(isinstance(bindings, dict)
                      and isinstance(bindings.get("resources"), list)
                      and _digest(resource_rows) == _digest(scope["checked_execution_plan"]["resources"]),
                      "conditional return implicit module descriptor inventory differs")
             descriptors = {row["resource"]: row["descriptor"] for row in resource_rows}
-            if not all(not root.startswith("argument::") and root in used and root == mappings[root]
+            if not all(not root.startswith("argument::") and root == mappings[root]
                        and root in descriptors and descriptors[root].get("resource") == root
                        for root in missing):
                 continue
             actuals = {**actuals, **{root: root for root in missing}}
         if all(parent_map.get(actuals[root], actuals[root]) == value for root, value in mappings.items()):
-            matches = True
             local_actuals = projected["source_call"]["resource_mapping"] if projected is not None else None
             for root, value in mappings.items():
                 slot = str(_slot(callee, root))
@@ -669,5 +703,6 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
                              "conditional return projected local/canonical association differs")
                 parent_slot = _slot(parent_namespace, local) if parent_namespace in coordinators else canonical[value]
                 _require(forward[slot] == parent_slot, "conditional return child-to-parent local handles differ")
-            break
-    _require(matches, "conditional return child formal-to-canonical association differs")
+            return {"caller": caller, "callee": callee, "resources": dict(mappings),
+                    "explicit": explicit, "implicit": missing}
+    _require(False, "conditional return child formal-to-canonical association differs")
