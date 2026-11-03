@@ -265,11 +265,20 @@ def validate_scalar_element_reservations(scope, plan, manifest, epoch, members, 
         changed = False
         for name, member in by_member.items():
             for route in member["routes"]:
-                if route.get("kind") != "checked_child":
+                if route.get("kind") not in {"checked_child", "checked_lexical_child"}:
                     continue
                 child_uses = uses.get(route["procedure"], set())
-                forwarded = {root for root, canonical_root in route["canonical_resources"].items()
-                             if root == canonical_root and root in child_uses}
+                if route["kind"] == "checked_lexical_child":
+                    relation = coordinators.get(route["procedure"], {}).get("lexical_namespace")
+                    _require(isinstance(relation, dict) and relation.get("parent") == name
+                             and any(row.get("source_call") == route.get("source_call")
+                                     and row.get("selected_node_ids") == route.get("selected_node_ids")
+                                     for row in relation.get("source_calls", [])),
+                             "scalar element lexical forwarding lost its exact original parent CALL")
+                    forwarded = child_uses & set(reservations)
+                else:
+                    forwarded = {root for root, canonical_root in route["canonical_resources"].items()
+                                 if root == canonical_root and root in child_uses}
                 before = len(uses.get(name, set()))
                 uses.setdefault(name, set()).update(forwarded)
                 changed |= before != len(uses[name])

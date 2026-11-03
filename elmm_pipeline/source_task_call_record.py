@@ -20,15 +20,28 @@ def require_single_association(procedure, owner, manifest):
         procedures = {p["procedure"]: p for p in plan["procedures"]}
         parameterized = {p["procedure"] for p in scope.get("module_coordinators", [])
                          if p.get("parameterized_handles") is True}
+        inherited = {p["procedure"]: p.get("lexical_namespace")
+                     for p in scope.get("internal_coordinators", [])}
+        coordinators = {p["procedure"]: p for p in scope.get("module_coordinators", [])
+                        + scope.get("internal_coordinators", [])}
+        _require(not set(inherited) & {p["procedure"] for p in scope.get("module_coordinators", [])},
+                 "source line task has conflicting lexical and module namespaces")
         pending, seen = [procedure["procedure"]], set()
         while pending:
             name = pending.pop()
             if name in seen:
                 continue
             seen.add(name)
+            relation = inherited.get(name)
+            if relation is not None:
+                parent, _namespace = validate_lexical_namespace(
+                    relation, name, procedures, coordinators, scope, manifest)
+                pending.append(parent)
+                continue
             if name not in parameterized:
                 continue  # This invocation already uses the owning registrations.
-            calls = procedures[name]["calls"]
+            calls = [call for call in procedures[name]["calls"]
+                     if call.get("procedure", name) == name and call.get("caller") != name]
             if calls:
                 _require(all(c.get("resource_mappings") == calls[0].get("resource_mappings") for c in calls),
                          "source line task requires its varying CALL projection")
@@ -38,6 +51,57 @@ def require_single_association(procedure, owner, manifest):
 def _slots(value):
     _require(isinstance(value, dict) and all(_text(k) and type(v) is int and v > 0 for k, v in value.items())
              and len(set(value.values())) == len(value), "source CALL projection requires distinct exact slots")
+
+
+def validate_lexical_namespace(value, name, procedures, coordinators, scope, manifest):
+    """Bind an existing argumentless lexical ABI to its original parent CALLs."""
+    _keys(value, {"version", "kind", "parent", "namespace_owner", "source_calls"})
+    parent, namespace = value["parent"], value["namespace_owner"]
+    _require(type(value["version"]) is int and value["version"] == 1
+             and value["kind"] == "original_argumentless_lexical_namespace"
+             and _text(parent) and parent in procedures and name.startswith(parent + "::")
+             and "::" not in name[len(parent) + 2:]
+             and (namespace is None or _text(namespace) and namespace in coordinators
+                  and coordinators[namespace].get("parameterized_handles") is True),
+             "source CALL projection inherited lexical namespace differs")
+    rows = value["source_calls"]
+    _require(isinstance(rows, list) and bool(rows), "source CALL projection lost its original lexical CALLs")
+    expected = [call for call in procedures[parent]["calls"]
+                if call.get("procedure") == name and call.get("execution") ==
+                "original internal procedure; host-associated owner control"]
+    calls, selections, sites = [], set(), []
+    from .source_placement_record import _tasks
+
+    graphs = [row for row in scope.get("graph_execution", {}).get("procedures", [])
+              if row.get("procedure") == parent]
+    _require(len(graphs) == 1, "source CALL projection lost its original lexical parent graph")
+    tasks = {task["id"]: task for task in _tasks(graphs[0].get("task_graph"))}
+    for row in rows:
+        _keys(row, {"source_call", "caller_graph", "selected_node_ids"})
+        call, selected = row["source_call"], row["selected_node_ids"]
+        _keys(call, _CALL | {"caller", "source", "first_line", "last_line", "execution"})
+        _require(type(call["schema_version"]) is int and call["schema_version"] == 2
+                 and call["procedure"] == name and call["caller"] == parent and call["source_kind"] == "internal"
+                 and _text(call["target"]) and call["source"] == procedures[parent]["source"]
+                 and call["formal_arguments"] == call["actual_arguments"] == call["original_arguments"] == []
+                 and call["resource_mapping"] == {} and call["resource_mappings"] == []
+                 and call["actual_evaluation"] == "original call position and guards; no analysis-time evaluation"
+                 and call["execution"] == "original internal procedure; host-associated owner control"
+                 and type(call["first_line"]) is int and type(call["last_line"]) is int
+                 and 1 <= call["first_line"] <= call["last_line"]
+                 and call in manifest.get("resolved_calls", []) and call in expected,
+                 "source CALL projection changed its original argumentless lexical CALL")
+        _require(row["caller_graph"] == procedures[parent]["structured_summary_identity"]
+                 and isinstance(selected, list) and len(selected) == 1 and _text(selected[0])
+                 and selected[0].startswith(parent + "/") and selected[0] in tasks
+                 and tasks[selected[0]].get("opaque") is True and selected[0] not in selections,
+                 "source CALL projection changed its original lexical selection")
+        selections.update(selected)
+        calls.append(call)
+        sites.append((call["first_line"], call["last_line"]))
+    _require(calls == expected and sites == sorted(set(sites)),
+             "source CALL projection omitted or repeated an original lexical CALL")
+    return parent, namespace
 
 
 def _original_call(call, callee, caller):
@@ -150,7 +214,8 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
         _require(isinstance(node, dict) and type(node.get("parameterized")) is bool,
                  "source CALL projection member namespace differs")
         _keys(node, {"procedure", "source_graph", "source", "source_sha256", "parameterized", "resource_slots"}
-              | (set() if node["parameterized"] else {"owner_resources"}))
+              | (set() if node["parameterized"] else
+                 {"inherited_namespace"} if "inherited_namespace" in node else {"owner_resources"}))
         name = node["procedure"]
         _require(_text(name) and name in procedures and name not in nodes
                  and all(node[k] == procedures[name][p] for k, p in
@@ -160,11 +225,17 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
         _slots(node["resource_slots"])
         coordinator = coordinators.get(name, {})
         if node["parameterized"]:
-            _require(procedures[name]["calls"] == coordinator.get("calls"),
+            incoming_calls = [call for call in procedures[name]["calls"] if "handle_bindings" in call]
+            _require(incoming_calls == coordinator.get("calls"),
                      "source CALL projection original array association or companion site inventory differs")
         _require(node["parameterized"] is (coordinator.get("parameterized_handles") is True),
                  "source CALL projection namespace differs from its existing companion ABI")
-        if not node["parameterized"]:
+        if "inherited_namespace" in node:
+            _require(name in {row["procedure"] for row in scope.get("internal_coordinators", [])}
+                     and node["inherited_namespace"] == coordinator.get("lexical_namespace"),
+                     "source CALL projection inherited namespace differs from its lexical ABI")
+            validate_lexical_namespace(node["inherited_namespace"], name, procedures, coordinators, scope, manifest)
+        elif not node["parameterized"]:
             canonical = node["owner_resources"]
             _require(isinstance(canonical, dict) and set(canonical) == set(node["resource_slots"])
                      and all(_text(root) and root in resources and node["resource_slots"][local]
@@ -177,6 +248,21 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
         nodes[name] = node
     _require(list(nodes) == sorted(nodes) and procedure["procedure"] in nodes,
              "source CALL projection member order or leaf differs")
+    for name, node in nodes.items():
+        relation = node.get("inherited_namespace")
+        if relation is None:
+            continue
+        parent, namespace = relation["parent"], relation["namespace_owner"]
+        _require(parent in nodes and namespace in nodes and namespace != name
+                 and nodes[namespace]["parameterized"] and node["resource_slots"] == nodes[parent]["resource_slots"],
+                 "source CALL projection inherited slots or namespace owner differ")
+        seen, current = set(), name
+        while current != namespace:
+            _require(current not in seen and current in nodes and "inherited_namespace" in nodes[current]
+                     and nodes[current]["inherited_namespace"]["namespace_owner"] == namespace,
+                     "source CALL projection inherited namespace chain is incomplete or cyclic")
+            seen.add(current)
+            current = nodes[current]["inherited_namespace"]["parent"]
     _slots(value["field_slots"])
     leaf = nodes[procedure["procedure"]]
     _require(set(value["field_slots"]) == set(local_fields)
@@ -206,7 +292,7 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
         calls = [c for c in procedures[callee]["calls"] if (c.get("caller"), c.get("first_line"), c.get("last_line"))
                  == (caller, edge["first_line"], edge["last_line"])]
         _require(len(calls) == 1 and all(calls[0].get(k) == edge[k] for k in ("handle_bindings", "resource_mappings"))
-                 and edge["source_call"] in manifest.get("resolved_calls", []),
+                 and any(_digest(edge["source_call"]) == _digest(call) for call in manifest.get("resolved_calls", [])),
                  "source CALL projection differs from its retained companion CALL")
         mapping = edge["handle_bindings"]
         _slots(mapping)
@@ -219,7 +305,8 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
         for slot, actual in mapping.items():
             _keys(identities[slot], {"kind", "slot"})
             _require(type(identities[slot]["slot"]) is int and identities[slot]["slot"] == actual
-                     and identities[slot]["kind"] == ("forwarded_slot" if nodes[caller]["parameterized"] else "owner_registration"),
+                     and identities[slot]["kind"] == ("forwarded_slot" if nodes[caller]["parameterized"]
+                         or "inherited_namespace" in nodes[caller] else "owner_registration"),
                      "source CALL projection changed storage identity forwarding")
         arrays = _original_call(edge["source_call"], nodes[callee], nodes[caller])
         _require(isinstance(edge["resource_mappings"], dict) and set(edge["resource_mappings"]) == set(arrays),
@@ -236,7 +323,8 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
     _require(edge_keys == sorted(set(edge_keys)), "source CALL projection repeats or reorders original CALLs")
     for name, node in nodes.items():
         if node["parameterized"]:
-            expected = {(c["caller"], name, c["first_line"], c["last_line"]) for c in procedures[name]["calls"]}
+            expected = {(c["caller"], name, c["first_line"], c["last_line"]) for c in procedures[name]["calls"]
+                        if "handle_bindings" in c}
             _require(bool(expected) and expected == {k for k in edge_keys if k[1] == name},
                      "source CALL projection omits a retained incoming CALL")
     # Finite transport consistency over the already-issued DAG. It does not
@@ -252,7 +340,9 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
         node = nodes[name]
         reverse = {number: root for root, number in node["resource_slots"].items()}
         _require(slot in reverse, "source CALL projection lost a resource slot")
-        if node["parameterized"]:
+        if "inherited_namespace" in node:
+            result = roots(node["inherited_namespace"]["parent"], slot)
+        elif node["parameterized"]:
             result = set().union(*(roots(e["caller"], e["handle_bindings"][str(slot)]) for e in incoming[name]))
         else:
             result = {node["owner_resources"][reverse[slot]]}
@@ -286,7 +376,9 @@ def validate_call_projection(value, record, fields, procedure, resources, owner,
     _keys(value, {"identity", "version", "kind", "owner", "procedure", "source_proof_identity", "field_slots",
                   "members", "calls", "field_roots", "root_registrations", "projection_semantics",
                   "conservative_effects", "runtime_validation"} | _FLAGS)
-    _require(type(value["version"]) is int and value["version"] == 1
+    projected_version = 2 if any("inherited_namespace" in node for node in value.get("members", [])
+                                 if isinstance(node, dict)) else 1
+    _require(type(value["version"]) is int and value["version"] == projected_version
              and value["kind"] == "original_source_task_companion_projection"
              and _sha256(value["identity"]) and value["identity"] == _digest({k: v for k, v in value.items() if k != "identity"})
              and value["owner"] == owner and value["procedure"] == procedure["procedure"] == source["procedure"]
