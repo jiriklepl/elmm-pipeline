@@ -606,6 +606,12 @@ def _closed_implicit_uses(relations, procedures, scalar_uses, scope):
     """
     from heapq import heappop, heappush
 
+    plan = scope["checked_execution_plan"]
+    descriptors = {row["resource"]: row["descriptor"] for row in plan["resources"]}
+    reservations = {row["resource"] for row in plan["storage_epoch"]["resources"]
+                    if row.get("storage") == "opaque host reservation"
+                    and row.get("device_replica_authorized") is False
+                    and row.get("initialization_authorized") is False}
     uses, parents, children = {}, {name: [] for name in procedures}, {name: [] for name in procedures}
     for name, procedure in procedures.items():
         direct = {root for unit in procedure["units"] for root in unit["resources"].values()}
@@ -613,6 +619,19 @@ def _closed_implicit_uses(relations, procedures, scalar_uses, scope):
         direct.update(access["resource"] for unit in procedure["units"]
                       for operation in unit["operations"].get("native_operations", ())
                       for access in (operation.get("native_opaque_accesses") or {}).get("accesses", ()))
+        for unit in procedure["units"]:
+            for operation in unit["operations"].get("native_operations", ()):
+                if operation.get("kind") != "complete original native CALL":
+                    continue
+                # A reached BYTE reservation is a physical use of its module
+                # storage, just as registration in unit.resources is. It is
+                # not a numeric capture or an inferred use of an unused actual.
+                # Bind it to the same canonical descriptor and opaque epoch role.
+                for root, metadata in operation.get("host_metadata", {}).items():
+                    _require(root in reservations and metadata.get("device_capture") is False
+                             and metadata.get("descriptor") == descriptors.get(root),
+                             "conditional return native reservation descriptor or storage role differs")
+                    direct.add(root)
         direct.update(_projected_implicit_uses(scope, name))
         uses[name] = {root for root in direct if not root.startswith("argument::")}
     for relation in relations:
