@@ -628,9 +628,10 @@ python -m compiler --input /path/to/module.f90 --list-candidates --json
 ```
 
 Those commands run from the explicitly chosen compiler checkout/environment.
-`--require-markers` retains strict annotated selection. The pipeline supplies
-selected generated entries automatically; users need not name kernels. Unknown
-precision aliases are rejected rather than inferred from their spelling.
+The retired `--require-markers` option now reports an error; marker comments remain
+accepted. The pipeline supplies selected generated entries automatically; users need
+not name kernels. Unknown precision aliases are rejected rather than inferred from
+their spelling.
 
 ## Transformation contract
 
