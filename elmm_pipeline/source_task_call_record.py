@@ -104,7 +104,7 @@ def validate_lexical_namespace(value, name, procedures, coordinators, scope, man
     return parent, namespace
 
 
-def _original_call(call, callee, caller):
+def _original_call(call, callee, caller, *, scalar_elements_validated=False):
     _keys(call, _CALL)
     _require(type(call["schema_version"]) is int and call["schema_version"] == 2
              and call["procedure"] == callee["procedure"] and _text(call["target"]) and _text(call["source_kind"])
@@ -132,7 +132,10 @@ def _original_call(call, callee, caller):
     _require(isinstance(rows, list) and len(rows) == len(formals), "source CALL projection mappings differ")
     mapped, arrays = {}, {}
     for formal, actual, row in zip(formals, actuals, rows, strict=True):
-        _keys(row, _MAPPING)
+        has_element = isinstance(row, dict) and row.get("storage") == "scalar_element"
+        _keys(row, _MAPPING | ({"scalar_element"} if has_element else set()))
+        _require(not has_element or scalar_elements_validated,
+                 "source CALL projection scalar element lacks its checked coordinate contract")
         descriptor = row["formal_descriptor"]
         _require(row["formal"] == formal and row["formal_resource"] == "argument::" + formal
                  and row["actual"] == actual and isinstance(descriptor, dict)
@@ -148,14 +151,20 @@ def _original_call(call, callee, caller):
             mapped[row["formal_resource"]] = row["resource"]
         if not descriptor["rank"]:
             continue
-        _binding(descriptor)
-        _binding(row["actual_descriptor"])
+        registered = row["formal_resource"] in callee["resource_slots"]
+        # Host-only original associations can exceed the device task ABI rank.
+        # They do not become registered fields or authorize device access.
+        _binding(descriptor, max_rank=3 if registered else 15)
+        _binding(row["actual_descriptor"], max_rank=3 if registered else 15)
         _require(row["presence"] == "supplied" and row["storage"] == "whole" and row["section"] is None
                  and row["resource"] == row["actual_descriptor"]["resource"]
-                 and all(descriptor[k] == row["actual_descriptor"][k] for k in ("type", "kind", "rank"))
-                 and row["formal_resource"] in callee["resource_slots"]
-                 and row["resource"] in caller["resource_slots"],
+                 and all(descriptor[k] == row["actual_descriptor"][k] for k in ("type", "kind", "rank")),
                  "source CALL projection requires original whole-array slot associations")
+        # Original CALL associations also include unused array formals. Only
+        # registered formals transport handles; an unused formal grants no slot.
+        if row["formal_resource"] in callee["resource_slots"]:
+            _require(row["resource"] in caller["resource_slots"],
+                     "source CALL projection registered formal lacks its caller slot")
         arrays[row["formal_resource"]] = row
     _require(call["resource_mapping"] == mapped, "source CALL projection source mapping inventory differs")
     return arrays
@@ -273,6 +282,7 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
                  bool(edges) or not any(node["parameterized"] for node in nodes.values())),
              "source CALL projection requires its complete original CALL DAG")
     incoming, edge_keys, selections = {name: [] for name in nodes}, [], set()
+    scalar_elements_validated = False
     for edge in edges:
         _keys(edge, {"caller", "callee", "first_line", "last_line", "selected_node_ids", "caller_graph",
                      "handle_bindings", "storage_identities", "resource_mappings", "source_call"})
@@ -308,10 +318,29 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
                      and identities[slot]["kind"] == ("forwarded_slot" if nodes[caller]["parameterized"]
                          or "inherited_namespace" in nodes[caller] else "owner_registration"),
                      "source CALL projection changed storage identity forwarding")
-        arrays = _original_call(edge["source_call"], nodes[callee], nodes[caller])
+        _keys(edge["source_call"], _CALL)
+        associations = edge["source_call"]["resource_mappings"]
+        _require(isinstance(associations, list), "source CALL projection mappings differ")
+        has_elements = any(isinstance(row, dict) and row.get("storage") == "scalar_element"
+                           for row in associations)
+        if has_elements:
+            coordinates = calls[0].get("original_scalar_element_coordinates")
+            _require(isinstance(coordinates, dict) and coordinates.get("call") == edge["source_call"],
+                     "source CALL projection scalar elements differ from their original coordinate contract")
+            if not scalar_elements_validated:
+                from .scalar_element_record import validate_scalar_element_reservations
+
+                epoch = plan["storage_epoch"]
+                validate_scalar_element_reservations(scope, plan, manifest, epoch,
+                                                     epoch["return_contract"]["members"], coordinators)
+                scalar_elements_validated = True
+        arrays = _original_call(edge["source_call"], nodes[callee], nodes[caller],
+                                scalar_elements_validated=has_elements and scalar_elements_validated)
         _require(isinstance(edge["resource_mappings"], dict) and set(edge["resource_mappings"]) == set(arrays),
                  "source CALL projection canonical actual inventory differs")
         for local, row in arrays.items():
+            if local not in nodes[callee]["resource_slots"]:
+                continue
             _require(mapping[str(nodes[callee]["resource_slots"][local])] == nodes[caller]["resource_slots"][row["resource"]],
                      "source CALL projection handle differs from original array association")
         for local, slot in nodes[callee]["resource_slots"].items():
@@ -354,6 +383,17 @@ def validate_call_inventory(value, local_fields, procedure, resources, owner, ma
              "source CALL projection field closure differs or includes foreign members")
     for edge in edges:
         for local, canonical in edge["resource_mappings"].items():
+            _require(_text(canonical), "source CALL projection canonical association differs")
+            if local not in nodes[edge["callee"]]["resource_slots"]:
+                # No handle or effect is inferred from this original association.
+                # Where its caller already has a slot, retain the canonical check.
+                row = next(row for row in edge["source_call"]["resource_mappings"]
+                           if row["formal_resource"] == local)
+                actual_slot = nodes[edge["caller"]]["resource_slots"].get(row["resource"])
+                if actual_slot is not None:
+                    _require(canonical in roots(edge["caller"], actual_slot),
+                             "source CALL projection unregistered formal changed its caller association")
+                continue
             slot = nodes[edge["callee"]]["resource_slots"][local]
             _require(_text(canonical) and canonical in roots(edge["caller"], edge["handle_bindings"][str(slot)]),
                      "source CALL projection canonical representative is outside its original slot closure")

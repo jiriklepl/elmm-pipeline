@@ -36,13 +36,13 @@ def _keys(value, fields):
     _require(isinstance(value, dict) and set(value) == fields, "source device task requires its exact schema")
 
 
-def _binding(value, *, rank=None):
+def _binding(value, *, rank=None, max_rank=3):
     _keys(value, _BINDING)
     _require(isinstance(value["name"], str) and _IDENT.fullmatch(value["name"]) and _text(value["resource"])
              and isinstance(value["type"], str) and value["type"] in {"integer", "real"}
              and type(value["kind"]) is int
              and (value["type"], value["kind"]) in {("integer", 4), ("real", 4), ("real", 8)}
-             and type(value["rank"]) is int and 0 <= value["rank"] <= 3
+             and type(value["rank"]) is int and 0 <= value["rank"] <= max_rank
              and (rank is None or value["rank"] == rank) and value["intent"] in (None, "in", "out", "inout")
              and isinstance(value["attributes"], list) and all(_text(item) for item in value["attributes"])
              and len(set(value["attributes"])) == len(value["attributes"])

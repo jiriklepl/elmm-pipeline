@@ -10,7 +10,7 @@ _FIELDS = {"identity", "version", "procedure", "selected_node_ids", "cut_before_
 
 
 
-def _original_sequence(selected, cut, procedure):
+def _original_sequence(selected, cut, procedure, *, source_graph=None):
     """Check exact original sibling order and the immediately following cut."""
     _require(isinstance(selected, list) and bool(selected) and all(_text(node) for node in selected)
              and len(set(selected)) == len(selected) and _text(cut) and cut not in selected,
@@ -21,10 +21,40 @@ def _original_sequence(selected, cut, procedure):
     parent = positions[0][0]
     _require(parent.startswith(procedure + "/")
              and all(prefix == parent and separator == "/" and number.isascii() and number.isdecimal()
-                     for prefix, separator, number in positions)
-             and [int(number) for _prefix, _separator, number in positions]
-             == list(range(int(positions[0][2]), int(positions[0][2]) + len(positions))),
+                     for prefix, separator, number in positions),
              "selected position epoch original sequence or immediate tail cut differs")
+    if source_graph is None:
+        _require([int(number) for _prefix, _separator, number in positions]
+                 == list(range(int(positions[0][2]), int(positions[0][2]) + len(positions))),
+                 "selected position epoch original sequence or immediate tail cut differs")
+    else:
+        # Parser indices include comments. Contiguity belongs to the retained
+        # original sequence, whose complete structural digest is rechecked.
+        fields = {"schema_version", "procedure", "structured_identity", "analysis_identity", "root", "entry",
+                  "available", "reasons", "node_limit", "operation_limit", "operation_count",
+                  "raw_structure_rejection", "nodes"}
+        _require(isinstance(source_graph, dict) and set(source_graph) == fields,
+                 "selected position epoch requires its complete original source graph")
+        payload = {key: value for key, value in source_graph.items()
+                   if key not in {"schema_version", "structured_identity", "node_limit"}}
+        payload["version"] = source_graph["schema_version"]
+        _require(type(payload["version"]) is int and payload["version"] == 7
+                 and source_graph["procedure"] == procedure
+                 and source_graph["structured_identity"] == _digest(payload)
+                 and isinstance(source_graph["nodes"], list)
+                 and all(isinstance(node, dict) and _text(node.get("id")) for node in source_graph["nodes"]),
+                 "selected position epoch original source graph identity differs")
+        nodes = {node["id"]: node for node in source_graph["nodes"]}
+        _require(len(nodes) == len(source_graph["nodes"]) and parent in nodes
+                 and nodes[parent].get("kind") == "sequence",
+                 "selected position epoch original parent sequence differs")
+        children = nodes[parent].get("children")
+        _require(isinstance(children, list) and all(_text(node) and node in nodes for node in children)
+                 and len(children) == len(set(children)) and selected[0] in children,
+                 "selected position epoch original sibling inventory differs")
+        first = children.index(selected[0])
+        _require(children[first:first + len(selected) + 1] == [*selected, cut],
+                 "selected position epoch original sequence or immediate tail cut differs")
     return parent
 
 

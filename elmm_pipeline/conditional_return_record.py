@@ -189,7 +189,11 @@ def _selected_root(record, epoch, plan, manifest, scope):
     _false(selection, ("payload_access_authorized", "descriptor_stability_authorized", "entry_definition_authority",
                        "execution_authorized", "cross_exit_retention_authorized", "alias_authority"))
     selected, cut = selection["selected_node_ids"], selection["cut_before"]
-    parent = _original_sequence(selected, cut, plan["entry"])
+    structure = manifest.get("native_effects", {}).get("structured_effects")
+    _require(isinstance(structure, dict)
+             and structure.get("structured_identity") == selection["source_graph"],
+             "hierarchical return requires its retained original source graph")
+    parent = _original_sequence(selected, cut, plan["entry"], source_graph=structure)
     _require(selection["parent_sequence"] == parent, "hierarchical return parent sequence differs")
     roots = [p for p in plan["procedures"] if p["procedure"] == plan["entry"]]
     members = [m for m in epoch["members"] if m["procedure"] == plan["entry"]]
@@ -692,7 +696,7 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
                        for root in missing):
                 continue
             actuals = {**actuals, **{root: root for root in missing}}
-        if all(parent_map.get(actuals[root], actuals[root]) == value for root, value in mappings.items()):
+        if all(actuals[root] == value for root, value in mappings.items()):
             local_actuals = projected["source_call"]["resource_mapping"] if projected is not None else None
             for root, value in mappings.items():
                 slot = str(_slot(callee, root))
@@ -701,6 +705,15 @@ def _child(route, caller, procedures, coordinators, canonical, scope, resource_r
                     local = local_actuals[root]
                     _require(parent_map.get(local, local) == actuals[root],
                              "conditional return projected local/canonical association differs")
+                elif parent_namespace in coordinators:
+                    # Retained CALL mappings are canonical allocation names;
+                    # helper handle numbers belong to the parent's local names.
+                    locals_for_actual = [name for name, target in parent_map.items() if target == actuals[root]]
+                    if not locals_for_actual and not local.startswith("argument::"):
+                        locals_for_actual = [local]  # Implicit module capture.
+                    _require(len(locals_for_actual) == 1,
+                             "conditional return child requires an unambiguous parent-local association")
+                    local = locals_for_actual[0]
                 parent_slot = _slot(parent_namespace, local) if parent_namespace in coordinators else canonical[value]
                 _require(forward[slot] == parent_slot, "conditional return child-to-parent local handles differ")
             return {"caller": caller, "callee": callee, "resources": dict(mappings),
