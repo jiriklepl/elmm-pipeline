@@ -367,9 +367,13 @@ def _accesses(value, procedure, operation, plan, manifest, unit, scope):
         _require(binding["resource"] == root and binding["type"] in {"real", "integer"}
                  and binding["kind"] in {4, 8}
                  and not set(binding["attributes"]) & {"pointer", "optional", "volatile", "asynchronous", "value", "parameter"}
-                 and (not root.startswith("argument::") or binding["intent"] == "in"),
+                 and (not root.startswith("argument::") or binding["intent"] == "in"
+                      or permit["version"] == 2 and binding["intent"] == "inout"
+                      and "allocatable" in binding["attributes"]),
                  "native opaque READ descriptor or borrowed IN role differs")
-        _require(type(permit["version"]) is int and permit["version"] == 1
+        _require(type(permit["version"]) is int and permit["version"] in {1, 2}
+                 and (permit["version"] == 1 or root.startswith("argument::")
+                      and "allocatable" in binding["attributes"] and "target" not in binding["attributes"])
                  and permit["authority"] == "complete original reached native operation"
                  and permit["procedure"] == procedure["procedure"]
                  and permit["source_graph"] == procedure["structured_summary_identity"]
