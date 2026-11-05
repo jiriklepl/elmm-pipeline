@@ -161,7 +161,7 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
         relations.extend(_member(member, procedures[member["procedure"]], epoch_members[member["procedure"]], procedures, all_coordinators, canonical, scope,
                 selected_root=selected_root if member["procedure"] == plan["entry"] else None,
                 resource_rows=resource_rows, source_edits=manifest.get("source_edits"), return_record=record))
-    uses = _closed_implicit_uses(relations, procedures, scalar_uses, scope)
+    uses = _closed_implicit_uses(relations, procedures, scalar_uses, scope, manifest)
     for relation in relations:
         _require(relation["implicit"] <= uses[relation["callee"]],
                  "conditional return child formal-to-canonical association differs")
@@ -597,7 +597,7 @@ def _projected_implicit_uses(scope, procedure):
     return used
 
 
-def _closed_implicit_uses(relations, procedures, scalar_uses, scope):
+def _closed_implicit_uses(relations, procedures, scalar_uses, scope, manifest):
     """Close uses only after every existing original CALL route is checked.
 
     The first phase has checked selections, associations, descriptors and slot
@@ -612,6 +612,7 @@ def _closed_implicit_uses(relations, procedures, scalar_uses, scope):
                     if row.get("storage") == "opaque host reservation"
                     and row.get("device_replica_authorized") is False
                     and row.get("initialization_authorized") is False}
+    formal_reservations_validated = False
     uses, parents, children = {}, {name: [] for name in procedures}, {name: [] for name in procedures}
     for name, procedure in procedures.items():
         direct = {root for unit in procedure["units"] for root in unit["resources"].values()}
@@ -628,6 +629,21 @@ def _closed_implicit_uses(relations, procedures, scalar_uses, scope):
                 # not a numeric capture or an inferred use of an unused actual.
                 # Bind it to the same canonical descriptor and opaque epoch role.
                 for root, metadata in operation.get("host_metadata", {}).items():
+                    if root.startswith("argument::"):
+                        # A dummy keeps its own name, bounds and INTENT. Its
+                        # canonical allocation belongs to an explicit CALL
+                        # association, not this implicit-module-use closure.
+                        # Reuse the typed reader's complete local descriptor,
+                        # CALL projection and canonical reservation checks.
+                        if not formal_reservations_validated:
+                            from .native_opaque_access_record import validate_native_opaque_accesses
+
+                            validate_native_opaque_accesses(plan["storage_epoch"], plan, manifest, scope)
+                            formal_reservations_validated = True
+                        _require(root in {access["resource"] for access in
+                            (operation.get("native_opaque_accesses") or {}).get("accesses", ())},
+                            "conditional return native reservation formal lacks its typed original access")
+                        continue
                     _require(root in reservations and metadata.get("device_capture") is False
                              and metadata.get("descriptor") == descriptors.get(root),
                              "conditional return native reservation descriptor or storage role differs")
