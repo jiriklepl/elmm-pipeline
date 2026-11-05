@@ -56,6 +56,7 @@ class _InlineNativeFallbacks:
     def __init__(self, manifests):
         self.records, _supported = _registry(manifests)
         self.used = set()
+        self.validated_sibling_components = set()
         self.domains = DomainTrace(lambda fields: _identities(fields, self.records, self.used))
         self.components = [component for manifest in manifests
                            for component in manifest.get("component_manifests", [manifest])]
@@ -64,7 +65,7 @@ class _InlineNativeFallbacks:
         if line.startswith("FORT_SCOPED domain "):
             self.domains.lifecycle(line.removeprefix("FORT_SCOPED domain "))
 
-    def borrowed_owner_routes(self, scope, plan, owner, caller):
+    def borrowed_owner_routes(self, scope, plan, owner, caller, component):
         """Use the existing checked companion CALL and coordinator receipts."""
         procedures = {row["procedure"]: row for row in plan.get("procedures", ())}
         name = owner.get("procedure")
@@ -127,8 +128,26 @@ class _InlineNativeFallbacks:
 
         root_path = route(plan.get("entry"), name)
         worker_path = route(name, caller.get("procedure"))
-        if root_path is None or worker_path is None:
+        if root_path is None:
             return None
+        if worker_path is None:
+            # A domain may be opened lazily in one child and then borrowed by
+            # a sibling after returning to their checked caller. The origin
+            # tag does not assert a dynamic CALL ancestry for later helpers.
+            caller_path = route(plan.get("entry"), caller.get("procedure"))
+            contract = plan.get("storage_epoch", {}).get("return_contract")
+            if caller_path is None or not isinstance(contract, dict):
+                return None
+            if id(component) not in self.validated_sibling_components:
+                from .checked_execution_plan import validate_checked_execution_plans
+
+                validate_checked_execution_plans(component)
+                self.validated_sibling_components.add(id(component))
+            return {"kind": "checked sibling helper storage epoch",
+                    "owner_graph": member["structured_summary_identity"],
+                    "return_contract_identity": contract["identity"],
+                    "root_to_owner": root_path, "root_to_caller": caller_path,
+                    "dynamic_call_ancestry_inferred": False}
         return {"kind": "checked borrowed helper storage epoch", "owner_graph": member["structured_summary_identity"],
                 "root_to_owner": root_path, "owner_to_caller": worker_path}
 
@@ -181,7 +200,7 @@ class _InlineNativeFallbacks:
                     continue
                 owner_route = None
                 if plan.get("entry") != owner.get("procedure"):
-                    owner_route = self.borrowed_owner_routes(scope, plan, owner, caller)
+                    owner_route = self.borrowed_owner_routes(scope, plan, owner, caller, component)
                     if owner_route is None:
                         continue
                 regions = [(catalog_owner, region) for catalog_owner, catalog in catalogs
