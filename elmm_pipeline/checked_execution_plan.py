@@ -221,6 +221,9 @@ def _validate_plan(plan, manifest, scope, capture_facts):
                              for local, root in unit["resources"].items()), "unit canonical resource linkage differs")
             _require(isinstance(unit["ordered_definitions"], dict) and isinstance(unit["operations"], dict),
                      "requires definition and operation records")
+            from .original_host_access_record import validate_original_host_accesses
+
+            validate_original_host_accesses(procedure, unit, manifest)
     root = procedures[0]
     _require(root["procedure"] == plan["entry"] and root["source"] == scope.get("path"),
              "root procedure differs from its source scope")
