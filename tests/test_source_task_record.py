@@ -53,7 +53,7 @@ def reseal(record):
     record["identity"] = _digest({k: v for k, v in record.items() if k != "identity"})
 
 
-def _issued(tmp_path, *, envelopes=False, source=SOURCE, facts=None):
+def _issued(tmp_path, *, envelopes=False, source=SOURCE, facts=None, storage_transport=False):
     path = tmp_path / "source.f90"
     path.write_text(source)
     analysis = SourceEffects([path])
@@ -62,13 +62,13 @@ def _issued(tmp_path, *, envelopes=False, source=SOURCE, facts=None):
     first = next(i for i, node in enumerate(nodes) if (directive(node) or "").startswith("parallel"))
     last = next(i for i, node in enumerate(nodes) if directive(node) == "end parallel")
     if facts is None:
-        proof = source_device_task(analysis, routine, nodes[first:last + 1])
+        proof = source_device_task(analysis, routine, nodes[first:last + 1], storage_transport=storage_transport)
     else:
         builder = ScopeBuilder([path], routine.qualified, facts=facts, options=CompilerOptions(),
                                config=OffloadConfig(policy="sections", scope_execution="graph"))
         analysis, routine = builder.analysis, builder.entry
         nodes = tuple(_children(routine.execution))
-        proof = source_device_task(analysis, routine, nodes[first:last + 1], builder=builder)
+        proof = source_device_task(analysis, routine, nodes[first:last + 1], builder=builder, storage_transport=storage_transport)
     provider = emit_tile_task_provider(proof.team, readable_scalars=proof, access_envelopes=envelopes)
     metadata = provider.public()
     record = proof.public()
@@ -87,6 +87,10 @@ def _issued(tmp_path, *, envelopes=False, source=SOURCE, facts=None):
     procedure = {"procedure": routine.qualified, "calls": []}
     manifest = {"artifacts_sha256": {provider.entry + ".cu": metadata["cuda_sha256"],
                                     provider.module + ".f90": metadata["fortran_sha256"]}}
+    if storage_transport:
+        from compiler.emission.common.resources import read_scoped_runtime
+
+        manifest["runtime"] = read_scoped_runtime()[1]
     return record, member, procedure, analysis.inputs.identity(), resources, routine.qualified, manifest
 
 
@@ -202,7 +206,7 @@ def test_provider_versions_have_distinct_exact_scratch_and_batching_records(issu
     else:
         metadata.pop("batching")
     reseal(values[0])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Compiler checked execution plan"):
         check(values)
 
 
@@ -235,7 +239,7 @@ def test_resealed_batching_protocol_cannot_change_budget_mapping_or_authority(is
     else:
         metadata[mutation + "_authorized"] = True
     reseal(record)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Compiler checked execution plan"):
         check(values)
 
 

@@ -64,8 +64,8 @@ def test_byte_scalar_capture_round_trips_complete_checked_scope(tmp_path):
     _outputs, manifest = builder.run()
     scope, = manifest["scopes"]
     task, = scope["source_device_tasks"]
-    assert task["version"] == 2
-    assert task["execution_binding"]["provider"]["metadata"]["version"] == 9
+    assert task["version"] == 3
+    assert task["execution_binding"]["provider"]["metadata"]["version"] == 10
     validate_checked_execution_plans(manifest, capture_facts=builder.facts)
 
 

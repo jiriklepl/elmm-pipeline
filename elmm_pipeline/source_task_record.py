@@ -133,7 +133,8 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
     team, fields, binding = _validate_source_authority(record, member, procedure, inputs, resources,
                                                       owner=owner, capture_facts=capture_facts, manifest=manifest,
                                                       allow_line=pricing is None and placement is None and not native_live,
-                                                      allow_bytes=pricing is None and placement is None and not native_live)
+                                                      allow_bytes=pricing is None and placement is None and not native_live,
+                                                      allow_storage=pricing is None and placement is None and not native_live)
     if placement is not None:
         from .source_placement_record import validate_source_placement
 
@@ -146,13 +147,14 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
     metadata = provider["metadata"]
     _require(isinstance(metadata, dict) and type(metadata.get("version")) is int
              and metadata["version"] in ({6} if placement is not None else
-                                          {4} if native_live else {3} if pricing is not None else {1, 2, 7, 8, 9}),
+                                          {4} if native_live else {3} if pricing is not None else {1, 2, 7, 8, 9, 10}),
              "source device task provider version differs")
     version = metadata["version"]
     _require(not line_team or version == 7, "line source task requires its exact access-envelope provider version")
-    _keys(metadata, _METADATA | ({"line_snapshot_prework"} if line_team else set()) | ({"batching"} if version in {2, 3, 4, 6, 7, 8, 9} else set())
-          | ({"access_envelopes"} if version in {7, 8, 9} else set())
-          | ({"scalar_transport"} if version == 9 else set())
+    _keys(metadata, _METADATA | ({"line_snapshot_prework"} if line_team else set()) | ({"batching"} if version in {2, 3, 4, 6, 7, 8, 9, 10} else set())
+          | ({"access_envelopes"} if version in {7, 8, 9, 10} else set())
+          | ({"scalar_transport"} if version in {9, 10} else set())
+          | ({"field_transport"} if version == 10 else set())
           | ({"native_prepare_entry", "native_transaction_api"} if native_live else set())
           | ({"placement", "selected_backend"} if placement is not None else set()))
     if line_team:
@@ -164,7 +166,7 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
                  and metadata["mapping"] == "thread",
                  "line source task prework or mapping differs")
     scratch = "one bounded logical tile; same-stream source-order units"
-    if version in {2, 3, 4, 6, 7, 8, 9}:
+    if version in {2, 3, 4, 6, 7, 8, 9, 10}:
         batching = metadata["batching"]
         _keys(batching, {"version", "target_bytes", "minimum_tiles", "planned_launches"})
         _require(type(batching["version"]) is int and batching["version"] == (2 if version == 8 else 1)
@@ -176,11 +178,11 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
                  and isinstance(provider["entry"], str)
                  and (placement is not None or provider["entry"].endswith(
                      "_batch_b" + str(batching["target_bytes"] // 1048576) + "m_boxes" if version == 8 else
-                     "_batch_boxes_bytes" if version == 9 else "_batch_boxes" if version == 7 else
+                     "_batch_storage" if version == 10 else "_batch_boxes_bytes" if version == 9 else "_batch_boxes" if version == 7 else
                      "_batch" if version == 2 else "_batch_q_" + pricing["identity"][:10])),
                  "source device task bounded batching protocol differs")
         scratch = "bounded original tile batches; same-stream source-order units"
-    if version in {7, 8, 9}:
+    if version in {7, 8, 9, 10}:
         access = metadata["access_envelopes"]
         _keys(access, {"version", "source", "reads", "writes", "overwrites_authorized",
                        "initialization_authorized", "preflight", "pricing"})
@@ -196,16 +198,18 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
         if version == 8:
             suffix += "_b" + str(metadata["batching"]["target_bytes"] // 1048576) + "m"
         suffix += "_boxes"
-        if version == 9:
+        if version in {9, 10}:
             suffix = (team["identity"][:10] + ("_cta" if metadata["mapping"] == "cooperative" else "_thread")
-                      + "_s" + record["source_proof_identity"][:8] + "_batch_boxes_bytes")
+                      + "_s" + record["source_proof_identity"][:8]
+                      + ("_batch_storage" if version == 10 else "_batch_boxes_bytes"))
         _require(provider["entry"] == "fort_tile_task_" + suffix
                  and provider["module"] == "fort_tile_module_" + suffix,
                  "source device task access envelope provider identity differs")
     byte_roots = [c["resource"] for c in record["scalar_captures"]
                   if c["authority"]["kind"] == "original real scalar storage; byte transport without value read"]
-    _require(bool(byte_roots) == (version == 9), "byte scalar source requires its exact direct transport ABI")
-    if version == 9:
+    _require(version == 10 or bool(byte_roots) == (version == 9), "byte scalar source requires its exact direct transport ABI")
+    _require((version == 10) == (record["version"] == 3), "source storage requires its exact direct transport ABI")
+    if version in {9, 10}:
         transport = metadata["scalar_transport"]
         _keys(transport, {"version", "resources", "host", "device", "abi", "definitions_authorized"})
         _require(type(transport["version"]) is int and transport["version"] == 1
@@ -215,6 +219,16 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
                  and transport["abi"] == "trivial aligned unsigned-char aggregate; original scalar size and alignment"
                  and transport["definitions_authorized"] is False,
                  "byte scalar transport cannot authorize value reads or definitions")
+    if version == 10:
+        field_transport = metadata["field_transport"]
+        _require(field_transport == {
+            "version": 2, "source_proof_identity": record["source_proof_identity"],
+            "regions": "original physical may-access bytes; preserve partial writes without initialization",
+            "conditional_reads": "original source control retained",
+            "definitions_authorized": False, "pricing_authorized": False,
+        } and type(field_transport.get("version")) is int
+            and field_transport["definitions_authorized"] is field_transport["pricing_authorized"] is False,
+            "source field transport cannot grant definitions, motion or prices")
     if placement is not None:
         suffix = team["identity"][:12] + ("_cta" if metadata["mapping"] == "cooperative" else "_thread")
         suffix += "_g_" + placement["identity"][:16]
@@ -240,7 +254,7 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
              and _sha256(provider["cuda_source_sha256"]) and _sha256(provider["fortran_source_sha256"])
              and metadata["cuda_sha256"] == provider["cuda_source_sha256"]
              and metadata["fortran_sha256"] == provider["fortran_source_sha256"]
-             and metadata["transaction"] == "fort_scope_source_execute_v1"
+             and metadata["transaction"] == ("fort_scope_source_execute_v2" if version == 10 else "fort_scope_source_execute_v1")
              and metadata["scratch"] == scratch
              and metadata["definitions_authorized"] is metadata["placement_authorized"] is False
              and metadata["pricing"] == ("unpriced; explicit sections only" if pricing is None else pricing),
@@ -259,12 +273,34 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
 
 
 def _validate_source_authority(record, member, procedure, inputs, resources, *, owner, capture_facts=None,
-                               allow_line=False, manifest=None, allow_bytes=False):
+                               allow_line=False, manifest=None, allow_bytes=False, allow_storage=False):
     """Common original numerical/scalar/storage evidence, separate from transport."""
-    _require(type(record["version"]) is int and record["version"] in {1, 2}
-             and (record["version"] == 1 or allow_bytes and record["kind"] == "original_tile_private_team")
+    _require(type(record["version"]) is int and record["version"] in {1, 2, 3}
+             and (record["version"] == 1 or record["kind"] == "original_tile_private_team"
+                  and (record["version"] == 2 and allow_bytes or record["version"] == 3 and allow_storage))
              and (record["kind"] == "original_tile_private_team" or allow_line and record["kind"] == _LINE_KIND),
              "source device task source proof version differs")
+    storage_transport = record["version"] == 3
+    if storage_transport:
+        runtime = manifest.get("runtime", {}) if isinstance(manifest, dict) else {}
+        capability = runtime.get("source_storage_tasks")
+        _require(capability == {
+            "abi_version": 2, "execute": "fort_scope_source_execute_v2", "bindings_abi_version": 1,
+            "access": "original conditional may-access envelopes; byte transport without value evaluation",
+            "definitions": "only independently proved overwrites; representation freshness is separate",
+            "readonly": "retain original replica and add a current destination replica",
+            "failure": "same source submission counts and external transaction completion contract",
+            "cost_estimate_available": False,
+        } and type(capability.get("abi_version")) is int and type(capability.get("bindings_abi_version")) is int
+            and capability["cost_estimate_available"] is False
+            and runtime.get("specification_entry") == {
+                "abi_version": 3, "observe": "fort_scope_observe_v1", "fallback": "fort_scope_observe_all_v1",
+                "handle_check": "fort_scope_buffer_valid_v1",
+                "regions": "tracked physical metadata regions without definition authority; whole domain if mappings or live handles are unavailable",
+                "replicas": "read-only publication preserves current device replicas and generations",
+                "failure": "stop before original entry; never replay"}
+            and type(runtime["specification_entry"]["abi_version"]) is int,
+            "source storage transport requires physical observation and its exact runtime ABI")
     _require(record["procedure"] == member["procedure"] == procedure["procedure"]
              and record["source_graph"] == member["source_graph"] and record["source_inputs"] == inputs,
              "source device task original source linkage differs")
@@ -276,7 +312,7 @@ def _validate_source_authority(record, member, procedure, inputs, resources, *, 
     _require(all(record[key] is False for key in ("definitions_authorized", "placement_authorized", "motion_authorized"))
              and record["pricing"] == "unpriced; explicit sections only"
              and record["position"] == "exact original complete OpenMP team"
-             and record["transaction"] == {"runtime": "fort_scope_source_execute_v1", "stream": "supplied",
+             and record["transaction"] == {"runtime": "fort_scope_source_execute_v2" if storage_transport else "fort_scope_source_execute_v1", "stream": "supplied",
                  "scratch": "prework lease outside non-reentrant transaction",
                  "submission": "started before first attempt; exact accepted source-kernel count",
                  "failure": "prework original whole span once; attempted failure poisons; no replay"},
@@ -325,7 +361,7 @@ def _validate_source_authority(record, member, procedure, inputs, resources, *, 
             _scalar_entry_fact(authority["fact"], capture["resource"], capture_facts)
         elif kind == "original real scalar storage; byte transport without value read":
             _keys(authority, {"kind", "finite_or_constant_authorized", "fact"})
-            _require(record["version"] == 2 and not line_team and scalar["type"] == "real"
+            _require(record["version"] in {2, 3} and not line_team and scalar["type"] == "real"
                      and scalar["kind"] in {4, 8} and scalar["rank"] == 0
                      and not set(scalar["attributes"]) & {
                          "pointer", "allocatable", "optional", "target", "value", "volatile", "asynchronous"},
@@ -342,7 +378,7 @@ def _validate_source_authority(record, member, procedure, inputs, resources, *, 
                      "source device task scalar lacks independent readability authority")
         _require(authority["finite_or_constant_authorized"] is False,
                  "source device task readability cannot grant finite or constant values")
-    _require((record["version"] == 2) == any(c["authority"]["kind"] ==
+    _require(storage_transport or (record["version"] == 2) == any(c["authority"]["kind"] ==
              "original real scalar storage; byte transport without value read" for c in captures),
              "byte scalar source version or capture inventory differs")
     fields, effects = team["fields"], record["resources"]
@@ -363,7 +399,8 @@ def _validate_source_authority(record, member, procedure, inputs, resources, *, 
         _keys(effect, {"resource", "descriptor", "access", "regions", "initialization_authorized"})
         _require(effect["descriptor"] == field["binding"] and effect["resource"] == field["binding"]["resource"]
                  and effect["access"] == ("readwrite" if field["written"] else "read")
-                 and effect["regions"] == "complete physical root; read before partial writes"
+                 and effect["regions"] == ("original physical may-access bytes; preserve partial writes without initialization"
+                                           if storage_transport else "complete physical root; read before partial writes")
                  and effect["initialization_authorized"] is False,
                  "source device task must retain whole reads and conservative partial writes")
     local_roots = [field["binding"]["resource"] for field in fields]
