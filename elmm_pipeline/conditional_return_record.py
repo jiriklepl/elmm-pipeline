@@ -628,9 +628,21 @@ def _closed_implicit_uses(relations, procedures, scalar_uses, scope, manifest):
                     and row.get("device_replica_authorized") is False
                     and row.get("initialization_authorized") is False}
     formal_reservations_validated = False
+    members = {member["procedure"]: member for member in plan["storage_epoch"]["members"]}
     uses, parents, children = {}, {name: [] for name in procedures}, {name: [] for name in procedures}
     for name, procedure in procedures.items():
         direct = {root for unit in procedure["units"] for root in unit["resources"].values()}
+        for task in members[name].get("source_device_tasks", ()):
+            binding = task["execution_binding"]
+            if "call_projection" not in binding:
+                # Source tasks have already passed their typed field, canonical
+                # descriptor and original CALL association checks. Direct module
+                # fields need the same use accounting as ordinary numeric units;
+                # they need not also appear in a unit or a projected CALL DAG.
+                # Formal actuals and varying associations retain their existing
+                # explicit-route and projected-use checks below.
+                direct.update(root for local, root in binding["canonical_resources"].items()
+                              if local == root and not root.startswith("argument::"))
         direct.update(scalar_uses.get(name, ()))
         direct.update(access["resource"] for unit in procedure["units"]
                       for operation in unit["operations"].get("native_operations", ())
