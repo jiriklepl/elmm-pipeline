@@ -17,6 +17,27 @@ def original(tmp_path_factory):
 
 def test_original_entry_contract_and_runtime_are_linked(original):
     validate_checked_execution_plans(original)
+    assert original["runtime"]["specification_entry"]["abi_version"] == 3
+
+
+@pytest.mark.parametrize(("version", "regions", "accepted"), [
+    (2, "initialized mapped metadata regions; whole domain if mappings or live handles are unavailable", True),
+    (3, "tracked physical metadata regions without definition authority; whole domain if mappings or live handles are unavailable", True),
+    (2, "tracked physical metadata regions without definition authority; whole domain if mappings or live handles are unavailable", False),
+    (3, "initialized mapped metadata regions; whole domain if mappings or live handles are unavailable", False),
+    (True, "initialized mapped metadata regions; whole domain if mappings or live handles are unavailable", False),
+])
+def test_observation_capability_requires_its_exact_versioned_semantics(original, version, regions, accepted):
+    from elmm_pipeline.specification_entry_record import validate_runtime
+
+    runtime = deepcopy(original["runtime"])
+    runtime["specification_entry"].update(abi_version=version, regions=regions)
+    returned = original["scopes"][0]["checked_execution_plan"]["storage_epoch"]["return_contract"]
+    if accepted:
+        validate_runtime(runtime, returned)
+    else:
+        with pytest.raises(ValueError, match="runtime ABI differs"):
+            validate_runtime(runtime, returned)
 
 
 @pytest.mark.parametrize("mutation", ["missing_phase", "missing_proof", "proof_authority", "proof_body",

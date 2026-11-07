@@ -10,10 +10,17 @@ _UNSAFE = {"pointer", "target", "optional", "volatile", "asynchronous", "value",
 
 
 def validate_runtime(runtime, returned):
+    # Retain historical initialized-only artifacts for their original controls.
+    # New runtimes publish physical versions independently of definition proof.
+    capability = runtime.get("specification_entry", {}) if isinstance(runtime, dict) else {}
+    version = capability.get("abi_version") if isinstance(capability, dict) else None
+    _require(type(version) is int and version in {2, 3}, "specification entry runtime ABI differs")
     _require(isinstance(runtime, dict) and runtime.get("specification_entry") == {
-        "abi_version": 2, "observe": "fort_scope_observe_v1", "fallback": "fort_scope_observe_all_v1",
+        "abi_version": version, "observe": "fort_scope_observe_v1", "fallback": "fort_scope_observe_all_v1",
         "handle_check": "fort_scope_buffer_valid_v1",
-        "regions": "initialized mapped metadata regions; whole domain if mappings or live handles are unavailable",
+        "regions": ("initialized mapped metadata regions; whole domain if mappings or live handles are unavailable"
+                    if version == 2 else
+                    "tracked physical metadata regions without definition authority; whole domain if mappings or live handles are unavailable"),
         "replicas": "read-only publication preserves current device replicas and generations",
         "failure": "stop before original entry; never replay"}, "specification entry runtime ABI differs")
     _require(any("specification_reads" in member.get("entry_exit", {}) for member in returned["members"]),
