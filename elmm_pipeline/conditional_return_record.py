@@ -55,10 +55,11 @@ def _context_member(name, scope, coordinators):
 def validate_conditional_return(record, epoch, plan, manifest, scope):
     version = record.get("version") if isinstance(record, dict) else None
     _sealed(record, _RETURN | ({"root_selection"} if isinstance(record,dict) and "root_selection" in record else set())
-            | ({"native_call_preservation_policy_version"} if version == 3 or version == 4
+            | ({"native_call_preservation_policy_version"} if version == 3 or version in (4, 5)
                and "native_call_preservation_policy_version" in record else set())
-            | ({"lexical_child_policy_version"} if version == 4 else set()))
-    _require(type(version) is int and version in (1, 2, 3, 4) and record["kind"] == "checked_conditional_return"
+            | ({"lexical_child_policy_version"} if version == 4 or version == 5 and "lexical_child_policy_version" in record else set())
+            | ({"specification_entry_policy_version"} if version == 5 else set()))
+    _require(type(version) is int and version in (1, 2, 3, 4, 5) and record["kind"] == "checked_conditional_return"
              and record["entry"] == plan["entry"] and record["source_inputs"] == epoch["source_inputs"]
              and _sha256(record["selection_identity"]), "conditional return source or version linkage differs")
     _false(record, ("escape_completion_assumed", "entry_definition_authority", "payload_access_authorized", "motion_authorized",
@@ -74,7 +75,12 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
              and type(control["module_control_version"]) is int and control["module_control_version"] == 5
              and control["propagation"] == "INOUT by original checked CALL; false is never rearmed in this invocation",
              "conditional return original ENTRY controls differ")
-    if version == 4:
+    if version == 5:
+        _require(type(record["specification_entry_policy_version"]) is int and record["specification_entry_policy_version"] == 1,
+                 "conditional return specification entry policy differs")
+        from .specification_entry_record import validate_runtime
+        validate_runtime(manifest.get("runtime"), record)
+    if version == 4 or "lexical_child_policy_version" in record:
         _require(type(record["lexical_child_policy_version"]) is int and record["lexical_child_policy_version"] == 1,
                  "conditional return lexical child policy differs")
     if version == 3 or "native_call_preservation_policy_version" in record:
@@ -82,7 +88,7 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
                  and record["native_call_preservation_policy_version"] == 2,
                  "conditional return native CALL preservation policy differs")
     selected_root = None
-    if version == 2 or version in (3, 4) and "root_selection" in record:
+    if version == 2 or version in (3, 4, 5) and "root_selection" in record:
         selected_root = _selected_root(record, epoch, plan, manifest, scope)
     else:
         selection = manifest.get("native_ancestor_selection")
@@ -115,7 +121,7 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
     coordinators = scope.get("module_coordinators", [])
     _require(isinstance(coordinators, list), "conditional return requires its original module ENTRY records")
     module = {row.get("procedure"): row for row in coordinators if isinstance(row, dict)}
-    lexical_rows = scope.get("internal_coordinators", []) if version == 4 else []
+    lexical_rows = scope.get("internal_coordinators", []) if "lexical_child_policy_version" in record else []
     _require(isinstance(lexical_rows, list), "conditional return requires its original lexical ENTRY records")
     lexical = {row.get("procedure"): row for row in lexical_rows if isinstance(row, dict)}
     _require(len(module) == len(coordinators) and len(lexical) == len(lexical_rows)
@@ -317,7 +323,11 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
     name = procedure["procedure"]
     _require(member["source_graph"] == procedure["structured_summary_identity"], "conditional return member source graph differs")
     entry = member["entry_exit"]
-    _keys(entry, {"procedure", "original_body_sha256", "specification", "exit", "opaque_resources", "definition_authority"})
+    _keys(entry, {"procedure", "original_body_sha256", "specification", "exit", "opaque_resources", "definition_authority"}
+          | ({"specification_reads"} if "specification_reads" in entry else set()))
+    if "specification_reads" in entry:
+        from .specification_entry_record import validate_projection
+        validate_projection(entry["specification_reads"], entry, return_record, scope)
     _require(entry["procedure"] == name and _sha256(entry["original_body_sha256"])
              and entry["specification"] == "original numeric scalar/descriptor declarations; no hidden calls, aliases or finalization"
              and entry["exit"] == "no retained child-local allocation; original RETURN keeps caller controls"
@@ -362,18 +372,22 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
                 _require(identity not in loop_entries, "conditional return repeats a reached loop retirement")
                 loop_entries.add(identity)
             if "call_preservation" in route:
-                _require(return_record is not None and return_record["version"] in (3, 4)
+                _require(return_record is not None and return_record["version"] in (3, 4, 5)
                          and return_record.get("native_call_preservation_policy_version") == 2 and "loop_entry" not in route,
                          "native CALL preservation requires its distinct conditional return version")
                 _call_preservation(route["call_preservation"],nodes,member,procedure,coordinators,scope,source_edits,return_record)
             retirement += 1
         elif kind == "checked_child":
-            _keys(route, base | {"procedure", "canonical_handles", "canonical_resources", "handle_forwarding"})
+            _keys(route, base | {"procedure", "canonical_handles", "canonical_resources", "handle_forwarding"}
+                  | ({"specification_entry"} if "specification_entry" in route else set()))
             relations.append(_child(route, name, procedures, coordinators, canonical, scope, resource_rows))
+            from .specification_entry_record import validate_call
+            validate_call(route, procedure, procedures, coordinators, scope, source_edits, return_record)
             children.append(route)
         elif kind == "checked_lexical_child":
             _keys(route, base | {"procedure", "source_call", "namespace_owner"})
-            _require(return_record is not None and return_record["version"] == 4,
+            _require(return_record is not None and return_record["version"] in (4, 5)
+                     and return_record.get("lexical_child_policy_version") == 1,
                      "conditional return lexical child requires its distinct policy version")
             _lexical_child(route, name, procedures, coordinators)
             relations.append({"caller": name, "callee": route["procedure"], "resources": None,
@@ -482,7 +496,8 @@ def _call_preservation(value, nodes, member, procedure, coordinators, scope, sou
            and [e.get("first_line"),e.get("last_line")]==span]
     _require(len(edits)==1 and edits[0].get("source_sha256")==procedure["source_sha256"]
              and isinstance(edits[0].get("replacement"),str),"native CALL preservation edit differs")
-    text=edits[0]["replacement"]; original=value["original_source"]
+    text=edits[0]["replacement"]
+    original=value["original_source"]
     _require(text.endswith(original) and text.count(original)==1,"native CALL must execute unchanged exactly once after retirement")
     context_member = _context_member(name, scope, coordinators)
     context=(scope["owner"] if context_member==plan["entry"] else "fort_child_context_"+sha256(context_member.encode()).hexdigest()[:12])
