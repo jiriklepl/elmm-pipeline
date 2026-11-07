@@ -76,7 +76,7 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
              and control["propagation"] == "INOUT by original checked CALL; false is never rearmed in this invocation",
              "conditional return original ENTRY controls differ")
     if version == 5:
-        _require(type(record["specification_entry_policy_version"]) is int and record["specification_entry_policy_version"] == 1,
+        _require(type(record["specification_entry_policy_version"]) is int and record["specification_entry_policy_version"] == 2,
                  "conditional return specification entry policy differs")
         from .specification_entry_record import validate_runtime
         validate_runtime(manifest.get("runtime"), record)

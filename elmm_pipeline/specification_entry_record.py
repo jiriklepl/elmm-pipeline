@@ -2,7 +2,7 @@
 from hashlib import sha256
 
 from .checked_execution_plan import _require, _sha256, _text
-from .conditional_return_record import _context_member, _false, _keys, _sealed
+from .conditional_return_record import _context_member, _false, _keys, _sealed, _slot
 from .native_opaque_access_record import _storage
 from .source_task_record import _binding
 
@@ -11,8 +11,9 @@ _UNSAFE = {"pointer", "target", "optional", "volatile", "asynchronous", "value",
 
 def validate_runtime(runtime, returned):
     _require(isinstance(runtime, dict) and runtime.get("specification_entry") == {
-        "abi_version": 1, "observe": "fort_scope_observe_all_v1",
-        "regions": "all initialized regions in the live domain; undefined holes remain undefined",
+        "abi_version": 2, "observe": "fort_scope_observe_v1", "fallback": "fort_scope_observe_all_v1",
+        "handle_check": "fort_scope_buffer_valid_v1",
+        "regions": "initialized mapped metadata regions; whole domain if mappings or live handles are unavailable",
         "replicas": "read-only publication preserves current device replicas and generations",
         "failure": "stop before original entry; never replay"}, "specification entry runtime ABI differs")
     _require(any("specification_reads" in member.get("entry_exit", {}) for member in returned["members"]),
@@ -21,7 +22,7 @@ def validate_runtime(runtime, returned):
 
 def validate_projection(proof, entry, returned, scope):
     _require(returned is not None and returned["version"] == 5
-             and returned.get("specification_entry_policy_version") == 1
+             and returned.get("specification_entry_policy_version") == 2
              and entry["procedure"] != scope["checked_execution_plan"]["entry"],
              "specification entry requires its distinct checked child policy")
     _sealed(proof, {"identity", "version", "kind", "procedure", "source_inputs", "original_procedure_sha256",
@@ -83,15 +84,25 @@ def validate_call(route, procedure, procedures, coordinators, scope, source_edit
         _require(value is None, "specification entry publication has no original read projection")
         return
     validate_projection(proof, entries[route["procedure"]], returned, scope)
-    _keys(value, {"version", "proof_identity", "context", "source_span", "publication_sha256", "runtime", "policy",
+    _keys(value, {"version", "proof_identity", "context", "source_span", "publication_sha256", "runtime", "policy", "bindings",
                   "replicas", "failure"})
     caller = procedure["procedure"]
     namespace = _context_member(caller, scope, coordinators)
     context = (scope["owner"] if namespace == scope["checked_execution_plan"]["entry"]
                else "fort_child_context_" + sha256(namespace.encode()).hexdigest()[:12])
-    _require(type(value["version"]) is int and value["version"] == 1 and value["proof_identity"] == proof["identity"]
-             and value["context"] == context and value["runtime"] == "fort_scope_observe_all_v1"
-             and value["policy"] == "publish initialized domain regions before original argument and specification evaluation"
+    expected = []
+    if all(root in route["canonical_resources"] for root in proof["array_resources"]):
+        expected = [{"resource": root, "callee_slot": _slot(route["procedure"], root),
+                     "caller_slot": route["handle_forwarding"][str(_slot(route["procedure"], root))],
+                     "canonical_resource": route["canonical_resources"][root]}
+                    for root in proof["array_resources"]]
+    _require(isinstance(value["bindings"], list) and value["bindings"] == expected
+             and all(type(row.get(key)) is int for row in value["bindings"] for key in ("callee_slot", "caller_slot")),
+             "specification entry metadata differs from checked original CALL forwarding")
+    runtime = "fort_scope_observe_v1" if expected else "fort_scope_observe_all_v1"
+    _require(type(value["version"]) is int and value["version"] == 2 and value["proof_identity"] == proof["identity"]
+             and value["context"] == context and value["runtime"] == runtime
+             and value["policy"] == "publish mapped metadata; observe the domain when mappings or live handles are unavailable"
              and value["replicas"] == "preserve valid device replicas and allocation generations"
              and value["failure"] == "stop before child entry; never replay" and _sha256(value["publication_sha256"]),
              "specification entry coherence contract differs")
@@ -114,6 +125,27 @@ def validate_call(route, procedure, procedures, coordinators, scope, source_edit
         f"fort_specification_status = fort_scope_observe_all_v1({context})",
         "if (fort_specification_status /= FORT_SCOPE_OK) error stop 'original specification publication failed'",
         "endif", "end block", ""])
+    if expected:
+        slots = sorted({row["caller_slot"] for row in expected})
+        publication = "\n".join(["block", "use iso_c_binding, only: c_int, c_int64_t, c_size_t, c_loc",
+            "use fort_scoped_memory, only: fort_scope_observe_v1, fort_scope_observe_all_v1, &",
+            "fort_scope_buffer_valid_v1, FORT_SCOPE_OK",
+            "integer(c_int) :: fort_specification_status, fort_specification_valid",
+            "integer :: fort_specification_index", "logical :: fort_specification_precise",
+            f"integer(c_int64_t), target :: fort_specification_buffers({len(slots)})",
+            f"if ({context} /= 0) then",
+            *[f"fort_specification_buffers({index}) = fort_buffer_{slot}" for index, slot in enumerate(slots, 1)],
+            "fort_specification_precise = .true.", f"do fort_specification_index = 1, {len(slots)}",
+            f"fort_specification_status = fort_scope_buffer_valid_v1({context}, &",
+            "fort_specification_buffers(fort_specification_index), fort_specification_valid)",
+            "if (fort_specification_status /= FORT_SCOPE_OK) error stop 'original specification handle check failed'",
+            "if (fort_specification_valid == 0) fort_specification_precise = .false.", "enddo",
+            "if (fort_specification_precise) then",
+            f"fort_specification_status = fort_scope_observe_v1({context}, &",
+            f"c_loc(fort_specification_buffers), {len(slots)}_c_size_t)", "else",
+            f"fort_specification_status = fort_scope_observe_all_v1({context})", "endif",
+            "if (fort_specification_status /= FORT_SCOPE_OK) error stop 'original specification publication failed'",
+            "endif", "end block", ""])
     text = edits[0]["replacement"]
     marker = "call " + coordinators[route["procedure"]]["entry"] + "("
     _require(value["publication_sha256"] == sha256(publication.encode()).hexdigest()

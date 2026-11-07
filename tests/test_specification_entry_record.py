@@ -68,7 +68,7 @@ def test_resealed_entry_contract_cannot_lose_original_source_or_publication(orig
     elif mutation == "runtime_symbol":
         report["runtime"]["specification_entry"]["observe"] = "fort_scope_close"
     elif mutation == "policy":
-        returned["specification_entry_policy_version"] = 2
+        returned["specification_entry_policy_version"] = 1
     else:
         returned["version"] = 1
         del returned["specification_entry_policy_version"]
