@@ -57,7 +57,7 @@ def _direct_children(task_ids, sequence):
     return sorted(positions)
 
 
-def _expected_segments(group, entry, task_ids):
+def _expected_segments(group, entry, task_ids, *, loop_invariant=False, loop_ids=frozenset()):
     """Cross-check the complete reached IF prefix in the existing graph grammar."""
     first = group["selected_node_ids"][0]
     prefix = entry + "/body/"
@@ -78,6 +78,15 @@ def _expected_segments(group, entry, task_ids):
         if cursor == len(path):
             break
         body = path[cursor]
+        if body == "body" and loop_invariant:
+            # The compiler proves a complete enclosing-loop invariant. The
+            # portable reader requires that exact outermost container instead
+            # of accepting a first-iteration prefix or a partial loop body.
+            loop = sequence + "/" + position
+            _require(loop in loop_ids and any(node.startswith(loop + "/body/") for node in task_ids),
+                     "entry preservation lost its original loop body inventory")
+            expected.append([loop])
+            return expected
         _require(re.fullmatch("body" + _NUMBER, body) is not None,
                  "entry preservation cannot cross an unproved loop or association")
         ordinal = int(body[4:])
@@ -94,6 +103,7 @@ def _expected_segments(group, entry, task_ids):
         expected.extend([node] for node in predicates)
         sequence = branch + "/" + body
         cursor += 1
+    _require(not loop_invariant, "entry preservation loop invariant has no enclosing loop")
     return expected
 
 
@@ -105,7 +115,7 @@ def validate_entry_preservation(value, group, epoch, plan, *, original_tasks, ca
     initializedness, payload access, unchanged bytes or a valid device replica.
     """
     _require(isinstance(value, dict) and set(value) == _FIELDS
-             and type(value["version"]) is int and value["version"] == 2
+             and type(value["version"]) is int and value["version"] in (2, 5)
              and value["kind"] == "original_invocation_entry_definition_preservation"
              and _sha256(value["identity"])
              and value["identity"] == _digest({key: item for key, item in value.items() if key != "identity"}),
@@ -118,7 +128,10 @@ def validate_entry_preservation(value, group, epoch, plan, *, original_tasks, ca
              "entry preservation original source, exit or independent facts differ")
     _require(all(value[flag] is False for flag in _FLAGS)
              and value["definition_source"] == "independent original invocation-entry WHOLE facts after original entry undefinition"
-             and value["prefix"] == "exact prior original statements and reached predicates; no enclosing loop or association"
+             and value["prefix"] == (
+                 "exact outer prefix and complete enclosing-loop preservation invariant; no association"
+                 if value["version"] == 5 else
+                 "exact prior original statements and reached predicates; no enclosing loop or association")
              and value["semantics"] == "preserve existing definedness; no stale replica or unchanged-value assumption",
              "entry preservation cannot grant new definitions, payload, lifetime, aliases or execution")
     segments = value["segments"]
@@ -138,8 +151,11 @@ def validate_entry_preservation(value, group, epoch, plan, *, original_tasks, ca
                                                     for task in original_tasks),
              "entry preservation needs its existing checked original task graph")
     task_ids = {task["id"] for task in original_tasks}
+    loop_ids = {task["id"] for task in original_tasks if isinstance(task.get("loop"), dict)
+                and task["loop"].get("name") == task["id"] + "/body"}
     _require([segment["selected_node_ids"] for segment in segments]
-             == _expected_segments(group, plan["entry"], task_ids),
+             == _expected_segments(group, plan["entry"], task_ids,
+                                   loop_invariant=value["version"] == 5, loop_ids=loop_ids),
              "entry preservation omitted or reordered original prefix statements or predicates")
     roots = value["preserved_resources"]
     available = set(group["resources"]) | set(group["descriptor_guard_resources"])

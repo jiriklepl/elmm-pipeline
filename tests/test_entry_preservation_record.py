@@ -15,8 +15,13 @@ from compiler.scopes.call_groups import _candidates
 from compiler.tests.test_owner_local_call_groups import SOURCE, fixture
 
 
-def issue_transport(path, *, nested=False, comments=False, anchor="endif"):
+def issue_transport(path, *, nested=False, comments=False, anchor="endif", loop=False):
     source = SOURCE.replace("call unknown_prefix()", "a(:)=a(:)+1.0_8")
+    if loop:
+        source = source.replace("intent(out)", "intent(inout)")
+        source = source.replace("logical,intent(in)::flag", "logical,intent(in)::flag\ninteger::stage")
+        source = source.replace("if(flag)then\ncall first", "do stage=1,n\nif(flag)then\ncall first")
+        source = source.replace("endif\ncall unknown_suffix()", "endif\nenddo\ncall unknown_suffix()")
     if comments:
         source = source.replace("a(:)=a(:)+1.0_8", "a(:)=a(:)+1.0_8\n! native prefix comment\nb(:)=b(:)\n! another comment")
     if nested:
@@ -187,3 +192,62 @@ def test_original_comments_may_leave_numeric_gaps_without_omitting_a_graph_child
     _scope, _plan, _epoch, group = parts(report)
     nodes = group["entry_preservation"]["segments"][0]["selected_node_ids"]
     assert [node.rsplit("/", 1)[1] for node in nodes] == ["0", "2"]
+
+
+@pytest.fixture(scope="module")
+def loop_original(tmp_path_factory):
+    return issue_transport(tmp_path_factory.mktemp("loop-entry-preservation-reader"), loop=True)
+
+
+def test_complete_enclosing_loop_invariant_links_to_real_checked_plan(loop_original):
+    report, facts = loop_original
+    validate_checked_execution_plans(report, capture_facts=facts)
+    _scope, _plan, _epoch, group = parts(report)
+    value = group["entry_preservation"]
+    assert value["version"] == 5
+    assert len(value["segments"][-1]["selected_node_ids"]) == 1
+    loop, = value["segments"][-1]["selected_node_ids"]
+    assert all(node.startswith(loop + "/body/") for node in group["selected_node_ids"])
+    assert set(value["preserved_resources"]) == {"argument::a", "argument::b", "argument::unused"}
+
+
+@pytest.mark.parametrize("mutation", ["omit_loop", "inner_prefix", "selected_calls", "wrong_loop",
+                                      "old_version", "old_policy", "downgrade", "duplicate", "omit_outer"])
+def test_resealed_loop_record_cannot_omit_invariant_or_outer_prefix(loop_original, mutation):
+    report, facts = deepcopy(loop_original)
+    _scope, _plan, _epoch, group = parts(report)
+    value = group["entry_preservation"]
+    segment = value["segments"][-1]
+    loop, = segment["selected_node_ids"]
+    if mutation == "omit_loop":
+        value["segments"].pop()
+    elif mutation == "inner_prefix":
+        segment["selected_node_ids"] = [loop + "/body/0/condition0"]
+    elif mutation == "selected_calls":
+        segment["selected_node_ids"] = group["selected_node_ids"][:]
+    elif mutation == "wrong_loop":
+        segment["selected_node_ids"] = [loop.rpartition("/")[0] + "/99"]
+    elif mutation == "old_version":
+        value["version"] = 2
+    elif mutation == "old_policy":
+        value["prefix"] = "exact prior original statements and reached predicates; no enclosing loop or association"
+    elif mutation == "downgrade":
+        value["version"] = 2
+        value["prefix"] = "exact prior original statements and reached predicates; no enclosing loop or association"
+    elif mutation == "duplicate":
+        value["segments"].append(deepcopy(segment))
+    else:
+        value["segments"].pop(0)
+    reseal(report)
+    with pytest.raises(ValueError):
+        validate_checked_execution_plans(report, capture_facts=facts)
+
+
+def test_loop_spelling_alone_cannot_stand_in_for_original_loop_inventory(loop_original):
+    from elmm_pipeline.entry_preservation_record import _expected_segments
+
+    report, _facts = loop_original
+    scope, plan, _epoch, group = parts(report)
+    tasks = _tasks(scope["graph_execution"]["procedures"][0]["task_graph"])
+    with pytest.raises(ValueError, match="original loop body inventory"):
+        _expected_segments(group, plan["entry"], {task["id"] for task in tasks}, loop_invariant=True)
