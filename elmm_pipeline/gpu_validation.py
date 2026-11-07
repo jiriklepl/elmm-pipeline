@@ -47,10 +47,11 @@ def _scope_manifests(scope_manifest, scope_packages):
 
 
 class _InlineNativeFallbacks:
-    """Correlate an unnamed inline worker with its exact reached source slot.
+    """Correlate inline fallback and aggregate schedule labels separately.
 
-    This is policy attribution only. Neither a requested CUDA implementation nor
-    a resource miss establishes a submitted kernel or payload operation.
+    Fallbacks need the exact reached source slot. Schedule summaries retain
+    only their active domain and modeled counts, with ambiguous source labels
+    explicit. Neither establishes a submitted kernel or payload operation.
     """
 
     def __init__(self, manifests):
@@ -60,10 +61,65 @@ class _InlineNativeFallbacks:
         self.domains = DomainTrace(lambda fields: _identities(fields, self.records, self.used))
         self.components = [component for manifest in manifests
                            for component in manifest.get("component_manifests", [manifest])]
+        self.scheduled_entries = {}
+        self.pending_schedule = None
+        for component in self.components:
+            groups = [component.get("inline_numerical_regions", {}), *component.get("child_numerical_regions", ())]
+            for group in groups:
+                for region in group.get("regions", ()):
+                    entry, source = region.get("entry"), region.get("source_identity")
+                    if not isinstance(entry, str) or not HASH.fullmatch(str(source)):
+                        continue
+                    if any(row.get("kind") == "procedure" and row.get("procedure") == entry
+                           and row.get("source") == "inline:" + source
+                           and HASH.fullmatch(str(row.get("numerical_identity", "")))
+                           for row in self.records.values()):
+                        self.scheduled_entries.setdefault(entry.rsplit("::", 1)[-1].lower(), set()).add(entry)
 
     def lifecycle(self, line):
         if line.startswith("FORT_SCOPED domain "):
             self.domains.lifecycle(line.removeprefix("FORT_SCOPED domain "))
+        if line.startswith("FORT_SCOPED decision "):
+            suffix = re.search(r" context=([1-9][0-9]*) domain_version=1 domain=([1-9][0-9]*) domain_role=execution$", line)
+            self.pending_schedule = None
+            if suffix:
+                decision, = scoped_modeled_decisions(line[:suffix.start()])
+                context, domain = suffix.groups()
+                if max(int(context), int(domain)) >= 2**64:
+                    raise ValueError("Inline schedule domain identity exceeds its ABI")
+                fields = {"context": context, "domain": domain, "domain_version": "1", "domain_role": "execution"}
+                self.domains.operation(fields, "position", 0, tagged=True)
+                self.pending_schedule = (decision, fields)
+        elif line.startswith("FORT_SCOPED planning_timing ") and self.pending_schedule is not None:
+            decision, fields = self.pending_schedule
+            timing = re.fullmatch(r"FORT_SCOPED planning_timing context=([1-9][0-9]*) domain_version=1 "
+                r"domain=([1-9][0-9]*) domain_role=execution phase=selection seconds=([0-9.eE+-]+) "
+                r"cache_hit=[01] query_generation=[0-9]+ state_generation=[0-9]+", line)
+            if (timing is None or timing.group(1, 2) != (fields["context"], fields["domain"])
+                    or not math.isfinite(float(timing[3])) or float(timing[3]) < 0):
+                raise ValueError("Inline schedule selection timing changed its domain or format")
+        elif not line.startswith("FORT_OFFLOAD "):
+            self.pending_schedule = None
+
+    def scheduled_summary(self, raw_entry, mode, gpu, cpu, unit_kind, line_number):
+        """Match an aggregate label; it cannot identify the executed source unit."""
+        pending, self.pending_schedule = self.pending_schedule, None
+        entries = self.scheduled_entries.get(raw_entry)
+        if not entries:
+            raise ValueError("Offload policy trace entry is absent from its inline source manifest")
+        if pending is None or unit_kind != "regions":
+            raise ValueError("Inline schedule summary lacks a preceding checked domain decision")
+        decision, fields = pending
+        expected_mode = "scoped-scheduled" if decision["gpu_units"] else "native-scoped-scheduled"
+        if (mode != expected_mode
+                or (int(gpu), int(cpu)) != (decision["gpu_units"], decision["cpu_units"])):
+            raise ValueError("Inline schedule summary disagrees with its preceding decision")
+        return {"kind": "checked_inline_schedule_summary", "entry": raw_entry, "log_line": line_number,
+                "context": int(fields["context"]), "domain": int(fields["domain"]),
+                "mode": mode, "gpu_units": int(gpu), "cpu_units": int(cpu), "unit_kind": unit_kind,
+                "estimate_available": decision["available"],
+                "candidate_entries": sorted(entries), "source_attribution_available": False,
+                "aggregate_only": True, "gpu_execution_confirmed": False}
 
     def borrowed_owner_routes(self, scope, plan, owner, caller, component):
         """Use the existing checked companion CALL and coordinator receipts."""
@@ -152,6 +208,8 @@ class _InlineNativeFallbacks:
                 "root_to_owner": root_path, "owner_to_caller": worker_path}
 
     def attribution(self, previous, raw_entry, mode, gpu, cpu, unit_kind, line_number):
+        if mode in {"native-scoped-scheduled", "scoped-scheduled"}:
+            return self.scheduled_summary(raw_entry, mode, gpu, cpu, unit_kind, line_number)
         if (mode not in {"native-scoped-resource", "native-scoped-boundary"}
                 or (gpu, cpu, unit_kind) != ("0", "1", "regions")
                 or not previous.startswith("FORT_SCOPED position ")):
@@ -258,7 +316,7 @@ def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None)
     prefix = r"(?<![A-Za-z0-9_])FORT_OFFLOAD[ \t]+entry=([A-Za-z][A-Za-z0-9_]*)"
     inline = (_InlineNativeFallbacks(manifests) if any(match[1].lower() not in entries
               for match in re.finditer(prefix, log)) else None)
-    attributed, previous = [], ""
+    attributed, scheduled, previous = [], [], ""
     observed = []
     for number, line in enumerate(log.splitlines(), 1):
         if inline is not None:
@@ -274,9 +332,14 @@ def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None)
                 if match.start() != 0 or match.end() != len(line):
                     raise ValueError("Inline fallback requires one complete policy trace row")
                 attribution = inline.attribution(previous, entry.lower(), mode, gpu, cpu, unit_kind, number)
-                attributed.append(attribution)
+                if attribution.get("kind") == "checked_inline_schedule_summary":
+                    scheduled.append(attribution)
+                else:
+                    attributed.append(attribution)
                 entry = attribution["entry"]
             observed.append((entry, mode, gpu, cpu, unit_kind))
+        if inline is not None and line.startswith("FORT_OFFLOAD "):
+            inline.pending_schedule = None
         previous = line
     for entry, mode, gpu, cpu, unit_kind in observed:
         entry = entry.lower()
@@ -303,6 +366,7 @@ def offload_decisions(log, regions, *, scope_manifest=None, scope_packages=None)
         record["modes"][mode] = record["modes"].get(mode, 0) + 1
     return {"calls": sum(counts.values()), "modes": counts, "entries": per_entry, "unit_counts": unit_counts,
             **({"authenticated_inline_fallbacks": attributed} if attributed else {}),
+            **({"matched_inline_schedule_summaries": scheduled} if scheduled else {}),
             "native_reasons": reasons,
             "gpu_units": sum(value["gpu_units"] for value in per_entry.values()),
             "cpu_units": sum(value["cpu_units"] for value in per_entry.values())}
