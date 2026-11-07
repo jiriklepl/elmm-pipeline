@@ -99,7 +99,7 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
     pricing = None
     native_live = False
     placement = None
-    if isinstance(record, dict) and type(record.get("version")) is int and record["version"] in {2, 3, 4}:
+    if isinstance(record, dict) and type(record.get("version")) is int and record["version"] in {2, 3, 4} and record.get("kind") != "original_tile_private_team":
         scheduled = record["version"] == 4
         native_live = record["version"] in {3, 4}
         _keys(record, {"identity", "version", "kind", "source_proof", "pricing", "execution_binding"}
@@ -132,7 +132,8 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
                  "source device task proof or execution identity differs")
     team, fields, binding = _validate_source_authority(record, member, procedure, inputs, resources,
                                                       owner=owner, capture_facts=capture_facts, manifest=manifest,
-                                                      allow_line=pricing is None and placement is None and not native_live)
+                                                      allow_line=pricing is None and placement is None and not native_live,
+                                                      allow_bytes=pricing is None and placement is None and not native_live)
     if placement is not None:
         from .source_placement_record import validate_source_placement
 
@@ -145,12 +146,13 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
     metadata = provider["metadata"]
     _require(isinstance(metadata, dict) and type(metadata.get("version")) is int
              and metadata["version"] in ({6} if placement is not None else
-                                          {4} if native_live else {3} if pricing is not None else {1, 2, 7, 8}),
+                                          {4} if native_live else {3} if pricing is not None else {1, 2, 7, 8, 9}),
              "source device task provider version differs")
     version = metadata["version"]
     _require(not line_team or version == 7, "line source task requires its exact access-envelope provider version")
-    _keys(metadata, _METADATA | ({"line_snapshot_prework"} if line_team else set()) | ({"batching"} if version in {2, 3, 4, 6, 7, 8} else set())
-          | ({"access_envelopes"} if version in {7, 8} else set())
+    _keys(metadata, _METADATA | ({"line_snapshot_prework"} if line_team else set()) | ({"batching"} if version in {2, 3, 4, 6, 7, 8, 9} else set())
+          | ({"access_envelopes"} if version in {7, 8, 9} else set())
+          | ({"scalar_transport"} if version == 9 else set())
           | ({"native_prepare_entry", "native_transaction_api"} if native_live else set())
           | ({"placement", "selected_backend"} if placement is not None else set()))
     if line_team:
@@ -162,7 +164,7 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
                  and metadata["mapping"] == "thread",
                  "line source task prework or mapping differs")
     scratch = "one bounded logical tile; same-stream source-order units"
-    if version in {2, 3, 4, 6, 7, 8}:
+    if version in {2, 3, 4, 6, 7, 8, 9}:
         batching = metadata["batching"]
         _keys(batching, {"version", "target_bytes", "minimum_tiles", "planned_launches"})
         _require(type(batching["version"]) is int and batching["version"] == (2 if version == 8 else 1)
@@ -174,11 +176,11 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
                  and isinstance(provider["entry"], str)
                  and (placement is not None or provider["entry"].endswith(
                      "_batch_b" + str(batching["target_bytes"] // 1048576) + "m_boxes" if version == 8 else
-                     "_batch_boxes" if version == 7 else
+                     "_batch_boxes_bytes" if version == 9 else "_batch_boxes" if version == 7 else
                      "_batch" if version == 2 else "_batch_q_" + pricing["identity"][:10])),
                  "source device task bounded batching protocol differs")
         scratch = "bounded original tile batches; same-stream source-order units"
-    if version in {7, 8}:
+    if version in {7, 8, 9}:
         access = metadata["access_envelopes"]
         _keys(access, {"version", "source", "reads", "writes", "overwrites_authorized",
                        "initialization_authorized", "preflight", "pricing"})
@@ -194,9 +196,25 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
         if version == 8:
             suffix += "_b" + str(metadata["batching"]["target_bytes"] // 1048576) + "m"
         suffix += "_boxes"
+        if version == 9:
+            suffix = (team["identity"][:10] + ("_cta" if metadata["mapping"] == "cooperative" else "_thread")
+                      + "_s" + record["source_proof_identity"][:8] + "_batch_boxes_bytes")
         _require(provider["entry"] == "fort_tile_task_" + suffix
                  and provider["module"] == "fort_tile_module_" + suffix,
                  "source device task access envelope provider identity differs")
+    byte_roots = [c["resource"] for c in record["scalar_captures"]
+                  if c["authority"]["kind"] == "original real scalar storage; byte transport without value read"]
+    _require(bool(byte_roots) == (version == 9), "byte scalar source requires its exact direct transport ABI")
+    if version == 9:
+        transport = metadata["scalar_transport"]
+        _keys(transport, {"version", "resources", "host", "device", "abi", "definitions_authorized"})
+        _require(type(transport["version"]) is int and transport["version"] == 1
+                 and transport["resources"] == byte_roots
+                 and transport["host"] == "copy object representation after positive domain; no typed real value read"
+                 and transport["device"] == "decode at each original scalar reference; retain original control"
+                 and transport["abi"] == "trivial aligned unsigned-char aggregate; original scalar size and alignment"
+                 and transport["definitions_authorized"] is False,
+                 "byte scalar transport cannot authorize value reads or definitions")
     if placement is not None:
         suffix = team["identity"][:12] + ("_cta" if metadata["mapping"] == "cooperative" else "_thread")
         suffix += "_g_" + placement["identity"][:16]
@@ -241,9 +259,10 @@ def validate_source_task(record, member, procedure, inputs, resources, *, owner,
 
 
 def _validate_source_authority(record, member, procedure, inputs, resources, *, owner, capture_facts=None,
-                               allow_line=False, manifest=None):
+                               allow_line=False, manifest=None, allow_bytes=False):
     """Common original numerical/scalar/storage evidence, separate from transport."""
-    _require(type(record["version"]) is int and record["version"] == 1
+    _require(type(record["version"]) is int and record["version"] in {1, 2}
+             and (record["version"] == 1 or allow_bytes and record["kind"] == "original_tile_private_team")
              and (record["kind"] == "original_tile_private_team" or allow_line and record["kind"] == _LINE_KIND),
              "source device task source proof version differs")
     _require(record["procedure"] == member["procedure"] == procedure["procedure"]
@@ -304,6 +323,14 @@ def _validate_source_authority(record, member, procedure, inputs, resources, *, 
         if kind == "explicit checked whole-defined scalar entry fact":
             _keys(authority, {"kind", "finite_or_constant_authorized", "fact"})
             _scalar_entry_fact(authority["fact"], capture["resource"], capture_facts)
+        elif kind == "original real scalar storage; byte transport without value read":
+            _keys(authority, {"kind", "finite_or_constant_authorized", "fact"})
+            _require(record["version"] == 2 and not line_team and scalar["type"] == "real"
+                     and scalar["kind"] in {4, 8} and scalar["rank"] == 0
+                     and not set(scalar["attributes"]) & {
+                         "pointer", "allocatable", "optional", "target", "value", "volatile", "asynchronous"},
+                     "byte scalar capture requires stable plain real scalar storage")
+            _scalar_storage_fact(authority["fact"], capture["resource"], capture_facts)
         elif kind == "original reached scalar prefix definition":
             _keys(authority, {"kind", "proof", "finite_or_constant_authorized"})
             _require(line_team, "reached scalar prefix cannot authorize tile, queued or priced work")
@@ -315,6 +342,9 @@ def _validate_source_authority(record, member, procedure, inputs, resources, *, 
                      "source device task scalar lacks independent readability authority")
         _require(authority["finite_or_constant_authorized"] is False,
                  "source device task readability cannot grant finite or constant values")
+    _require((record["version"] == 2) == any(c["authority"]["kind"] ==
+             "original real scalar storage; byte transport without value read" for c in captures),
+             "byte scalar source version or capture inventory differs")
     fields, effects = team["fields"], record["resources"]
     if line_team:
         _require(isinstance(fields, list), "line source task requires its original field inventory")
@@ -431,6 +461,23 @@ def _validate_parameters(metadata, team, fields):
         _keys(parameter, {"role", "binding", "axis", "name", "kind"})
         _require(parameter == {"role": role, "binding": descriptor, "axis": axis, "name": "p" + str(index), "kind": kind},
                  "source device task typed parameter order or descriptor recipe differs")
+
+
+def _scalar_storage_fact(fact, resource, capture_facts):
+    _require(isinstance(fact, dict) and {"storage", "allocation_changes", "escapes"} <= set(fact)
+             <= {"storage", "allocation_changes", "escapes", "lifetime"}
+             and fact["storage"] == "stable" and fact["allocation_changes"] is fact["escapes"] is False
+             and isinstance(fact.get("lifetime", "invocation"), str)
+             and fact.get("lifetime", "invocation") in {"invocation", "selected_window"},
+             "byte scalar storage fact cannot grant initialization")
+    if capture_facts is not None:
+        captures = capture_facts.get("captures") if isinstance(capture_facts, dict) else None
+        supplied = captures.get(resource) if isinstance(captures, dict) else None
+        _require(isinstance(supplied, dict) and supplied.get("storage") == "stable"
+                 and supplied.get("allocation_changes") is supplied.get("escapes") is False
+                 and isinstance(supplied.get("lifetime", "invocation"), str)
+                 and supplied.get("lifetime", "invocation") in {"invocation", fact.get("lifetime", "invocation")},
+                 "byte scalar storage fact differs from the supplied request")
 
 
 def _scalar_entry_fact(fact, resource, capture_facts):

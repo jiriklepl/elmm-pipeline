@@ -53,7 +53,7 @@ def reseal(record):
     record["identity"] = _digest({k: v for k, v in record.items() if k != "identity"})
 
 
-def _issued(tmp_path, *, envelopes=False, source=SOURCE):
+def _issued(tmp_path, *, envelopes=False, source=SOURCE, facts=None):
     path = tmp_path / "source.f90"
     path.write_text(source)
     analysis = SourceEffects([path])
@@ -61,7 +61,14 @@ def _issued(tmp_path, *, envelopes=False, source=SOURCE):
     nodes = tuple(_children(routine.execution))
     first = next(i for i, node in enumerate(nodes) if (directive(node) or "").startswith("parallel"))
     last = next(i for i, node in enumerate(nodes) if directive(node) == "end parallel")
-    proof = source_device_task(analysis, routine, nodes[first:last + 1])
+    if facts is None:
+        proof = source_device_task(analysis, routine, nodes[first:last + 1])
+    else:
+        builder = ScopeBuilder([path], routine.qualified, facts=facts, options=CompilerOptions(),
+                               config=OffloadConfig(policy="sections", scope_execution="graph"))
+        analysis, routine = builder.analysis, builder.entry
+        nodes = tuple(_children(routine.execution))
+        proof = source_device_task(analysis, routine, nodes[first:last + 1], builder=builder)
     provider = emit_tile_task_provider(proof.team, readable_scalars=proof, access_envelopes=envelopes)
     metadata = provider.public()
     record = proof.public()
