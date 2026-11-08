@@ -85,7 +85,7 @@ def validate_conditional_return(record, epoch, plan, manifest, scope):
                  "conditional return lexical child policy differs")
     if version == 3 or "native_call_preservation_policy_version" in record:
         _require(type(record["native_call_preservation_policy_version"]) is int
-                 and record["native_call_preservation_policy_version"] == 2,
+                 and record["native_call_preservation_policy_version"] in (2, 3),
                  "conditional return native CALL preservation policy differs")
     selected_root = None
     if version == 2 or version in (3, 4, 5) and "root_selection" in record:
@@ -364,7 +364,10 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
             (checked_devices if kind == "checked_device" else checked_transfers).add(route["proof_identity"])
         elif kind == "reached_retirement":
             _keys(route, base | {"lifetime", "rearm_allowed"} | ({"loop_entry"} if "loop_entry" in route else set())
-                  | ({"call_preservation"} if "call_preservation" in route else set()))
+                  | ({"call_preservation"} if "call_preservation" in route else set())
+                  | ({"empty_call_guard"} if "empty_call_guard" in route else set()))
+            _require("empty_call_guard" not in route or "call_preservation" in route,
+                     "empty native CALL guard requires its complete original retirement")
             _require(route["lifetime"] == "proved_lifecycle" and route["rearm_allowed"] is True,
                      "conditional return cannot admit an unproved escape across invocations")
             if "loop_entry" in route:
@@ -373,9 +376,10 @@ def _member(member, procedure, epoch_member, procedures, coordinators, canonical
                 loop_entries.add(identity)
             if "call_preservation" in route:
                 _require(return_record is not None and return_record["version"] in (3, 4, 5)
-                         and return_record.get("native_call_preservation_policy_version") == 2 and "loop_entry" not in route,
+                         and return_record.get("native_call_preservation_policy_version") in (2, 3) and "loop_entry" not in route,
                          "native CALL preservation requires its distinct conditional return version")
-                _call_preservation(route["call_preservation"],nodes,member,procedure,coordinators,scope,source_edits,return_record)
+                _call_preservation(route["call_preservation"],nodes,member,procedure,coordinators,scope,source_edits,return_record,
+                                   empty_guard=route.get("empty_call_guard"))
             retirement += 1
         elif kind == "checked_child":
             _keys(route, base | {"procedure", "canonical_handles", "canonical_resources", "handle_forwarding"}
@@ -451,7 +455,7 @@ def _lexical_child(route, caller, procedures, coordinators):
 
 
 
-def _call_preservation(value, nodes, member, procedure, coordinators, scope, source_edits, returned):
+def _call_preservation(value, nodes, member, procedure, coordinators, scope, source_edits, returned, *, empty_guard=None):
     keys = {"identity","version","kind","procedure","source_graph","selected_node_ids","source_span",
             "original_source","original_source_sha256","original_call","completion_identity","native_graph_identity",
             "selection_identity","capture_facts_identity","entry_exit_identity","writable_actual_families","entry_rely","retirement",
@@ -503,6 +507,11 @@ def _call_preservation(value, nodes, member, procedure, coordinators, scope, sou
     context=(scope["owner"] if context_member==plan["entry"] else "fort_child_context_"+sha256(context_member.encode()).hexdigest()[:12])
     _require(name==plan["entry"] or name in coordinators,"native CALL retirement lost its owning context")
     prefix=[line.strip() for line in text[:-len(original)].splitlines()]
+    _require(boundaries[0].get("empty_call_guard") == empty_guard,
+             "empty native CALL guard is detached from its original boundary")
+    if empty_guard is not None:
+        from .native_empty_record import unwrap_empty_call
+        prefix = unwrap_empty_call(empty_guard, value, returned, prefix)
     close="fort_close_status = fort_scope_resident_close_v1("+context+")"
     reset=context+" = 0"
     _require(prefix.count(close)==prefix.count(reset)==1 and prefix.index(close)<prefix.index(reset),
