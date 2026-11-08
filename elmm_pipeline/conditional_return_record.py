@@ -658,11 +658,11 @@ def _closed_implicit_uses(relations, procedures, scalar_uses, scope, manifest):
                       for access in (operation.get("native_opaque_accesses") or {}).get("accesses", ()))
         for unit in procedure["units"]:
             for operation in unit["operations"].get("native_operations", ()):
-                if operation.get("kind") != "complete original native CALL":
-                    continue
                 # A reached BYTE reservation is a physical use of its module
                 # storage, just as registration in unit.resources is. It is
                 # not a numeric capture or an inferred use of an unused actual.
+                # Joined and inline native work can reserve record metadata
+                # too; their checked native operations already retain that use.
                 # Bind it to the same canonical descriptor and opaque epoch role.
                 for root, metadata in operation.get("host_metadata", {}).items():
                     if root.startswith("argument::"):
