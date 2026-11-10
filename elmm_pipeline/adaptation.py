@@ -96,9 +96,7 @@ def patch_regions(project_root, regions, *, coverage=True):
 def adapt_project(tool, project_root, python, output_dir, *, compiler_root=None,
                   source_patterns=("**/*.f90",), include=(), exclude=(),
                   marked_only=False, defines=("DPREC",), coverage=True,
-                  target="cpu", gpu_options=None, memory_model="call", scope_options=None):
-    from .discovery import discover_project
-
+                  target="cpu", gpu_options=None, memory_model="scoped", scope_options=None):
     if tool != "local":
         raise ValueError(f"Unknown transformation tool: {tool}; expected local")
     if target not in {"cpu", "gpu"}:
@@ -115,65 +113,4 @@ def adapt_project(tool, project_root, python, output_dir, *, compiler_root=None,
                                    options=scope_options or {}, defines=defines, gpu_options=gpu_options)
     if scope_options:
         raise ValueError("Scope options require memory_model='scoped'")
-    project_root, output_dir = Path(project_root).resolve(), Path(output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    compiler_discovery = ({"compiler_root": compiler_root, "compiler_python": python}
-                          if target == "gpu" else {})
-    discovery = discover_project(project_root, python, output_dir / "discovery",
-                                 patterns=source_patterns, defines=defines, backend=target,
-                                 **compiler_discovery)
-    accepted, rejected, extra_sources = [], list(discovery.get("rejected", [])), []
-    gpu_sources = []
-    for region in discovery["regions"]:
-        if not selected(region, include, exclude, marked_only):
-            rejected.append({"id": region["id"], "source": region["source"],
-                             "routine": region["routine"], "reason": "excluded by selection hints"})
-            continue
-        region_dir = output_dir / region["id"]
-        try:
-            if target == "gpu":
-                from .gpu_backend import transform
-                metadata = transform(tool, Path(region["input_path"]), python, region_dir,
-                                     compiler_root=compiler_root, entry=region["entry"],
-                                     context=region.get("context"), gpu_options=gpu_options)
-                sources = metadata["extra_sources"]
-            else:
-                if region.get("context", {}).get("nested_parallel"):
-                    uncertain = [symbol["name"] for symbol in region["symbols"]
-                                 if symbol.get("rank", 0) and not symbol.get("contiguous_proven", False)]
-                    if uncertain:
-                        raise ValueError("Local contiguous-array interface inside native parallel context "
-                                         "requires proved contiguous captures; possible copyback race: "
-                                         + ", ".join(uncertain))
-                from .local_adapter import transform
-                metadata = transform(Path(region["input_path"]), compiler_root, python, region_dir,
-                                     entry=region["entry"], context=region.get("context"))
-                sources = metadata["extra_sources"]
-            check_generated_sources(sources, region_dir / "syntax-check")
-            if target == "gpu":
-                from .gpu_toolchain import compile_gpu_sources
-                metadata["gpu_compile_check"] = compile_gpu_sources(
-                    metadata["gpu_sources"], region_dir / "syntax-check",
-                    options=gpu_options, defines=list(defines),
-                    toolchain=gpu_options if (gpu_options or {}).get("versions") else None)
-            gpu_sources.extend(metadata.get("gpu_sources", []))
-            extra_sources.extend(sources)
-            accepted.append({**region, "transformation": metadata})
-        except (RuntimeError, ValueError) as error:
-            rejected.append({"id": region["id"], "source": region["source"],
-                             "routine": region["routine"], "reason": str(error),
-                             "stage": tool})
-    changed_files = patch_regions(project_root, accepted, coverage=coverage)
-    metadata = {
-        "tool": tool, "target": target,
-        "policy": "structural discovery, capture normalization, generic tool passes",
-        "source_patterns": list(source_patterns), "selection": {"include": list(include),
-        "exclude": list(exclude), "marked_only": marked_only}, "defines": list(defines),
-        "coverage_enabled": coverage, "regions": accepted, "rejected": rejected,
-        "discovered_regions": len(discovery["regions"]), "outlined_regions": len(accepted),
-        "optimized_regions": sum(bool(r["transformation"].get("changed")) for r in accepted),
-        "extra_sources": extra_sources, "changed_files": changed_files,
-        "gpu_sources": gpu_sources,
-    }
-    write_json(output_dir / "adaptation.json", metadata)
-    return metadata
+    raise ValueError("Ordinary-call adaptation was removed; use resident-build or checked source scopes")

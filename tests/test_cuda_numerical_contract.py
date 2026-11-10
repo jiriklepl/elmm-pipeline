@@ -121,25 +121,15 @@ def test_contract_does_not_admit_an_unsupported_gpu_language(tmp_path):
         validate_gpu_sources([{"source": source, "language": "openacc", "numerical_contract": contract()}])
 
 
-def test_ordinary_public_report_transports_only_its_approved_cuda_artifact(tmp_path):
+def test_removed_ordinary_adapter_cannot_publish_a_numerical_artifact(tmp_path):
     source = tmp_path / "input.f90"
     source.write_text("module original\nend module\n")
     generated = tmp_path / "generated"
     generated.mkdir()
-    approved = contract()
-
-    def generate(*args, **kwargs):
-        (generated / "region.cu").write_text("// No numerical-source inspection is needed.\n")
-        (generated / "interface.f90").touch()
-        return {"compiler_report": {"parallel_regions": 1, "build_sources": [
-            {"path": "region.cpp", "language": "c++", "numerical_contract": approved},
-            {"path": "region.cu", "language": "cuda", "numerical_contract": approved}]}}
-
-    with patch("elmm_pipeline.local_adapter.transform", side_effect=generate):
-        metadata = transform("local", source, Path(sys.executable), generated,
-                             compiler_root=tmp_path, entry="advance")
-    assert metadata["gpu_sources"][0]["numerical_contract"] == approved
-    assert metadata["compile_units"] == metadata["gpu_sources"]
+    with patch("elmm_pipeline.local_adapter.transform") as generate, pytest.raises(ValueError, match="removed"):
+        transform("local", source, Path(sys.executable), generated, compiler_root=tmp_path, entry="advance")
+    generate.assert_not_called()
+    assert list(generated.iterdir()) == []
     assert source.read_text() == "module original\nend module\n"
 
 

@@ -270,10 +270,16 @@ class _InlineNativeFallbacks:
                     if "procedure" in completion:
                         completion_matches = owner_matches and declared == caller.get("procedure")
                     else:
-                        serial = {"available": True, "caller_contract": "serial_source_scope",
-                                  "reason": "original serial counted loop completes before continuation"}
+                        # Current graphs may group consecutive sibling loops.
+                        # Frozen controls retain the earlier single-loop record;
+                        # both require the same exact source/catalog ownership.
+                        reason = completion.get("reason")
+                        serial = {"available": True, "caller_contract": "serial_source_scope", "reason": reason}
                         completion_matches = (catalog_owner == caller.get("procedure")
-                                              and completion.get("available") is True and completion == serial)
+                                              and completion.get("available") is True and completion == serial
+                                              and reason in (
+                                                  "original serial counted loop completes before continuation",
+                                                  "original serial counted loops complete in source order before continuation"))
                     if (region.get("entry") == worker["procedure"]
                             and worker.get("source") == "inline:" + str(region.get("source_identity"))
                             and completion_matches

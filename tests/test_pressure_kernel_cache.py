@@ -52,14 +52,15 @@ def backend(tmp_path, *, change=None):
     if change == 'legacy': identity.unlink(); recipe.unlink()
     value['objects'] = [str(library)]
     value['provider_library'] = file_identity(library)
-    value['inputs'] = [file_identity(library)]
+    source_inputs = [r for r in value['inputs'] if r['path'] != str(directory / 'provider.so')]
+    value['inputs'] = [*source_inputs, file_identity(library)]
     if identity.exists() and change != 'unbound_identity': value['inputs'].append(file_identity(identity))
     if recipe.exists() and change != 'unbound_recipe': value['inputs'].append(file_identity(recipe))
     if change == 'symlink':
         actual = identity.with_name('other.json')
         identity.rename(actual)
         identity.symlink_to(actual.name)
-        value['inputs'] = [file_identity(library), file_identity(identity), file_identity(recipe)]
+        value['inputs'] = [*source_inputs, file_identity(library), file_identity(identity), file_identity(recipe)]
     value['identity'] = _json_identity({k: v for k, v in value.items() if k != 'identity'})
     write(path, value)
     return {'manifest': str(path), 'sha256': digest(path)}, record

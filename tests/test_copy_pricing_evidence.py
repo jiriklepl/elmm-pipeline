@@ -21,12 +21,18 @@ def pricing(**overrides):
             "decision": "credit_funded_cold", "capacity_bytes": 256 * 1024,
             "direct_seconds": 10., "selected_seconds": 6., "cold_seconds": 6., "reuse_seconds": 2.,
             "prior_credit_seconds": 4., "startup_premium_seconds": 4., "state_revision": 0,
-            "state_generation": 1, "model_key": [0, 2, 1, 4602678819172646912] + [0] * 151,
+            "state_generation": 1, "model_key": [0, 3, 1, 4602678819172646912] + [0] * 151,
             **{name: str(i + 1) * 64 for i, name in enumerate(SOURCE_FIELDS)}, **overrides}
 
 
 def evidence(row):
     return "FORT_SCOPED evidence " + json.dumps(row) + "\n"
+
+
+def test_previous_copy_model_requires_rebuilt_trace():
+    row = pricing(model_key=[0, 2, 1, 4602678819172646912] + [0] * 151)
+    with pytest.raises(ValueError, match="V3 model key; rebuild older traces"):
+        scoped_modeled_evidence(evidence(row))
 
 
 def lifecycle(event, context=0, last=0):
@@ -98,8 +104,8 @@ def test_active_borrower_and_final_storage_attribution_are_checked_without_domai
     ("context", 0), ("buffer", 0), ("identity", True), ("generation", 2**64),
     ("device", -1), ("device", 2**31), ("device", True), ("upload", 1),
     ("state_revision", -1), ("state_generation", 2**64), ("capacity_bytes", 512 * 1024),
-    ("model_key", [0] * 155), ("model_key", [0, 2, 1, 4602678819172646912] + [0] * 150),
-    ("model_key", [0, 2, 1, 4602678819172646912] + [False] * 151),
+    ("model_key", [0] * 155), ("model_key", [0, 3, 1, 4602678819172646912] + [0] * 150),
+    ("model_key", [0, 3, 1, 4602678819172646912] + [False] * 151),
     ("direct_seconds", 0), ("direct_seconds", True), ("selected_seconds", float("inf")),
     ("cold_seconds", float("nan")), ("reuse_seconds", -1), ("prior_credit_seconds", 3.),
     ("startup_premium_seconds", 3.), ("decision", "direct"), ("selected_seconds", 2.),

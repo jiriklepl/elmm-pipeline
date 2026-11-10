@@ -230,12 +230,12 @@ def test_retired_scope_configuration_is_rejected_before_build(tmp_path, name, va
 
 
 @pytest.mark.parametrize("transfers", ["pinned", "coalesced"])
-def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_path, transfers):
+def test_scoped_configuration_rejects_retired_ownership_and_policy(tmp_path, transfers):
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps(FACTS))
     args = SimpleNamespace(memory_model="call", scope_entry="step", scope_source="application.f90",
                            scope_facts=facts, target="gpu", tools=["baseline", "local"], gpu_policy="auto")
-    with pytest.raises(ValueError, match="require --memory-model"):
+    with pytest.raises(ValueError, match="removed"):
         scoped_configuration(args)
     args.memory_model = "scoped"
     assert scoped_configuration(args)["capture_facts"] == facts
@@ -246,7 +246,7 @@ def test_scoped_configuration_requires_explicit_opt_in_and_supported_policy(tmp_
     assert scoped_configuration(args)["execution"] == "graph"
     args.memory_model = "call"
     args.scope_entry = args.scope_source = args.scope_facts = None
-    with pytest.raises(ValueError, match="require --memory-model"):
+    with pytest.raises(ValueError, match="removed"):
         scoped_configuration(args)
     args.memory_model = "scoped"
     args.scope_entry, args.scope_source, args.scope_facts = "step", "application.f90", facts

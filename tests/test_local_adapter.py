@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -84,9 +85,8 @@ class LocalCompilerProtocolTests(unittest.TestCase):
         self.assertEqual(report["qualified_name"], "unrelated::advance")
 
     def test_generation_retains_authoritative_report_and_compiler_artifacts(self):
-        outputs = ["region.cpp", "region.cu", "interface.f90", "runtime.hpp"]
-        report = {"kernel": "advance", "supported": True, "reason": None, "parallel_regions": 2,
-                  "execution_plan": "ordered dependence proofs", "memory_plan": "one owned workspace", "outputs": outputs}
+        report = self.shared_report()
+        outputs = report["outputs"]
 
         def run_compiler(command, **kwargs):
             for name in outputs:
@@ -111,25 +111,84 @@ class LocalCompilerProtocolTests(unittest.TestCase):
                     self.assertRaisesRegex(LocalAdapterError, reason):
                 transform(self.source, self.snapshot, self.python, self.output, entry="advance")
 
-    def test_gpu_uses_compiler_region_count_and_rejects_host_only_generation(self):
-        for count in (0, 2):
-            def compile_local(*args, count=count, **kwargs):
-                # Deliberately no __global__ string: metadata must not count source text.
-                (self.output / "region.cu").write_text("kernel_region_0_device\n")
-                (self.output / "interface.f90").touch()
-                return {"compiler_report": {"parallel_regions": count}}
+    def shared_report(self):
+        contract = {"schema_version": 1, "id": "separate-arithmetic-v1",
+                    "required_cuda_options": ["--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true"],
+                    "required_host_options": ["-ffp-contract=off"]}
+        contract["identity"] = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        outputs = ["shared_entry.cu", "shared_interface.f90", "runtime.hpp", "scoped_runtime.cu",
+                   "fort_scoped_memory.f90"]
+        units = [{"path": name, "language": "cuda" if name.endswith(".cu") else "fortran",
+                  "role": "shared_entry" if name.startswith("shared_") else "common_runtime",
+                  **({"numerical_contract": contract} if name.endswith(".cu") else {})}
+                 for name in outputs if name != "runtime.hpp"]
+        report = {"artifact_schema_version": 2, "memory_model": "scoped", "supported": True,
+                  "kernel": "advance", "parallel_regions": 2, "outputs": outputs, "build_sources": units,
+                  "numerical_contract": contract,
+                  "scoped": {"cuda_source": "shared_entry.cu", "fortran_source": "shared_interface.f90"}}
 
-            with self.subTest(count=count), patch("elmm_pipeline.local_adapter.transform", side_effect=compile_local):
-                if count == 0:
-                    with self.assertRaisesRegex(ValueError, "no proven parallel regions"):
-                        gpu_transform("local", self.source, self.python, self.output,
-                                      compiler_root=self.snapshot, entry="advance")
-                else:
-                    metadata = gpu_transform("local", self.source, self.python, self.output,
-                                             compiler_root=self.snapshot, entry="advance")
-                    self.assertEqual(metadata["gpu"]["kernel_regions"], 2)
-                    self.assertEqual((self.output / "region.cu").read_text(),
-                                     "kernel_region_0_device\n")
+        return report
+
+    def test_scoped_generation_consumes_only_the_versioned_shared_abi(self):
+        report = self.shared_report()
+        outputs, units = report["outputs"], report["build_sources"]
+
+        def run_compiler(command, **kwargs):
+            self.assertNotIn("--cuda-output", command)
+            self.assertNotIn("--cpp-output", command)
+            self.assertNotIn("--fortran-output", command)
+            for name in outputs:
+                (self.output / name).write_text("shared artifact\n")
+            return self.completed(report)
+
+        with patch("elmm_pipeline.local_adapter.subprocess.run", side_effect=run_compiler):
+            metadata = transform(self.source, self.snapshot, self.python, self.output, entry="advance",
+                                 context={"nested_parallel": True},
+                                 gpu_options={"memory_model": "scoped", "gpu_policy": "sections"})
+        self.assertEqual(metadata["target"], "scoped")
+        self.assertEqual({Path(n).name for n in metadata["extra_sources"]},
+                         {"shared_interface.f90", "fort_scoped_memory.f90"})
+        self.assertEqual({Path(x["source"]).name for x in metadata["gpu_sources"]},
+                         {"shared_entry.cu", "scoped_runtime.cu"})
+        for change, reason in (({"artifact_schema_version": 1}, "artifact schema 2"),
+                               ({"offload": {}}, "without an ordinary backend"),
+                               ({"build_sources": [*units[:-1], {**units[-1], "language": "unknown"}]},
+                                "explicit CUDA or Fortran"),
+                               ({"build_sources": [*units, {"path": "old.cu", "role": "numerical_entry"}]},
+                                "only shared-entry")):
+            with self.subTest(change=change), patch("elmm_pipeline.local_adapter.subprocess.run",
+                    return_value=self.completed({**report, **change})), self.assertRaisesRegex(LocalAdapterError, reason):
+                transform(self.source, self.snapshot, self.python, self.output, entry="advance",
+                          gpu_options={"memory_model": "scoped", "gpu_policy": "sections"})
+
+    def test_removed_call_adapter_rejects_before_compilation_or_writes(self):
+        from elmm_pipeline.adaptation import adapt_project
+        with patch("elmm_pipeline.local_adapter.subprocess.run") as run:
+            for operation in (
+                lambda: gpu_transform("local", self.source, self.python, self.output,
+                                      compiler_root=self.snapshot, entry="advance"),
+                lambda: transform(self.source, self.snapshot, self.python, self.output,
+                                  entry="advance", gpu_options={"memory_model": "call"}),
+                lambda: adapt_project("local", self.root, self.python, self.output,
+                                      memory_model="call"),
+            ):
+                with self.subTest(operation=operation), self.assertRaisesRegex((ValueError, LocalAdapterError), "removed"):
+                    operation()
+            for policy in ("always", "chunked", "hybrid"):
+                with self.subTest(policy=policy), self.assertRaisesRegex(LocalAdapterError, "removed"):
+                    transform(self.source, self.snapshot, self.python, self.output,
+                              entry="advance", gpu_options={"gpu_policy": policy})
+            run.assert_not_called()
+        self.assertFalse(self.output.exists())
+
+    def test_native_baseline_needs_no_scope_facts(self):
+        from types import SimpleNamespace
+        from elmm_pipeline.cli import scoped_configuration
+        args = SimpleNamespace(tools=["baseline"], target="cpu", gpu_policy="sections")
+        self.assertIsNone(scoped_configuration(args))
+        args.tools = ["baseline", "local"]
+        with self.assertRaisesRegex(ValueError, "--target gpu"):
+            scoped_configuration(args)
 
 
 if __name__ == "__main__":

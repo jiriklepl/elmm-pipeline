@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import test_local_adapter as local_fixture
+
 from elmm_pipeline.adaptation import patch_regions
 from elmm_pipeline.cli import prepare_build
 from elmm_pipeline.gpu_validation import gpu_activity, native_policy_exercised, offload_decisions
@@ -37,9 +39,9 @@ class GPUPolicyProtocolTests(unittest.TestCase):
             profile = root/"hardware.json"
             profile.write_text("{}")
             output = root/"generated"
-            outputs = ["region.cpp", "region.cu", "interface.f90", "runtime.hpp"]
-            report = {"kernel": "advance", "supported": True, "parallel_regions": 2,
-                      "outputs": outputs, "offload": contract()}
+            report = local_fixture.LocalCompilerProtocolTests().shared_report()
+            report["scoped"]["team"] = {"available": True}
+            outputs = report["outputs"]
 
             def compile_(argv, **kwargs):
                 for filename in outputs:
@@ -56,7 +58,9 @@ class GPUPolicyProtocolTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--calibration-profile")+1], str(profile))
             self.assertEqual(argv[argv.index("--host-threads")+1], "4")
             self.assertIn("--gpu-collective", argv)
-            self.assertEqual(result["compiler_report"]["offload"], contract())
+            self.assertEqual(argv[argv.index("--memory-model")+1], "scoped")
+            self.assertEqual(result["compiler_report"]["scoped"], report["scoped"])
+            self.assertNotIn("offload", result["compiler_report"])
 
     def test_interleaved_decisions_and_markers_remain_distinct_from_cuda_proof(self):
         region = {"id": "abcd", "entry": "outline_abcd", "transformation": {"compiler_report": {"offload": contract()}}}
@@ -92,9 +96,13 @@ class GPUPolicyProtocolTests(unittest.TestCase):
             shutil.copytree(implementation, root/"elmm_pipeline")
             profile = root/"hardware.json"
             profile.write_text('{"rates":1}')
+            facts = root/"facts.json"
+            facts.write_text('{"schema_version":1,"participation":"serial","captures":{}}')
             args = SimpleNamespace(build_arg=[], target="gpu", gpu_toolchain={}, gpu_policy="auto",
                                    calibration_profile=profile, source_pattern=["**/*.f90"], select=[], exclude=[],
-                                   marked_only=False, no_coverage=True, jobs=1, threads=4)
+                                   marked_only=False, no_coverage=True, jobs=1, threads=4,
+                                   tools=["local"], memory_model="scoped", scope_execution="graph",
+                                   scope_entry="step", scope_source="source.f90", scope_facts=facts)
             setup = {"pins": {}, "packages": {"local": []}, "native": {}}
             seen = []
 
@@ -119,15 +127,15 @@ class GPUPolicyProtocolTests(unittest.TestCase):
                 self.assertEqual(metadata["identity"]["calibration_profile"]["sha256"], hashlib.sha256(profile.read_bytes()).hexdigest())
                 profile.write_text('{"rates":2}')
                 second, _ = prepare_build("local", args, setup, {})
-                args.gpu_policy = "hybrid"
+                args.gpu_policy = "sections"
                 third, _ = prepare_build("local", args, setup, {})
-                calls = root/"elmm_pipeline/gpu_calls.py"
-                calls.write_text(calls.read_text()+"\n# changed call normalization\n")
+                calls = root/"elmm_pipeline/scope_extraction.py"
+                calls.write_text(calls.read_text()+"\n# changed checked source extraction\n")
                 fourth, changed = prepare_build("local", args, setup, {})
-                self.assertEqual(changed["identity"]["implementation"]["gpu_calls.py"],
+                self.assertEqual(changed["identity"]["implementation"]["scope_extraction.py"],
                                  hashlib.sha256(calls.read_bytes()).hexdigest())
             self.assertEqual(len({first.parent, second.parent, third.parent, fourth.parent}), 4)
-            self.assertEqual([item["gpu_policy"] for item in seen], ["auto", "auto", "hybrid", "hybrid"])
+            self.assertEqual([item["gpu_policy"] for item in seen], ["auto", "auto", "sections", "sections"])
 
     def test_isolated_checkouts_use_public_policy_and_native_query(self):
         compiler = os.environ.get("ELMM_TEST_COMPILER")

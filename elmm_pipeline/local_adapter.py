@@ -322,22 +322,30 @@ def transform(source_path: Path, compiler_root: Path, python: Path,
     """
     source_path = Path(source_path).resolve(strict=True)
     output_dir = Path(output_dir).resolve()
-    arguments = ["--kernel", entry, "--output-dir", str(output_dir),
-                 "--cpp-output", "region.cpp", "--fortran-output", "interface.f90",
-                 "--cuda-output", "region.cu", "--common-header", "runtime.hpp"]
     options = gpu_options or {}
-    policy = options.get("gpu_policy", "always")
-    if policy not in {"always", "sections", "auto", "chunked", "hybrid"}:
-        raise LocalAdapterError("Unsupported local GPU policy: " + str(policy))
-    if gpu_options is not None:
-        arguments += ["--gpu-policy", policy, "--host-threads", str(options.get("host_threads", 4))]
-        if options.get("calibration_profile"):
-            arguments += ["--calibration-profile", str(Path(options["calibration_profile"]).resolve())]
-        if policy != "always" and (context or {}).get("gpu_dispatch") == "collective_single":
-            arguments.append("--gpu-collective")
+    if options.get("memory_model", "scoped") != "scoped":
+        raise LocalAdapterError("Ordinary-call generation was removed; use the resident or source-graph adapter")
+    policy = options.get("gpu_policy", "sections")
+    if policy not in {"sections", "auto"}:
+        raise LocalAdapterError("Ordinary GPU policies were removed; use sections or auto")
+    if options.get("scope_transfers") == "pipelined":
+        raise LocalAdapterError("Pipelined slab batching was removed; use shared graph execution")
+    arguments = ["--kernel", entry, "--output-dir", str(output_dir), "--common-header", "runtime.hpp",
+                 "--gpu-policy", policy, "--host-threads", str(options.get("host_threads", 4)),
+                 "--memory-model", "scoped", "--scope-transfers", options.get("scope_transfers", "direct")]
+    if options.get("calibration_profile"):
+        arguments += ["--calibration-profile", str(Path(options["calibration_profile"]).resolve())]
+    if (context or {}).get("gpu_dispatch") == "collective_single":
+        arguments.append("--gpu-collective")
     report, command = _invoke(source_path, compiler_root, python, output_dir, entry,
                               arguments, "compiler.log")
-    expected = {"region.cpp", "region.cu", "interface.f90", "runtime.hpp"}
+    expected = {"shared_entry.cu", "shared_interface.f90", "runtime.hpp"}
+    if not isinstance(report, dict) or not isinstance(report.get("scoped"), dict):
+        raise LocalAdapterError("Resident numerical entries require the compiler's shared-memory contract")
+    if (type(report.get("artifact_schema_version")) is not int or report["artifact_schema_version"] != 2
+            or report.get("memory_model") != "scoped" or "offload" in report):
+        raise LocalAdapterError("Resident numerical entries require artifact schema 2 without an ordinary backend; "
+                                "regenerate with the current compiler")
     if (not isinstance(report, dict) or report.get("supported") is not True
             or not isinstance(report.get("kernel"), str)
             or report.get("kernel", "").lower() != entry.lower()
@@ -346,33 +354,48 @@ def transform(source_path: Path, compiler_root: Path, python: Path,
             or not all(isinstance(name, str) for name in report["outputs"])
             or not expected.issubset(report["outputs"])):
         raise LocalAdapterError("Compiler generation report is missing its supported decision, regions or outputs")
-    if policy != "always":
-        offload = report.get("offload")
-        if (not isinstance(offload, dict) or offload.get("policy") != policy
-                or type(offload.get("collective_entry")) is not bool
-                or not isinstance(offload.get("native_fallback_query"), str)
-                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", offload["native_fallback_query"])):
-            raise LocalAdapterError("Compiler offload report is missing its policy/query dispatch contract")
-        if offload["collective_entry"] and (context or {}).get("gpu_dispatch") != "collective_single":
-            raise LocalAdapterError("Compiler requested collective dispatch outside a proved OpenMP team")
+    shared = report["scoped"]
+    if shared.get("cuda_source") != "shared_entry.cu" or shared.get("fortran_source") != "shared_interface.f90":
+        raise LocalAdapterError("Resident numerical entry names differ from the shared artifact contract")
+    if shared.get("team", {}).get("available") and (context or {}).get("gpu_dispatch") != "collective_single":
+        raise LocalAdapterError("Compiler requested collective dispatch outside a proved OpenMP team")
+    units = report.get("build_sources")
+    if (not isinstance(units, list) or not units or any(not isinstance(item, dict) for item in units)
+            or any(item.get("role") not in {"shared_entry", "common_runtime"} for item in units)):
+        raise LocalAdapterError("Resident generation requires only shared-entry and common-runtime build sources")
+    names = [item.get("path") for item in units]
+    if any(not isinstance(name, str) or name not in report["outputs"] for name in names) or len(set(names)) != len(names):
+        raise LocalAdapterError("Resident build sources must name distinct emitted artifacts")
+    for name, language in (("shared_entry.cu", "cuda"), ("shared_interface.f90", "fortran")):
+        if not any(item.get("path") == name and item.get("language") == language
+                   and item.get("role") == "shared_entry" for item in units):
+            raise LocalAdapterError("Resident build sources omit the shared entry: " + name)
+    try:
+        contract = validate_numerical_contract(report.get("numerical_contract"))
+    except ValueError as error:
+        raise LocalAdapterError(str(error)) from error
+    for item in units:
+        if item.get("language") not in {"cuda", "fortran"}:
+            raise LocalAdapterError("Resident build sources require an explicit CUDA or Fortran language")
+        _numerical_build_fields(item)
+        if item.get("language") == "cuda" and item.get("numerical_contract") != contract:
+            raise LocalAdapterError("Resident CUDA sources must share the declared numerical contract")
+        if not _scope_artifact(output_dir, item["path"]).is_file():
+            raise LocalAdapterError("Compiler did not emit a resident build source: " + item["path"])
     for filename in expected:
         if not (output_dir / filename).is_file():
             raise LocalAdapterError(f"Compiler did not emit required file: {output_dir / filename}")
     (output_dir / "compiler-report.json").write_text(json.dumps(report, indent=2) + "\n")
-    # Enclosing native OpenMP loops already distribute these calls. Symbol
-    # isolation belongs to the compiler; other emitted artifacts stay intact.
-    if (context or {}).get("nested_parallel"):
-        path = output_dir / "region.cpp"
-        text = "\n".join(line for line in path.read_text().splitlines()
-                          if not re.match(r"\s*#\s*pragma\s+omp\b", line)) + "\n"
-        path.write_text(text)
     metadata = {
-        "tool": "local", "target": "cpp", "entry": entry, "changed": True,
+        "tool": "local", "target": "scoped", "entry": entry, "changed": True,
         "context": context or {}, "opt_level": 1,
-        "extra_sources": [str(output_dir / "interface.f90"), str(output_dir / "region.cpp")],
+        "extra_sources": [str(output_dir / item["path"]) for item in units if item["language"] == "fortran"],
+        "gpu_sources": [{**item, "source": str(output_dir / item["path"]), "tool": "local"} for item in units
+                        if item["language"] == "cuda"],
         "source_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
         "command": command,
         "compiler_report": report,
+        "shared_entry": report["scoped"],
         "policy": "compiler dependence analysis, scalar motion, loop fusion and locality scheduling",
     }
     (output_dir / "transformation.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -393,6 +416,8 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         raise LocalAdapterError("Retired public source options: " + ", ".join(sorted(retired)))
     if options.get("scope_execution", "graph") != "graph":
         raise LocalAdapterError("Public source scopes require graph execution")
+    if options.get("scope_transfers") == "pipelined":
+        raise LocalAdapterError("Pipelined slab batching was removed; use shared graph execution")
     options["scope_execution"] = "graph"
     return _transform_scopes_protocol(
         source_path, compiler_root, python, output_dir, entry=entry,

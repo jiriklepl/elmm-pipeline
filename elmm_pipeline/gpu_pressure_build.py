@@ -10,7 +10,6 @@ import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import time
@@ -18,6 +17,7 @@ from pathlib import Path
 
 from .build_receipts import CommandRecorder, file_identity
 from .gpu_pressure import PressureProblem, prepare_adapter
+from .poisson_source import snapshot_solver, verify_solver_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 _RUNTIME_BASE = {"scoped_runtime.h", "scoped_runtime.cu", "scoped_memory.f90"}
@@ -107,35 +107,6 @@ def _json_identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def verify_source_package(directory=None):
-    lock = json.loads((ROOT / "pressure-dependencies.json").read_text())
-    directory = Path(directory or ROOT / lock["provider"]["source"]).resolve(strict=True)
-    origin_path, manifest_path = directory / "origin.json", directory / "source-manifest.json"
-    if (file_identity(origin_path)["sha256"] != lock["provider"]["origin_sha256"]
-            or file_identity(manifest_path)["sha256"] != lock["provider"]["source_manifest_sha256"]):
-        raise ValueError("Pressure provider origin/source manifest differs from the pinned package")
-    origin, manifest = json.loads(origin_path.read_text()), json.loads(manifest_path.read_text())
-    controls = {"upstream.patch": "patch_sha256", "UPSTREAM-LICENSE-NOTICE.txt": "license_notice_sha256",
-                "VkFFT-LICENSE": "VkFFT_license_sha256", "source-manifest.json": "source_manifest_sha256"}
-    for name, key in controls.items():
-        if file_identity(directory / name)["sha256"] != origin[key]:
-            raise ValueError("Pressure provider package metadata changed: " + name)
-    expected = set(controls) | {"origin.json"}
-    for entry in manifest["files"]:
-        name = entry["path"]
-        original_path = directory / name
-        path = original_path.resolve(strict=True)
-        if not path.is_relative_to(directory) or original_path.is_symlink() or name in expected:
-            raise ValueError("Invalid pressure source package path")
-        if file_identity(path)["sha256"] != entry["sha256"] or stat.S_IMODE(path.stat().st_mode) != int(entry["mode"], 8):
-            raise ValueError("Pressure provider source changed: " + name)
-        expected.add(name)
-    actual = {str(path.relative_to(directory)) for path in directory.rglob("*") if path.is_file()}
-    if actual != expected:
-        raise ValueError("Pressure provider package contains missing or additional files")
-    return directory, manifest
-
-
 def _check_vkfft(directory):
     directory = Path(directory).resolve(strict=True)
     pin = json.loads((ROOT / "pressure-dependencies.json").read_text())["VkFFT"]["revision"]
@@ -169,7 +140,7 @@ def _phase(argv, directory, name, *, environment):
 
 
 def prepare_pressure_backend(problem: PressureProblem, directory, *, runtime_directory, vkfft_source,
-                             toolchain, fortran, jobs=2, package_directory=None, cpu_fallback="original"):
+                             toolchain, fortran, solver_source, jobs=2, cpu_fallback="original"):
     """Build one immutable optional backend; no ELMM/source transformation runs.
 
     The VkFFT checkout is explicit and pinned. Dependency fetching, if needed,
@@ -180,7 +151,7 @@ def prepare_pressure_backend(problem: PressureProblem, directory, *, runtime_dir
         raise ValueError("Pressure build jobs must be positive")
     if cpu_fallback not in ("original", "lazy_poisfft_v1"):
         raise ValueError("Unknown explicit pressure CPU fallback implementation")
-    package, source_manifest = verify_source_package(package_directory)
+    solver_source = Path(solver_source).resolve(strict=True)
     vkfft = _check_vkfft(vkfft_source)
     runtime = Path(runtime_directory).resolve(strict=True)
     runtime_inputs = _runtime_inputs(runtime)
@@ -196,9 +167,12 @@ def prepare_pressure_backend(problem: PressureProblem, directory, *, runtime_dir
         if os.environ.get(name):
             raise ValueError("Pressure backend rejects hidden compiler option override: " + name)
     directory = Path(directory).resolve()
-    if directory == package or package in directory.parents:
+    if directory == solver_source or solver_source in directory.parents:
         raise ValueError("Pressure build must stay outside the source package")
     directory.mkdir(parents=True, exist_ok=False)
+    package = directory / "provider-source"
+    source_receipt = directory / "provider-inputs.json"
+    source_manifest = snapshot_solver(solver_source, package, source_receipt)
     build, install = directory / "provider-build", directory / "provider-install"
     receipts = directory / "command-receipts"
     shutil.copyfile(Path(__file__).with_name("build_receipts.py"), directory / "build_receipts.py")
@@ -273,7 +247,7 @@ def prepare_pressure_backend(problem: PressureProblem, directory, *, runtime_dir
         if result.returncode:
             raise RuntimeError("Pressure adapter compilation failed: " + str(source))
         objects.append(str(target))
-    verify_source_package(package)
+    verify_solver_snapshot(source_receipt)
     _check_vkfft(vkfft)
     if file_identity(query) != query_identity:
         raise ValueError("Typed PoisFFT query changed during pressure preparation")
@@ -282,15 +256,14 @@ def prepare_pressure_backend(problem: PressureProblem, directory, *, runtime_dir
     for name, identity in runtime_inputs.items():
         if file_identity(runtime / name) != identity:
             raise ValueError("Compiler runtime changed during pressure preparation")
-    inputs = [file_identity(package / entry["path"]) for entry in source_manifest["files"]]
+    inputs = [entry["snapshot"] for entry in source_manifest["files"]]
     inputs += [file_identity(path) for path in sorted(vkfft.joinpath("vkFFT").rglob("*")) if path.is_file()]
     inputs += [file_identity(path) for path in sorted(adapter.rglob("*")) if path.is_file()]
     inputs += [file_identity(path) for path in sorted(install.rglob("*")) if path.is_file()]
-    inputs += [file_identity(package / name) for name in ("origin.json", "source-manifest.json", "upstream.patch",
-                                                         "UPSTREAM-LICENSE-NOTICE.txt", "VkFFT-LICENSE")]
+    inputs += [file_identity(source_receipt)]
     inputs += [*runtime_inputs.values(), file_identity(ROOT / "pressure-dependencies.json")]
-    payload = {"schema_version": 1, "kind": "prepared_gpu_pressure_backend", "placement_authority": False,
-               "requirements": requirements, "package": file_identity(package / "source-manifest.json"),
+    payload = {"schema_version": 2, "kind": "prepared_gpu_pressure_backend", "placement_authority": False,
+               "requirements": requirements, "provider_source": file_identity(source_receipt),
                "runtime": runtime_inputs, "fortran_compiler": file_identity(fc),
                "objects": objects, "library_dirs": [str(install / "lib")], "libraries": ["poisson-solver"],
                "rpaths": [str(install / "lib"), str(Path(toolchain["cuda_library_dir"]).resolve())],
@@ -311,12 +284,14 @@ def require_pressure_backend(request, *, fortran):
     if file_identity(path)["sha256"] != request["sha256"]:
         raise ValueError("Pressure backend manifest changed")
     value = json.loads(path.read_text())
+    if isinstance(value, dict) and value.get("schema_version") == 1:
+        raise ValueError("Prepared pressure backend v1 is retired; rebuild with explicit solver_source (v2)")
     if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
-            or value.get("schema_version") != 1 or value.get("kind") != "prepared_gpu_pressure_backend"
+            or value.get("schema_version") != 2 or value.get("kind") != "prepared_gpu_pressure_backend"
             or value.get("placement_authority") is not False
             or value.get("identity") != _json_identity({key: item for key, item in value.items() if key != "identity"})):
         raise ValueError("Invalid prepared pressure backend identity")
-    keys = {"schema_version", "kind", "placement_authority", "requirements", "package", "runtime",
+    keys = {"schema_version", "kind", "placement_authority", "requirements", "provider_source", "runtime",
             "fortran_compiler", "objects", "library_dirs", "libraries", "rpaths", "extra_sources",
             "include_dirs", "command_receipts", "inputs", "provider_library", "identity"}
     runtime = value.get("runtime")
@@ -337,10 +312,12 @@ def require_pressure_backend(request, *, fortran):
     for name in value["include_dirs"]:
         if not Path(name).is_dir():
             raise ValueError("Prepared pressure module directory disappeared")
-    lock = json.loads((ROOT / "pressure-dependencies.json").read_text())
-    if (value["package"]["sha256"] != lock["provider"]["source_manifest_sha256"]
-            or file_identity(value["package"]["path"]) != value["package"]):
-        raise ValueError("Prepared pressure provider differs from the pinned package")
+    source = value["provider_source"]
+    if file_identity(source["path"]) != source or known.get(source["path"]) != source["sha256"]:
+        raise ValueError("Prepared local Poisson source receipt changed or is not bound")
+    source_manifest = verify_solver_snapshot(source["path"])
+    if any(known.get(r["snapshot"]["path"]) != r["snapshot"]["sha256"] for r in source_manifest["files"]):
+        raise ValueError("Prepared local Poisson source files are not bound")
     if file_identity(fortran) != value["fortran_compiler"]:
         raise ValueError("Pressure Fortran modules require the exact selected host compiler")
     for identity in value["inputs"]:

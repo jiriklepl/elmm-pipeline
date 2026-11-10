@@ -635,6 +635,17 @@ def ancestors(node: Any) -> set[int]:
     return result
 
 
+def directive_value_reads(text: str) -> set[str]:
+    """Names whose incoming scalar value may be used by an OpenMP directive.
+
+    PRIVATE declares a new value; it does not read the old scalar induction
+    variable. Keep FIRSTPRIVATE and all unrecognized clauses conservative.
+    Callers use this for local scalar liveness, not descriptor/lifetime effects.
+    """
+    text = re.sub(r"\bprivate\s*\(\s*[a-z]\w*(?:\s*,\s*[a-z]\w*)*\s*\)", "", text, flags=re.I)
+    return set(re.findall(r"\b[a-zA-Z][a-zA-Z0-9_]*\b", text.lower()))
+
+
 def live_after(routine: Any, end: int, written: set[str], parsed: Parsed, region_node: Any) -> set[str]:
     """Conservatively inspect later source statements, killing scalar defs."""
     pending = set(written)
@@ -651,7 +662,7 @@ def live_after(routine: Any, end: int, written: set[str], parsed: Parsed, region
             # Directive clauses are opaque to fparser's expression tree, but
             # e.g. FIRSTPRIVATE evaluates the old value of its listed names.
             if re.match(r"\s*!\$omp\b", str(statement), re.I):
-                referenced = set(re.findall(r"\b[a-zA-Z][a-zA-Z0-9_]*\b", str(statement).lower()))
+                referenced = directive_value_reads(str(statement))
                 if referenced & pending:
                     return referenced & pending
             continue

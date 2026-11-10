@@ -43,12 +43,15 @@ def test_public_cli_rejects_retired_arguments_before_run(monkeypatch, extra):
     assert error.value.code == 2
 
 
-def test_public_cli_accepts_graph_and_preserves_ordinary_call_default(monkeypatch):
+def test_public_cli_accepts_graph_and_defaults_to_shared_ownership(monkeypatch):
     for extra, expected in [([], None), (["--scope-execution", "graph"], "graph")]:
         monkeypatch.setattr(sys, "argv", ["pipeline", "run", *extra])
         with patch.object(cli, "run") as run:
             cli.main()
         assert run.call_args.args[0].scope_execution == expected
+        assert run.call_args.args[0].memory_model == "scoped"
+        assert run.call_args.args[0].gpu_policy == "sections"
+        assert run.call_args.args[0].tools == ["baseline"]
 
 
 def test_scoped_configuration_derives_graph_without_retired_fields(tmp_path):
@@ -59,7 +62,8 @@ def test_scoped_configuration_derives_graph_without_retired_fields(tmp_path):
                            scope_facts=facts)
     assert cli.scoped_configuration(args)["execution"] == "graph"
     assert not {"measurement", "cost"} & cli.scoped_configuration(args).keys()
-    assert cli.scoped_configuration(SimpleNamespace(memory_model="call")) is None
+    with pytest.raises(ValueError, match="removed"):
+        cli.scoped_configuration(SimpleNamespace(memory_model="call"))
 
 
 @pytest.mark.parametrize(("historical", "response_execution", "error"), [

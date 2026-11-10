@@ -44,8 +44,8 @@ def validate_copy_pricing(record):
         raise ValueError("copy pricing requires bounded identities, capacity and direction")
     model = record["model_key"]
     if (type(model) is not list or len(model) != 155 or any(not _uint(word) for word in model)
-            or model[:4] != [record["device"], 2, 1, 4602678819172646912]):
-        raise ValueError("copy pricing requires the exact complete V2 model key")
+            or model[:4] != [record["device"], 3, 1, 4602678819172646912]):
+        raise ValueError("copy pricing requires the exact complete V3 model key; rebuild older traces")
     if (any(not _seconds(record[name]) for name in ("direct_seconds", "selected_seconds"))
             or any(not _seconds(record[name], nullable=True) for name in ("cold_seconds", "reuse_seconds"))
             or any(not _seconds(record[name], nullable=True, positive=False)

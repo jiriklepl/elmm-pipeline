@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 
@@ -90,6 +91,11 @@ def write(path, value):
 def fixture(tmp_path, monkeypatch):
     from compiler.frontend.source_effects import SourceEffects
 
+    provider_value = os.environ.get("ELMM_POISSON_SOURCE")
+    if not provider_value:
+        pytest.skip("Explicit local solver source required: ELMM_POISSON_SOURCE")
+    provider = Path(provider_value).resolve(strict=True)
+
     library = tmp_path / "poisfft.f90"
     library.write_text(LIBRARY)
     wrapper = tmp_path / "poisson.f90"
@@ -97,7 +103,7 @@ def fixture(tmp_path, monkeypatch):
     package = Path(gpu_pressure_lazy.__file__).parent
     implementation = package / "gpu_pressure_sources/gpu_pressure_lazy_poisfft.f90"
     paths = [library, wrapper, implementation, package / "gpu_pressure_sources/gpu_pressure.f90",
-             ROOT / "elmm-pipeline/vendor/poisson-solver/src/device_binding.f90", ROOT / "compiler/runtime/scoped_memory.f90"]
+             provider / "src/device_binding.f90", ROOT / "compiler/runtime/scoped_memory.f90"]
     document = {"schema_version": 1, "source_inputs": {str(path): digest(path) for path in paths},
         "preserves_source_order": True, "configuration": {"defines": ["DPREC"]}, "dependencies": {},
         "entries": [{"source": str(path), "path": str(path), "sha256": digest(path),

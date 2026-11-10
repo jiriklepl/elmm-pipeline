@@ -208,7 +208,7 @@ def test_automatic_missing_profile_composes_authenticated_native_package(indepen
     assert destination.read_text() == source.read_text() == PROGRAM
 
 
-@pytest.mark.parametrize("transfers", ["pinned", "pipelined", "coalesced"])
+@pytest.mark.parametrize("transfers", ["pinned", "coalesced"])
 def test_independent_adapter_transports_transfer_choice_and_compiler_reason(independent, tmp_path, transfers):
     _, _, compiler, source, _, _ = independent
     metadata = transform_scopes(source, compiler, Path(sys.executable), tmp_path / "generated", entry="step",
@@ -218,12 +218,20 @@ def test_independent_adapter_transports_transfer_choice_and_compiler_reason(inde
     scope, = metadata["scope_manifest"]["scopes"]
     configuration = scope["transfer_configuration"]
     assert configuration["requested"] == transfers
-    assert configuration["selected"] == {"pinned": "pinned", "pipelined": "direct", "coalesced": "runtime"}[transfers]
-    assert configuration["reason"] == ("pipelined_not_available" if transfers == "pipelined" else None)
+    assert configuration["selected"] == {"pinned": "pinned", "coalesced": "runtime"}[transfers]
+    assert configuration["reason"] is None
     if transfers == "coalesced":
         assert configuration["coalesced"]["fallback_reason"] == "coalesced_upload_ineligible"
         assert "exact direct" in configuration["coalesced"]["placement"]
     assert metadata["compiler_report"]["scopes"] == metadata["scope_manifest"]
+
+
+def test_removed_slab_transfer_rejects_before_invoking_compiler(tmp_path):
+    with patch("elmm_pipeline.local_adapter._invoke") as invoke, pytest.raises(LocalAdapterError, match="removed"):
+        transform_scopes(tmp_path / "not-read.f90", tmp_path, Path(sys.executable), tmp_path / "generated",
+                         entry="step", capture_facts=FACTS, gpu_options={"scope_transfers": "pipelined"})
+    invoke.assert_not_called()
+    assert not (tmp_path / "generated").exists()
 
 
 def test_independent_adapter_transports_reached_execution_without_choosing_segments(independent,tmp_path):

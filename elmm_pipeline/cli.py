@@ -56,12 +56,14 @@ def compiler_identity():
 
 def scoped_configuration(args):
     """Validate explicit scope configuration without inferring capture facts."""
-    model = getattr(args, "memory_model", "call")
+    model = getattr(args, "memory_model", "scoped")
     transfers = getattr(args, "scope_transfers", "direct")
     execution = getattr(args, "scope_execution", None)
     if getattr(args, "scope_measurement", None) is not None or getattr(args, "scope_cost", None) is not None:
         raise ValueError("Retired public scope measurement/cost options")
-    if transfers not in {"direct", "pinned", "pipelined", "auto", "coalesced"}:
+    if transfers == "pipelined":
+        raise ValueError("Pipelined slab batching was removed; use shared graph execution")
+    if transfers not in {"direct", "pinned", "auto", "coalesced"}:
         raise ValueError("Unknown scope transfer mode")
     if execution not in {None, "graph"}:
         raise ValueError("Public source scopes require graph execution")
@@ -69,12 +71,12 @@ def scoped_configuration(args):
               "source_files": getattr(args, "scope_source_file", None) or [],
               "capture_facts": getattr(args, "scope_facts", None),
               "effect_contracts": getattr(args, "scope_effect_contracts", None)}
-    if model == "call":
-        if transfers != "direct" or execution is not None or any(values[key] for key in values):
-            raise ValueError("--scope-* options require --memory-model scoped")
-        return None
     if model != "scoped":
-        raise ValueError("Unknown memory model")
+        raise ValueError("Ordinary-call integration was removed; use resident-build or checked source scopes")
+    if "local" not in args.tools:
+        if transfers != "direct" or execution is not None or any(values.values()):
+            raise ValueError("Scope options require --target gpu and --tools local")
+        return None
     if args.target != "gpu" or "local" not in args.tools or any(tool not in {"baseline", "local"} for tool in args.tools):
         raise ValueError("Scoped memory requires --target gpu and --tools local")
     if args.gpu_policy not in {"sections", "auto"}:
@@ -102,9 +104,9 @@ def prepare_build(tool, args, setup_state, compilers):
     paths.append(ROOT / "elmm_pipeline" / "gpu_toolchain.py")
     if tool == "local":
         key_data["local_compiler"] = digest_tree(repositories / "local-compiler" / "compiler")
-        key_data["memory_model"] = getattr(args, "memory_model", "call")
+        key_data["memory_model"] = getattr(args, "memory_model", "scoped")
     scope_options = None
-    if tool == "local" and getattr(args, "memory_model", "call") == "scoped":
+    if tool == "local" and getattr(args, "memory_model", "scoped") == "scoped":
         scope_options = scoped_configuration(args)
         from .scoped_adaptation import scope_inputs
         root, scope_sources = scope_inputs(repositories / "elmm" / "src", scope_options)
@@ -127,7 +129,7 @@ def prepare_build(tool, args, setup_state, compilers):
             if scope_options:
                 paths += [ROOT / "elmm_pipeline" / name for name in ("scoped_adaptation.py", "scope_extraction.py")]
             key_data["gpu_toolchain"] = args.gpu_toolchain
-            key_data["gpu_policy"] = getattr(args, "gpu_policy", "always")
+            key_data["gpu_policy"] = getattr(args, "gpu_policy", "sections")
             key_data["host_threads"] = args.threads
             profile_path = getattr(args, "calibration_profile", None)
             key_data["calibration_profile"] = ({"sha256": hashlib.sha256(Path(profile_path).read_bytes()).hexdigest()}
@@ -157,7 +159,7 @@ def prepare_build(tool, args, setup_state, compilers):
     directory.mkdir(parents=True)
     gpu_options = dict(args.gpu_toolchain or {})
     if tool == "local" and args.target == "gpu":
-        gpu_options.update(gpu_policy=getattr(args, "gpu_policy", "always"), host_threads=args.threads)
+        gpu_options.update(gpu_policy=getattr(args, "gpu_policy", "sections"), host_threads=args.threads)
         if scope_options:
             gpu_options["scope_transfers"] = scope_options["transfers"]
             gpu_options["scope_execution"] = scope_options["execution"]
@@ -193,7 +195,7 @@ def prepare_build(tool, args, setup_state, compilers):
                                 exclude=args.exclude, marked_only=args.marked_only,
                                 defines=defines, coverage=not args.no_coverage,
                                 target=args.target, gpu_options=gpu_options,
-                                memory_model=getattr(args, "memory_model", "call"), scope_options=scope_options)
+                                memory_model=getattr(args, "memory_model", "scoped"), scope_options=scope_options)
         if not adapter["regions"] and not adapter.get("native_success"):
             return None, {"identity": key_data, "adapter": adapter,
                           "reason": "No eligible regions accepted by this backend; native code preserved."}
@@ -221,8 +223,8 @@ def run(args):
         raise ValueError("--warmups cannot be negative")
     scope_options = scoped_configuration(args)
     defines = preprocessing_defines(args.build_arg)
-    if args.gpu_policy != "always" and (args.target != "gpu" or any(tool not in {"baseline", "local"} for tool in args.tools)):
-        raise ValueError("GPU runtime policies require --target gpu and --tools local")
+    if args.gpu_policy not in {"sections", "auto"}:
+        raise ValueError("Ordinary GPU policies were removed; use sections or auto")
     if args.calibration_profile:
         args.calibration_profile = Path(args.calibration_profile).resolve(strict=True)
     args.gpu_toolchain = None
@@ -274,7 +276,7 @@ def run(args):
               "settings": {"threads": args.threads, "repeats": args.repeats, "warmups": args.warmups,
                            "target": args.target, "gpu_profile": args.gpu_profile,
                            "gpu_policy": args.gpu_policy,
-                           "memory_model": getattr(args, "memory_model", "call"),
+                           "memory_model": getattr(args, "memory_model", "scoped"),
                            "scope": ({key: str(value) if isinstance(value, Path) else value
                                       for key, value in scope_options.items()} if scope_options else None),
                            "calibration_profile": ({"source": str(args.calibration_profile),
@@ -437,6 +439,8 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description="Portable ELMM application benchmark pipeline")
     sub = parser.add_subparsers(dest="command", required=True)
+    from .resident_build import add_arguments as resident_arguments
+    resident_arguments(sub.add_parser("resident-build", help="Build the resident channel GPU path and native controls from source"))
     install = sub.add_parser("setup", help="Fetch pinned sources and provision private Python environments")
     install.add_argument("--tools", type=tool_list, default=list(TOOLS))
     install.add_argument("--local-compiler", type=Path, help="Explicit checkout containing compiler/; copied into cache")
@@ -455,17 +459,17 @@ def main():
     select = measure.add_mutually_exclusive_group()
     select.add_argument("--example", default="channel", help="ELMM examples/ subdirectory (default: channel)")
     select.add_argument("--config", help="Any configuration directory, or a .conf file in it")
-    measure.add_argument("--tools", type=tool_list, default=list(TOOLS))
+    measure.add_argument("--tools", type=tool_list, default=["baseline"])
     measure.add_argument("--target", choices=("cpu", "gpu"), default="cpu",
                          help="GPU uses local CUDA; baseline remains CPU/OpenMP")
     measure.add_argument("--nvcc", help="CUDA compiler path")
     measure.add_argument("--cuda-host", help="Host C++ compiler supported by nvcc")
     measure.add_argument("--gpu-arch", help="NVIDIA compute capability, e.g. 86; default queries GPU")
-    measure.add_argument("--gpu-policy", choices=("always", "sections", "auto", "chunked", "hybrid"), default="always",
-                         help="Local compiler runtime policy; always preserves the existing forced GPU path")
-    measure.add_argument("--memory-model", choices=("call", "scoped"), default="call",
-                         help="Local CUDA memory ownership; scoped uses compiler-owned source scopes")
-    measure.add_argument("--scope-transfers", choices=("direct", "pinned", "pipelined", "auto", "coalesced"), default="direct",
+    measure.add_argument("--gpu-policy", choices=("sections", "auto"), default="sections",
+                         help="Shared graph placement; execution modes remain explicit runtime diagnostics")
+    measure.add_argument("--memory-model", choices=("scoped",), default="scoped",
+                         help="Caller-owned storage with checked source-graph integration")
+    measure.add_argument("--scope-transfers", choices=("direct", "pinned", "auto", "coalesced"), default="direct",
                          help="Pass the scoped transfer mode to the compiler; independent of GPU placement")
     measure.add_argument("--scope-execution", choices=("graph",),
                          help="Source scope execution; graph is implicit with scoped memory")
@@ -504,6 +508,9 @@ def main():
     try:
         if args.command == "setup":
             setup(args.tools, args.local_compiler)
+        elif args.command == "resident-build":
+            from .resident_build import execute
+            execute(args)
         elif args.command == "analyze":
             from .discovery import discover_project
             if args.output.exists():

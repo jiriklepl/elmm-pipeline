@@ -99,7 +99,7 @@ def test_lazy_backend_preserves_exact_compiled_origin_and_rejects_base_drift(tmp
     selected = prepare_lazy_pressure_backend(request, tmp_path / "lazy", fortran=compiler)
     value = require_pressure_backend(selected, fortran=compiler)
     assert Path(request["manifest"]).read_bytes() == before
-    for key in ("objects", "provider_library", "runtime", "command_receipts", "fortran_compiler", "package"):
+    for key in ("objects", "provider_library", "runtime", "command_receipts", "fortran_compiler", "provider_source"):
         assert value[key] == base[key]
     assert value["extra_sources"][:-1] == base["extra_sources"]
     assert value["requirements"]["cpu_fallback"]["compiled_artifact_origin"] == request

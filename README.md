@@ -10,6 +10,89 @@ Downloaded repositories, compiler snapshots, Python environments, generated
 sources, builds, and results are Git-ignored. Project code never discovers a
 parent/sibling checkout. Dependencies and input paths are explicit.
 
+## Resident channel build
+
+The primary `channel-simple` and `channel` GPU implementation now has a single
+source-build command. It prepares the complete supported numerical path,
+regenerates compiler entries, and builds the explicitly supplied local
+`poisson-solver` source. It never reuses an older experiment's object or module
+files. The application adapter handles RK/pressure/boundary structure; numerical
+dependence checks and replica coherence remain in the generic compiler/runtime.
+Primary VTK output uses two immutable device/pinned snapshot pairs and a serial
+writer. Slices from the same output call share a capture. DMA is event-ordered
+after capture, serialization waits for DMA, and finalization joins the writer
+before domain retirement or field deallocation. Device snapshots count against
+the resident workspace budget; pinned snapshots have a 256 MiB cap. Unsupported
+frame types and active thermodynamic/scalar output retain coherent native access
+after waiting for queued frames. See the [qualified output milestone](../benchmarks/reports/gpu-async-output-20261110/README.md)
+for correctness, measured overlap and the primary performance comparison.
+
+Adjacent numerical nests share a compiler entry within each original control
+branch. Coverage checks count original source nests rather than entry calls, so
+grouping cannot satisfy coverage by dropping work. The entry boundary does not
+end residency or permit moving work across a native effect.
+
+Resident numerical packages require the compiler's artifact schema 2. Generation
+emits the shared entry/interface and common runtime directly, without unused
+ordinary CUDA/C++ backends or their fallback-query metadata. The adapter consumes
+the declared shared build sources and rejects older combined packages with an
+explicit regeneration error. Ordinary-call output-name switches do not apply to
+scoped generation; the shared runtime and entry ABIs remain unchanged.
+
+```sh
+python /path/to/elmm-pipeline/pipeline.py resident-build \
+  --elmm /path/to/elmm --poisfft /path/to/PoisFFT \
+  --compiler /path/to/compiler --solver /path/to/compiler/poisson-solver \
+  --vkfft /path/to/pinned/VkFFT --output /path/to/new-build \
+  --fortran /usr/bin/gfortran-15 --cxx /usr/bin/g++-14 \
+  --nvcc /usr/local/cuda/bin/nvcc --architecture 86 --jobs 2
+```
+
+This command requires CMake 4+, Ninja and the compiler's Python dependencies.
+VkFFT must match `pressure-dependencies.json`; the local solver must be based on
+`4a1f1bb7e6f9dab6a2934b62d9b8655cf3a9f99a`; commits descended from that base
+are accepted, while unrelated histories are rejected. Local solver edits are copied and
+hashed, then compiled out of tree with the same Fortran compiler. The command
+does not fetch dependencies or modify the supplied source trees.
+
+The output contains `build/ELMM`, `build/ELMM-native`, and separate `-full20`
+diagnostic executables, plus source identities, generated manifests, complete
+compile commands and build logs. Native and GPU builds share the approved
+deterministic TOP/BOTTOM pressure-reference fix. Four-thread native execution
+is the comparison baseline. No aggressive floating-point options are enabled.
+
+Use `--prepare-only` to stop after generation, then repeat the command with
+`--build-prepared` and the toolchain options to build that prepared source.
+The output directory must be new for a fresh build. A successful build establishes
+neither actual GPU execution nor numerical/performance qualification; run those
+checks at an integration milestone before promoting a candidate. Region discovery remains useful for compiler diagnostics; the retired
+call-region adaptation and placement/window switches do not configure this path.
+
+The local solver supports a bounded persistent compiled-kernel cache. For a
+resident executable, explicitly set `POISSON_SOLVER_KERNEL_CACHE_DIR` to an
+absolute owner-only directory created with `mkdir -m 700`. Leave it unset to
+measure compilation on every process start. Record this choice in comparisons;
+an excluded warmup may populate a fresh cache, but all lookup, compilation on
+miss and module loading stay inside the application clock. This caches generated
+code only and does not change solver arithmetic or field residency. See the
+[solver cache contract](../poisson-solver/README.md#installed-device-api).
+
+The optional `prepare_pressure_backend` Python API also requires the explicit
+`solver_source` checkout. It shares source snapshotting with `resident-build`;
+there is no bundled solver implementation or implicit provider default.
+Prepared pressure manifests use schema v2 and bind the complete local source
+snapshot, including uncommitted edits. Old v1 provider manifests must be rebuilt;
+the error identifies the removed format. Existing historical builds and reports
+remain historical controls. Provider integration tests take their source from
+`ELMM_POISSON_SOURCE`.
+
+The previous call-region CUDA/C++ adaptation route is retired. Current local
+integration uses `resident-build` or checked source scopes. `run` now defaults to
+`--tools baseline`; select `--tools local --target gpu` with explicit scope facts
+for generic source-graph integration. `call`, `always`, `chunked` and `hybrid` are
+no longer accepted production settings. Historical reports and binaries remain
+unchanged; refreshing a compiler snapshot does not restore retired APIs.
+
 ## Setup and run
 
 Requirements: Linux, Python 3.11+ with venv/pip, Git, GNU Fortran, GCC/G++, FFTW
@@ -66,21 +149,19 @@ analysis cannot silently describe a different program from the native build.
 `--target cpu` remains the default. Select `--target gpu` to compare the original
 GNU Fortran/OpenMP application with generated local CUDA. The host application
 and interface modules still compile with GNU Fortran; `nvcc` compiles CUDA.
-The compiler boundary uses C bindings with explicit array extents.
+The compiler boundary uses canonical shared handles and checked access contracts.
 
 GPU runs additionally require a visible NVIDIA GPU/driver and CUDA. Compilers
 are discovered on PATH or in standard system installations, with explicit
 overrides available:
 
-```sh
-python3 pipeline.py run --target gpu --example channel --steps 10 \
-  --threads 4 --repeats 3 --warmups 1 --fc gfortran-15 \
-  --nvcc /usr/local/cuda/bin/nvcc --cuda-host g++-14 \
-  --gpu-arch 86
-```
+For the complete primary GPU application, use `resident-build` above. Generic
+source-graph comparisons additionally require `--tools local --scope-entry`,
+`--scope-source` and `--scope-facts`; see the source-scope example below. A GPU
+target alone does not provide storage-lifetime or native-effect evidence.
 
-The paths and compute capability above are examples; select those for your
-installation and GPU. `--cuda-host` chooses a C++ compiler supported by `nvcc`
+
+Select toolchain paths and compute capability for your installation and GPU. `--cuda-host` chooses a C++ compiler supported by `nvcc`
 (discovery prefers `g++-14` when installed). `--gpu-arch` defaults to the visible
 GPU's compute capability. It does not bypass the GPU availability check.
 `--tools` selects the same variants as CPU runs, always including the native
@@ -190,7 +271,7 @@ python3 pipeline.py run --tools local --target gpu --gpu-policy sections \
   --config /path/to/case --threads 4 --repeats 3 --warmups 1
 ```
 
-`--scope-transfers {direct,pinned,pipelined,auto,coalesced}` passes the explicit
+`--scope-transfers {direct,pinned,auto,coalesced}` passes the explicit
 transfer choice through the compiler's public interface; `direct` remains the
 default. Experimental `coalesced` uploads may copy a dense physical span with
 at most 12.5% extra bytes only when the whole canonical source resource is
@@ -205,28 +286,17 @@ imports needed for capture and effect analysis. Call-region selection filters
 (`--select`, `--exclude`, `--marked-only`) do not apply to this mode. The entry
 names and source paths identify available input; they supply no grouping recipe.
 
-`--scope-execution reached` opts into the compiler's experimental reached-owner
-implementation; `bounded` remains the default. The adapter forwards the option,
-includes it in build identity, and applies the returned public artifacts. The
-compiler decides which original child regions, lexical coordinators and native
-operations can share a context. Consult its manifest for reached boundaries and
-available numerical work; selecting this mode is not evidence of a resident
-application chain or improved performance.
+Source scopes use graph execution by default. `--scope-execution graph` makes
+that choice explicit; the former `bounded` and `reached` values are rejected.
+The compiler decides which original child regions and native operations may
+share a context, retaining their control and effect dependencies. Consult the
+manifest and runtime traces for actual ownership boundaries and GPU execution.
 
-`--scope-measurement native|resident` requests diagnostic timing around the
-compiler's authenticated original call sites for an already admitted complete
-owner. It requires `sections` policy, `reached` execution and noncollective
-participation. The compiler includes argument evaluation, procedure execution,
-native interruptions and final resident cleanup; output uses
-`FORT_SCOPE_MEASUREMENT` records. The adapter validates the versioned
-`owner_measurement` identities and exact original call text, preserves the
-contract through composition, and labels instrumentation as measurement-only.
-The native variant changes only caller timing and needs no CUDA/runtime build
-units; its admitted owner plan grants no GPU execution claim. Original build
-flags remain unchanged and executed build receipts support comparison with the
-native control. These observations have no runtime workload key, calibration
-authority or automatic placement authority. Guarded resident fallbacks require
-separate runtime traces; timing records alone do not establish GPU execution.
+`--scope-measurement` and `--scope-cost` are retired public options. Historical
+owner-timing records and private compiler reference fixtures remain available
+for inspecting earlier experiments; they do not configure current production
+execution. Use complete-process application measurements and separate profiles
+to qualify the current graph or resident application path.
 
 Lexical scopes may include a compiler-issued `checked_execution_plan` schema 1
 inside the existing scope-manifest schema 1. The adapter validates its canonical

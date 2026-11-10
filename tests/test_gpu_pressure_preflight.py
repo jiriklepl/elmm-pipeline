@@ -61,9 +61,12 @@ def test_only_no_device_is_recoverable_before_provider_or_workspace_work(tmp_pat
     if not runtime_value:
         pytest.skip("Explicit current runtime header required: ELMM_PRESSURE_RUNTIME")
     runtime = Path(runtime_value).resolve(strict=True)
+    provider_value = os.environ.get("ELMM_POISSON_SOURCE")
+    if not provider_value:
+        pytest.skip("Explicit local solver source required: ELMM_POISSON_SOURCE")
     root = Path(__file__).resolve().parents[1]
     adapter = root / "elmm_pipeline/gpu_pressure_sources"
-    provider = root / "vendor/poisson-solver/include"
+    provider = Path(provider_value).resolve(strict=True) / "include"
     compiler = shutil.which("g++-14")
     assert compiler
     cuda = Path(os.environ.get("CUDA_HOME", "/usr/local/cuda")) / "include"

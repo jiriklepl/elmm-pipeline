@@ -196,7 +196,7 @@ def live_after(routine, end, written, parsed, region_node):
         kind = s.kind(statement)
         if kind == "Comment":
             if re.match(r"\s*!\$omp\b", str(statement), re.I):
-                references = set(re.findall(r"\b[a-zA-Z][a-zA-Z0-9_]*\b", str(statement).lower()))
+                references = s.directive_value_reads(str(statement))
                 if references & pending:
                     return references & pending
             continue

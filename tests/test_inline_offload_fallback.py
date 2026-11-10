@@ -264,7 +264,7 @@ def serial_catalog_fixture(catalog):
     """Use the exact existing serial-loop completion shape and catalog owner."""
     manifest, lines = borrowed_fixture() if catalog == 'child' else fixture()
     completion = {'available': True, 'caller_contract': 'serial_source_scope',
-                  'reason': 'original serial counted loop completes before continuation'}
+                  'reason': 'original serial counted loops complete in source order before continuation'}
     regions = manifest['inline_numerical_regions']['regions']
     regions[0]['completion'] = completion
     if catalog == 'child':
@@ -278,8 +278,13 @@ def serial_catalog_fixture(catalog):
 
 @pytest.mark.parametrize('catalog', ['root', 'child'])
 @pytest.mark.parametrize('reason', ['resource', 'boundary'])
-def test_serial_loop_without_completion_procedure_uses_exact_catalog_owner(catalog, reason):
+@pytest.mark.parametrize('historical_single_loop', [False, True])
+def test_serial_loop_without_completion_procedure_uses_exact_catalog_owner(catalog, reason, historical_single_loop):
     manifest, lines = serial_catalog_fixture(catalog)
+    if historical_single_loop:
+        regions = (manifest['child_numerical_regions'][0] if catalog == 'child'
+                   else manifest['inline_numerical_regions'])['regions']
+        regions[0]['completion']['reason'] = 'original serial counted loop completes before continuation'
     before = deepcopy(manifest)
     lines[-1] = lines[-1].replace('native-scoped-resource', 'native-scoped-' + reason)
     result = gpu_activity('\n'.join(lines), 'local', [], scope_manifest=manifest)

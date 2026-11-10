@@ -20,8 +20,8 @@ from elmm_pipeline.gpu_pressure_build import (
     pressure_backend_from_manifest,
     pressure_runtime_cuda_binding,
     require_pressure_backend,
-    verify_source_package,
 )
+from elmm_pipeline.poisson_source import snapshot_solver, verify_solver_snapshot, dependency_lock
 from test_scope_composition import sources as _shared_sources
 
 sources = _shared_sources
@@ -201,31 +201,94 @@ def test_selected_runtime_quote_header_must_match_before_any_compilation(tmp_pat
     assert not (tmp_path / "output").exists()
 
 
-def test_vendored_package_is_pinned_and_contains_one_implementation():
-    directory, record = verify_source_package()
-    assert record["single_implementation"]
-    assert record["upstream"]["commit"] == "4a1f1bb7e6f9dab6a2934b62d9b8655cf3a9f99a"
-    assert not (directory / ".git").exists()
-    assert not (directory / "benchmark-results").exists()
-    assert (directory / "include/poisson-solver/device_api.h").is_file()
+def source_fixture(directory):
+    source = directory / "local-solver"
+    source.mkdir()
+    for name in ("CMakeLists.txt", "src/device_api.cpp", "include/poisson-solver/device_api.h"):
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture source only; no numerical or execution authority\n")
+    (source / "dependencies.lock.json").write_text(json.dumps({"dependencies": {
+        "VkFFT": {"commit": dependency_lock()["VkFFT"]["revision"]}}}))
+    return source
 
 
-@pytest.mark.parametrize("change", ["bytes", "additional", "symlink"])
-def test_vendored_source_tampering_is_rejected(tmp_path, change):
-    source, _ = verify_source_package()
-    copied = tmp_path / "package"
-    shutil.copytree(source, copied)
+def snapshot_fixture(directory):
+    source = source_fixture(directory)
+    target, receipt = directory / "provider-source", directory / "provider-inputs.json"
+    with patch("elmm_pipeline.poisson_source.subprocess.check_output",
+               return_value=dependency_lock()["provider"]["upstream_revision"] + "\n"):
+        record = snapshot_solver(source, target, receipt)
+    return source, target, receipt, record
+
+
+@pytest.mark.parametrize("history", ["descendant", "unrelated"])
+def test_local_solver_commits_must_descend_from_pinned_base(tmp_path, history):
+    source = source_fixture(tmp_path)
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(source), "-c", "user.name=Snapshot Test",
+             "-c", "user.email=snapshot@example.invalid", "-c", "commit.gpgsign=false", *args],
+            text=True, stderr=subprocess.STDOUT,
+        ).strip()
+
+    git("init")
+    git("add", ".")
+    git("commit", "-m", "Pinned base fixture")
+    pin = git("rev-parse", "HEAD")
+    if history == "unrelated":
+        git("checkout", "--orphan", "unrelated")
+    (source / "src/device_api.cpp").write_text("committed local implementation\n")
+    git("add", ".")
+    git("commit", "-m", "Local implementation fixture")
+    assert git("rev-parse", "HEAD") != pin
+    lock = dependency_lock()
+    lock["provider"]["upstream_revision"] = pin
+    target, receipt = tmp_path / "snapshot", tmp_path / "receipt.json"
+    with patch("elmm_pipeline.poisson_source.dependency_lock", return_value=lock):
+        if history == "unrelated":
+            with pytest.raises(ValueError, match="must be based on"):
+                snapshot_solver(source, target, receipt)
+            assert not target.exists() and not receipt.exists()
+        else:
+            record = snapshot_solver(source, target, receipt)
+            assert record["base_revision"] == pin
+            assert (target / "src/device_api.cpp").read_bytes() == (source / "src/device_api.cpp").read_bytes()
+            assert verify_solver_snapshot(receipt) == record
+
+
+@pytest.mark.parametrize("change", ["bytes", "additional", "symlink", "missing"])
+def test_local_source_snapshot_tampering_is_rejected(tmp_path, change):
+    _, copied, receipt, _ = snapshot_fixture(tmp_path)
     header = copied / "include/poisson-solver/device_api.h"
     if change == "bytes":
-        header.write_text(header.read_text() + "\n/* changed */\n")
+        header.write_text(header.read_text() + "changed\n")
     elif change == "additional":
-        (copied / "injected.cpp").write_text("// must never compile\n")
+        (copied / "injected.cpp").write_text("must never compile\n")
+    elif change == "missing":
+        header.unlink()
     else:
         alternate = copied / "include/poisson-solver/alternate.h"
         header.rename(alternate)
         header.symlink_to(alternate.name)
     with pytest.raises(ValueError):
-        verify_source_package(copied)
+        verify_solver_snapshot(receipt)
+
+
+@pytest.mark.parametrize("change", ["bytes", "added", "removed"])
+def test_resumed_snapshot_rejects_live_source_changes(tmp_path, change):
+    source, target, receipt, _ = snapshot_fixture(tmp_path)
+    if change == "bytes":
+        (source / "src/device_api.cpp").write_text("new reviewed implementation\n")
+    elif change == "added":
+        (source / "src/extra.cpp").write_text("new source\n")
+    else:
+        (source / "src/device_api.cpp").unlink()
+    with patch("elmm_pipeline.poisson_source.subprocess.check_output",
+               return_value=dependency_lock()["provider"]["upstream_revision"] + "\n"):
+        with pytest.raises(ValueError):
+            snapshot_solver(source, target, receipt)
 
 
 def backend_request(directory, compiler):
@@ -233,12 +296,13 @@ def backend_request(directory, compiler):
     library.write_bytes(b"qualification fixture, not an executable provider")
     runtime = directory / "runtime.h"
     runtime.write_text("fixture byte identity only\n")
-    package, _ = verify_source_package()
-    payload = {"schema_version": 1, "kind": "prepared_gpu_pressure_backend", "placement_authority": False,
-               "fortran_compiler": file_identity(compiler), "inputs": [file_identity(library)],
+    _, _, receipt, source = snapshot_fixture(directory)
+    payload = {"schema_version": 2, "kind": "prepared_gpu_pressure_backend", "placement_authority": False,
+               "fortran_compiler": file_identity(compiler), "inputs": [file_identity(library), file_identity(receipt),
+                    *(r["snapshot"] for r in source["files"])],
                "runtime": {name: file_identity(runtime) for name in ("scoped_runtime.h", "scoped_runtime.cu", "scoped_memory.f90")},
                "requirements": {"source_authority": False, "placement_authority": False},
-               "package": file_identity(package / "source-manifest.json"), "objects": [str(library)],
+               "provider_source": file_identity(receipt), "objects": [str(library)],
                "extra_sources": [], "libraries": ["poisson-solver"], "library_dirs": [], "rpaths": [],
                "include_dirs": [], "command_receipts": str(directory / "receipts"),
                "provider_library": file_identity(library)}
@@ -302,6 +366,32 @@ def test_prepared_manifest_binds_source_bytes_and_exact_fortran_compiler(tmp_pat
         require_pressure_backend(request, fortran=other)
     (tmp_path / "provider.so").write_bytes(b"tampered")
     with pytest.raises(ValueError, match="link/interface input is not bound"):
+        require_pressure_backend(request, fortran=compiler)
+
+
+def test_old_vendored_backend_manifest_requires_explicit_rebuild(tmp_path):
+    compiler = Path(shutil.which("python3"))
+    request = backend_request(tmp_path, compiler)
+    path = Path(request["manifest"])
+    value = json.loads(path.read_text())
+    value["schema_version"] = 1
+    value["identity"] = _json_identity({k: v for k, v in value.items() if k != "identity"})
+    path.write_text(json.dumps(value))
+    request["sha256"] = file_identity(path)["sha256"]
+    with pytest.raises(ValueError, match="v1 is retired; rebuild with explicit solver_source"):
+        require_pressure_backend(request, fortran=compiler)
+
+
+def test_local_source_receipt_cannot_omit_compiled_inputs(tmp_path):
+    compiler = Path(shutil.which("python3"))
+    request = backend_request(tmp_path, compiler)
+    path = Path(request["manifest"])
+    value = json.loads(path.read_text())
+    value["inputs"] = [r for r in value["inputs"] if not r["path"].endswith("device_api.cpp")]
+    value["identity"] = _json_identity({k: v for k, v in value.items() if k != "identity"})
+    path.write_text(json.dumps(value))
+    request["sha256"] = file_identity(path)["sha256"]
+    with pytest.raises(ValueError, match="source files are not bound"):
         require_pressure_backend(request, fortran=compiler)
 
 

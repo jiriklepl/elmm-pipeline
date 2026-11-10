@@ -45,7 +45,7 @@ def export_analysis_sources(project, output_dir: Path, *, source_files) -> Path:
 
 
 def export_numerical_sources(project, entry: str, output_dir: Path, *, source_files) -> dict:
-    """Export bounded direct-call leaf captures; leave rejected leaves native.
+    """Export reachable direct-call leaf captures; leave rejected leaves native.
 
     Sources must be the same configured source inputs later supplied to the
     compiler. Preprocessing/edit provenance is a separate integration concern;
@@ -68,13 +68,11 @@ def export_numerical_sources(project, entry: str, output_dir: Path, *, source_fi
     if len(matches)!=1:
         raise s.Unsupported("source-package entry is unavailable or ambiguous")
     entries,rejected,visited=[],[],set()
+    pending = list(matches)
 
-    def visit(parsed,routine,own,depth):
-        identity=(str(parsed.path),own.name.lower())
+    def visit(parsed,routine,own):
+        identity=(str(parsed.path), own.parent.name.lower() if own.parent else "", own.name.lower())
         if identity in visited:
-            return
-        if depth>=8 or len(visited)>=64:
-            rejected.append({"procedure":own.name,"reason":"bounded extraction closure exhausted"})
             return
         visited.add(identity)
         execution=next((n for n in s.content(routine) if s.kind(n)=="Execution_Part"),None)
@@ -94,7 +92,7 @@ def export_numerical_sources(project, entry: str, output_dir: Path, *, source_fi
             procedure=(module+"::"+child_scope.name).lower()
             child_execution=next((n for n in s.content(child) if s.kind(n)=="Execution_Part"),None)
             if any(s.kind(n)=="Call_Stmt" for n in s.walk(child_execution)):
-                visit(child_parsed,child,child_scope,depth+1)
+                pending.append((child_parsed,child,child_scope))
                 continue
             if any(item["procedure"]==procedure for item in entries):
                 continue
@@ -135,7 +133,11 @@ def export_numerical_sources(project, entry: str, output_dir: Path, *, source_fi
             except s.Unsupported as error:
                 rejected.append({"procedure":procedure,"reason":str(error)})
 
-    visit(*matches[0],0)
+    # The supplied source graph is finite; the visited set closes recursion.
+    # Traversal depth and the number of procedures must not silently truncate
+    # a timestep's numerical coverage or become residency boundaries.
+    while pending:
+        visit(*pending.pop())
     output_dir.mkdir(parents=True,exist_ok=True)
     package={"schema_version":1,"source_inputs":hashes,"entries":sorted(entries,key=lambda item:item["procedure"])}
     package_path=output_dir/"numerical-sources.json"

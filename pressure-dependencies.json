@@ -1,9 +1,8 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "provider": {
-    "source": "vendor/poisson-solver",
-    "origin_sha256": "0ac51125846ae3a0f14286239b122be38f8e98eff1b2d5068590b0ce540a14a0",
-    "source_manifest_sha256": "8bef810273cd17492ce608e74d82324393c5f406bf4372b552b6f3498951c2ba"
+    "explicit_local_source_required": true,
+    "upstream_revision": "4a1f1bb7e6f9dab6a2934b62d9b8655cf3a9f99a"
   },
   "VkFFT": {
     "url": "https://github.com/DTolm/VkFFT.git",
