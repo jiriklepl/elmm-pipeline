@@ -510,6 +510,26 @@ def addressable_arrays(text):
     return "".join(lines)
 
 
+def contiguous_periodic_boundary(text):
+    from .gpu_hot_path import _once, _routine
+
+    start, end = _routine(text, "BoundUVW_do_BC")
+    owner = text[start:end]
+    call_pattern = r"(?im)^\s*call\s+periodic_corners_edges\s*\(([^)]*)\)"
+    calls = re.findall(call_pattern, owner)
+    if (sorted(re.sub(r"\s+", "", call).lower() for call in calls) != ["u,1", "v,2", "w,3"]
+            or re.search(call_pattern, text[:start] + text[end:])):
+        raise ValueError("Unsupported periodic boundary callers")
+    _once(owner, "real(knd), intent(inout), contiguous :: U(-2:,-2:,-2:), "
+                 "V(-2:,-2:,-2:), W(-2:,-2:,-2:)")
+    start, end = _routine(text, "periodic_corners_edges")
+    body = text[start:end]
+    declaration = "real(knd), intent(inout) :: U(-2:,-2:,-2:)"
+    _once(body, declaration)
+    body = body.replace(declaration, "real(knd), intent(inout), contiguous :: U(-2:,-2:,-2:)")
+    return text[:start] + body + text[end:]
+
+
 def integrate_rk_epoch(configured, numerical, pressure, directory):
     """Connect the compiled primary RK path and the pressure child to one epoch.
 
@@ -534,6 +554,7 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     output = {name: sources[name].read_text() for name in names}
     output["pressure.f90"] = Path(pressure["pressure"]["path"]).read_text()
     output["main.f90"] = Path(pressure["main"]["path"]).read_text()
+    output["boundaries.f90"] = contiguous_periodic_boundary(output["boundaries.f90"])
 
     arrays = output["arrayutilities.f90"]
     begin = re.search(r"(?im)^\s*subroutine set_int_3D\(", arrays)
