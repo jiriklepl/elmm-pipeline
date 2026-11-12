@@ -53,11 +53,13 @@ def integrate_workspace(integration, directory):
     else
       allocate(tmp(-2:ubound(U,1),-2:ubound(U,2),-2:ubound(U,3)))
     endif""")
-    anchor = "rk_handle_tmp=resident_flow%bind_real64(tmp,lbound(tmp),.true.)"
+    origin = "origin='filters::filter3ord::tmp')"
+    anchor = "rk_handle_tmp=resident_flow%bind_real64(tmp,lbound(tmp),.true., &\n          " + origin
     count = body.count(anchor)
     if count != 4:
         raise ValueError("Unexpected snapshot bindings: " + str(count))
-    body = body.replace(anchor, "rk_handle_tmp=resident_flow%bind_real64(tmp,lbound(tmp),.false.,persistent=.true.)")
+    body = body.replace(anchor, "rk_handle_tmp=resident_flow%bind_real64(tmp,lbound(tmp),.false.,persistent=.true., &\n"
+              "          " + origin)
     anchor = "    block\n      use elmm_resident_pressure_state, only: resident_flow\n" \
              "      call resident_flow%release_real64(tmp)\n    end block\n"
     _once(body, anchor)

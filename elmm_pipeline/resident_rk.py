@@ -263,7 +263,9 @@ def materialize_entries(packages, directory):
                     if method is None:
                         raise ValueError("Unsupported resident array ABI: " + str(binding))
                     handles.append(handle)
-                    registration.append(f"        {handle}=resident_flow%{method}({name},lbound({name}),.true.)")
+                    origin = region["procedure"] + "::" + name
+                    registration.append(f"        {handle}=resident_flow%{method}({name},lbound({name}),.true., &\n"
+                                        f"          origin='{origin}')")
                 else:
                     actual[parameter["name"]] = name
             arguments = ["resident_flow%context", "FORT_SCOPE_GPU"] + [actual[name] for name in entry["argument_order"][2:]]
@@ -530,6 +532,23 @@ def contiguous_periodic_boundary(text):
     return text[:start] + body + text[end:]
 
 
+def contiguous_filter_arguments(text):
+    from .gpu_hot_path import _routine
+
+    for routine in ("Filter3ord", "Filter"):
+        start, end = _routine(text, routine)
+        body = text[start:end]
+        for declaration in (
+            "real(knd), dimension(-2:,-2:,-2:), intent(inout)",
+            "integer, dimension(-2:,-2:,-2:), intent(in)",
+        ):
+            if body.count(declaration) != 1:
+                raise ValueError("Unsupported filter array declaration in " + routine)
+            body = body.replace(declaration, declaration + ", contiguous")
+        text = text[:start] + body + text[end:]
+    return text
+
+
 def integrate_rk_epoch(configured, numerical, pressure, directory):
     """Connect the compiled primary RK path and the pressure child to one epoch.
 
@@ -555,6 +574,7 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     output["pressure.f90"] = Path(pressure["pressure"]["path"]).read_text()
     output["main.f90"] = Path(pressure["main"]["path"]).read_text()
     output["boundaries.f90"] = contiguous_periodic_boundary(output["boundaries.f90"])
+    output["filters.f90"] = contiguous_filter_arguments(output["filters.f90"])
 
     arrays = output["arrayutilities.f90"]
     begin = re.search(r"(?im)^\s*subroutine set_int_3D\(", arrays)
@@ -659,12 +679,12 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
       integer(c_int64_t) :: wall_reads(4)
       integer :: wall_count
       if (resident_flow%active .and. wallmodeltype>0) then
-        wall_reads(1)=resident_flow%bind_real64(U,lbound(U),.true.)
-        wall_reads(2)=resident_flow%bind_real64(V,lbound(V),.true.)
-        wall_reads(3)=resident_flow%bind_real64(W,lbound(W),.true.)
+        wall_reads(1)=resident_flow%bind_real64(U,lbound(U),.true.,origin='subgrid::walls::u')
+        wall_reads(2)=resident_flow%bind_real64(V,lbound(V),.true.,origin='subgrid::walls::v')
+        wall_reads(3)=resident_flow%bind_real64(W,lbound(W),.true.,origin='subgrid::walls::w')
         wall_count=3
         if (wallmodeltype==2) then
-          wall_reads(4)=resident_flow%bind_real64(Pr,lbound(Pr),.true.)
+          wall_reads(4)=resident_flow%bind_real64(Pr,lbound(Pr),.true.,origin='subgrid::walls::pr')
           wall_count=4
         endif
         call resident_flow%observe(wall_reads(:wall_count))

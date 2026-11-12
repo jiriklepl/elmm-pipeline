@@ -114,10 +114,10 @@ contains
     if (any(shape(cfl_values)/=[nx,ny,nz])) error stop 'CFL storage epoch shape changed'
     if (any(shape(U)<[nx,ny,nz]+3) .or. any(shape(V)<[nx,ny,nz]+3) .or. &
         any(shape(W)<[nx,ny,nz]+3)) error stop 'CFL velocity geometry changed'
-    handles(1)=resident_flow%bind_real64(U,[-2,-2,-2],.true.)
-    handles(2)=resident_flow%bind_real64(V,[-2,-2,-2],.true.)
-    handles(3)=resident_flow%bind_real64(W,[-2,-2,-2],.true.)
-    handle=resident_flow%bind_real64(cfl_values,[1,1,1],.false.,persistent=.true.)
+    handles(1)=resident_flow%bind_real64(U,[-2,-2,-2],.true.,origin='time::cfl::u')
+    handles(2)=resident_flow%bind_real64(V,[-2,-2,-2],.true.,origin='time::cfl::v')
+    handles(3)=resident_flow%bind_real64(W,[-2,-2,-2],.true.,origin='time::cfl::w')
+    handle=resident_flow%bind_real64(cfl_values,[1,1,1],.false.,persistent=.true.,origin='time::cfl::values')
     {cfl_call}
     call pressure_require(fort_scope_max_real64_v1(resident_flow%context,handle,3_c_int32_t, &
       size(cfl_values,kind=c_size_t),0._c_double,maximum,any_nan,report))
@@ -130,8 +130,8 @@ contains
     real(c_double), intent(in) :: weight
     integer(c_int64_t) :: source_handle,average_handle
     if (any(offset<0) .or. any(shape(average)+offset>shape(source))) error stop 'invalid average view'
-    source_handle=resident_flow%bind_real64(source,source_lower,.true.)
-    average_handle=resident_flow%bind_real64(average,average_lower,.true.)
+    source_handle=resident_flow%bind_real64(source,source_lower,.true.,origin='time::average::source')
+    average_handle=resident_flow%bind_real64(average,average_lower,.true.,origin='time::average::result')
     {avg_call}
   end subroutine
 end module
@@ -215,11 +215,11 @@ def integrate_time_loop(integration, configured, entries, directory):
           use elmm_resident_pressure_state, only: resident_flow
           integer(c_int64_t) :: frame_reads(5)
           if (resident_flow%active) then
-            frame_reads(1)=resident_flow%bind_real64(U,lbound(U),.true.)
-            frame_reads(2)=resident_flow%bind_real64(V,lbound(V),.true.)
-            frame_reads(3)=resident_flow%bind_real64(W,lbound(W),.true.)
-            frame_reads(4)=resident_flow%bind_real64(Pr,lbound(Pr),.true.)
-            frame_reads(5)=resident_flow%bind_real64(Viscosity,lbound(Viscosity),.true.)
+            frame_reads(1)=resident_flow%bind_real64(U,lbound(U),.true.,origin='frames::u')
+            frame_reads(2)=resident_flow%bind_real64(V,lbound(V),.true.,origin='frames::v')
+            frame_reads(3)=resident_flow%bind_real64(W,lbound(W),.true.,origin='frames::w')
+            frame_reads(4)=resident_flow%bind_real64(Pr,lbound(Pr),.true.,origin='frames::pr')
+            frame_reads(5)=resident_flow%bind_real64(Viscosity,lbound(Viscosity),.true.,origin='frames::viscosity')
             call resident_flow%observe(frame_reads)
           endif
         end block

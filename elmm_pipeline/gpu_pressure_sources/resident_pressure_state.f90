@@ -44,23 +44,25 @@ contains
     endif
   end subroutine
 
-  function pressure_bind3(self, values, lower, initialized, persistent) result(handle)
+  function pressure_bind3(self, values, lower, initialized, persistent, origin) result(handle)
     class(resident_pressure_state), intent(inout) :: self
     real(c_double), contiguous, target, intent(in) :: values(:,:,:)
     integer, intent(in) :: lower(3)
     logical, intent(in) :: initialized
     logical, optional, intent(in) :: persistent
+    character(*), optional, intent(in) :: origin
     integer(c_int64_t) :: handle
-    handle=self%bind_real64(values,lower,initialized,persistent)
+    handle=self%bind_real64(values,lower,initialized,persistent,origin)
   end function
 
-  function pressure_bind1(self, values, lower, initialized) result(handle)
+  function pressure_bind1(self, values, lower, initialized, origin) result(handle)
     class(resident_pressure_state), intent(inout) :: self
     real(c_double), contiguous, target, intent(in) :: values(:)
     integer, intent(in) :: lower(1)
     logical, intent(in) :: initialized
+    character(*), optional, intent(in) :: origin
     integer(c_int64_t) :: handle
-    handle=self%bind_real64(values,lower,initialized)
+    handle=self%bind_real64(values,lower,initialized,origin=origin)
   end function
 
   subroutine pressure_solve(self)

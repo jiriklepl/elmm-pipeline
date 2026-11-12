@@ -95,11 +95,12 @@ PROCEDURES = """
     resident_frames(slot)%shapes(:,3)=shape(W)
     resident_frames(slot)%shapes(:,4)=shape(Pr)
     resident_frames(slot)%shapes(:,5)=shape(Viscosity)
-    resident_pending_bindings(1)%buffer=resident_flow%bind_real64(U,lbound(U),.true.)
-    resident_pending_bindings(2)%buffer=resident_flow%bind_real64(V,lbound(V),.true.)
-    resident_pending_bindings(3)%buffer=resident_flow%bind_real64(W,lbound(W),.true.)
-    resident_pending_bindings(4)%buffer=resident_flow%bind_real64(Pr,lbound(Pr),.true.)
-    resident_pending_bindings(5)%buffer=resident_flow%bind_real64(Viscosity,lbound(Viscosity),.true.)
+    resident_pending_bindings(1)%buffer=resident_flow%bind_real64(U,lbound(U),.true.,origin='frame_snapshot::u')
+    resident_pending_bindings(2)%buffer=resident_flow%bind_real64(V,lbound(V),.true.,origin='frame_snapshot::v')
+    resident_pending_bindings(3)%buffer=resident_flow%bind_real64(W,lbound(W),.true.,origin='frame_snapshot::w')
+    resident_pending_bindings(4)%buffer=resident_flow%bind_real64(Pr,lbound(Pr),.true.,origin='frame_snapshot::pr')
+    resident_pending_bindings(5)%buffer=resident_flow%bind_real64(Viscosity,lbound(Viscosity),.true., &
+                                  origin='frame_snapshot::viscosity')
     do i=1,5
       resident_pending_bindings(i)%element_type=FORT_SCOPE_REAL64
       resident_pending_bindings(i)%rank=3

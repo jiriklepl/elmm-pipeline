@@ -369,15 +369,15 @@ def _driver(entries):
     integer(c_int64_t) :: handles(3),star_handle,flux_handle
     integer :: side
     if (resident_wall_epoch/=resident_flow%generation) error stop 'wall epoch not prepared'
-    handles(1)=resident_flow%bind_real64(U,lbound(U),.true.)
-    handles(2)=resident_flow%bind_real64(V,lbound(V),.true.)
-    handles(3)=resident_flow%bind_real64(W,lbound(W),.true.)
+    handles(1)=resident_flow%bind_real64(U,lbound(U),.true.,origin='walls::stress::u')
+    handles(2)=resident_flow%bind_real64(V,lbound(V),.true.,origin='walls::stress::v')
+    handles(3)=resident_flow%bind_real64(W,lbound(W),.true.,origin='walls::stress::w')
     do side=1,2
       associate(p=>resident_planes(side,component))
         if (p%nx==0) cycle
-        star_handle=resident_flow%bind_real64(p%star,[1,1],.true.)
+        star_handle=resident_flow%bind_real64(p%star,[1,1],.true.,origin='walls::stress::star')
         flux_handle=0
-        if (component>0) flux_handle=resident_flow%bind_real64(p%flux,[1,1],.false.)
+        if (component>0) flux_handle=resident_flow%bind_real64(p%flux,[1,1],.false.,origin='walls::stress::flux')
         select case(component)
 @STRESS@
         end select
@@ -397,10 +397,10 @@ def _driver(entries):
     if (resident_wall_epoch/=resident_flow%generation) error stop 'wall correction outside prepared epoch'
     associate(p=>resident_planes(side,component))
       if (p%nx==0) return
-      handles(1)=resident_flow%bind_real64(result,lbound(result),.true.)
-      handles(2)=resident_flow%bind_real64(velocity,lbound(velocity),.true.)
-      handles(3)=resident_flow%bind_real64(nu,lbound(nu),.true.)
-      flux_handle=resident_flow%bind_real64(p%flux,[1,1],.false.)
+      handles(1)=resident_flow%bind_real64(result,lbound(result),.true.,origin='walls::correction::result')
+      handles(2)=resident_flow%bind_real64(velocity,lbound(velocity),.true.,origin='walls::correction::velocity')
+      handles(3)=resident_flow%bind_real64(nu,lbound(nu),.true.,origin='walls::correction::nu')
+      flux_handle=resident_flow%bind_real64(p%flux,[1,1],.false.,origin='walls::correction::flux')
       select case(component*10+side)
 @CORRECTION@
       end select
@@ -426,7 +426,7 @@ def _driver(entries):
       do side=1,last_side
         associate(p=>resident_planes(side,component))
           if (p%nx==0) cycle
-          handle=resident_flow%bind_real64(p%star,[1,1],.true.)
+          handle=resident_flow%bind_real64(p%star,[1,1],.true.,origin='walls::publish::star')
           call resident_flow%observe([handle])
           if (component==0) then
             do j=1,p%ny
@@ -437,7 +437,7 @@ def _driver(entries):
           else
             points=>WMPointsUVW(side+4,component)%points
             if (.not.diagnostics) then
-              handle=resident_flow%bind_real64(p%flux,[1,1],.false.)
+              handle=resident_flow%bind_real64(p%flux,[1,1],.false.,origin='walls::publish::flux')
               call resident_flow%observe([handle])
             endif
             do j=1,p%ny

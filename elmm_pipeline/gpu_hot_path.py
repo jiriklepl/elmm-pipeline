@@ -251,8 +251,10 @@ def materialize_resident_pressure(entries, main_source, directory):
                 actual[name] = "resident_pressure%" + name.lower()
             else:
                 handle = "resident_" + name.lower()
+                origin = region["module"].lower() + "::" + region["routine"].lower() + "::" + name.lower()
                 bindings.append("      " + handle + " = resident_pressure%bind" + str(parameter["rank"])
-                                + "(" + actual[name] + ", lbound(" + actual[name] + "), .true.)\n")
+                                + "(" + actual[name] + ", lbound(" + actual[name] + "), .true., &\n"
+                                + "        origin='" + origin + "')\n")
                 actual[name] = handle
         args = ["resident_pressure%context", "FORT_SCOPE_GPU"] + [actual[name] for name in entry["argument_order"][2:]]
         handles = ["resident_" + name.lower() for name in arrays if name.lower() not in ("phi", "rhs")]
@@ -336,8 +338,8 @@ def materialize_resident_pressure(entries, main_source, directory):
     config%solver%approximation = discretization_order
     config%solver%device_budget_bytes = 1073741824_c_int64_t
     call resident_pressure%start(config)
-    resident_pressure%phi = resident_pressure%bind3(Phi,lbound(Phi),.true.,.true.)
-    resident_pressure%rhs = resident_pressure%bind3(RHS,lbound(RHS),.false.,.true.)
+    resident_pressure%phi = resident_pressure%bind3(Phi,lbound(Phi),.true.,.true.,origin='pressure::phi')
+    resident_pressure%rhs = resident_pressure%bind3(RHS,lbound(RHS),.false.,.true.,origin='pressure::rhs')
   end subroutine
 
   subroutine FinalizeResidentPressure()
@@ -444,7 +446,7 @@ def materialize_resident_pressure_tail(integrated, boundaries_source, directory)
       reference = 1
       if (pressure_solution%reference%boundary_index == To) reference = 2
     endif
-    pressure_handle = resident_pressure%bind3(Pr,lbound(Pr),.true.)
+    pressure_handle = resident_pressure%bind3(Pr,lbound(Pr),.true.,origin='pressure::tail::pr')
     call pressure_require(elmm_gpu_pressure_tail_v1(resident_pressure%context,pressure_handle, &
       int([Prnx,Prny,Prnz],c_int32_t),int(PoissonBtype,c_int32_t),reference,report))
   end subroutine
