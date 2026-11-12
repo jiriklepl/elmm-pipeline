@@ -229,6 +229,21 @@ class VTKTests(unittest.TestCase):
         self.assertEqual(comparison["fields"]["p"]["failed_values"], 1)
         self.assertEqual(comparison["fields"]["p"]["max_absolute_error"], 0.5)
 
+    def test_scalar_output_requires_explicit_nonfinal_mode(self):
+        path = self.root / "U.vtk"
+        path.write_bytes(vtk_bytes().split(b"VECTORS u float\n")[0])
+        with self.assertRaisesRegex(ValueError, "velocity u and pressure p"):
+            read_vtk(path)
+        shape, fields = read_vtk(path, require_flow_fields=False)
+        self.assertEqual(shape, (2, 1, 1))
+        self.assertEqual(list(fields["p"]), [2.0, -3.0])
+
+    def test_nonfinal_mode_still_requires_at_least_one_numeric_field(self):
+        path = self.root / "empty.vtk"
+        path.write_bytes(vtk_bytes().split(b"SCALARS p float\n")[0])
+        with self.assertRaisesRegex(ValueError, "at least one numeric field"):
+            read_vtk(path, require_flow_fields=False)
+
     def test_tolerance_is_applied_to_each_value(self):
         reference = self.read()
         candidate = self.read("nearby.vtk", vtk_bytes(pressure=(2.000001, -3.0)))

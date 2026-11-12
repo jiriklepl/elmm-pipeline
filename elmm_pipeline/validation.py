@@ -31,7 +31,7 @@ def validate_log(text, expected_max_steps=None, *, expected_completed_steps=None
     return {"completed_steps": max(steps), "natural_end": natural_end, **times}
 
 
-def read_vtk(path):
+def read_vtk(path, *, require_flow_fields=True):
     fields = {}
     with Path(path).open("rb") as stream:
         def line():
@@ -89,8 +89,10 @@ def read_vtk(path):
             if parts[1] in fields:
                 raise ValueError("Duplicate VTK field")
             fields[parts[1]] = values(count * components, parts[2])
-    if "u" not in fields or "p" not in fields:
+    if require_flow_fields and ("u" not in fields or "p" not in fields):
         raise ValueError("Validation requires final velocity u and pressure p fields")
+    if len(fields) <= 3:
+        raise ValueError("VTK requires at least one numeric field")
     return shape, fields
 
 
