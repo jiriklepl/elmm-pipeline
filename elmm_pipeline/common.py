@@ -50,11 +50,12 @@ def command(args, *, cwd=None, env=None, log=None, timeout=None):
     return output, elapsed
 
 
-def clean_environment(threads):
+def clean_environment(threads, *, strip_prefixes=("ELMM_",)):
     env = dict(os.environ)
-    # ELMM environment overrides must not silently replace the selected inputs.
+    # Application environment overrides must not silently replace the selected inputs.
+    prefixes = tuple(strip_prefixes) if strip_prefixes is not None else ("ELMM_",)
     for key in list(env):
-        if key.startswith("ELMM_") or key == "POISSON_SOLVER_KERNEL_CACHE_DIR":
+        if (prefixes and key.startswith(prefixes)) or key == "POISSON_SOLVER_KERNEL_CACHE_DIR":
             del env[key]
     env.update(OMP_NUM_THREADS=str(threads), OMP_DYNAMIC="FALSE",
                OMP_SCHEDULE="static", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")

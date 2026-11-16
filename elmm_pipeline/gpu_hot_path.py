@@ -12,60 +12,37 @@ import json
 import re
 from pathlib import Path
 
+from .ast_rewrites import (
+    expand_pure_calls_in_text,
+    find_call_span,
+    find_once,
+    find_routine_span,
+    find_unique_span,
+    inline_pure_scalar_function,
+    parse_fortran,
+    replace_once,
+)
+
 
 def _identity(path: Path):
     return {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def _routine(text: str, name: str):
-    start = list(re.finditer(r"(?im)^\s*subroutine\s+" + re.escape(name) + r"\s*\(", text))
-    end = list(re.finditer(r"(?im)^\s*end\s+subroutine\s+" + re.escape(name) + r"\b[^\n]*", text))
-    if len(start) != 1 or len(end) != 1 or start[0].start() >= end[0].start():
-        raise ValueError(f"Expected one complete original {name} procedure")
-    return start[0].start(), end[0].end()
+    return find_routine_span(text, name)
 
 
 def _once(text: str, anchor: str):
-    if text.count(anchor) != 1:
-        raise ValueError(f"Pressure outlining requires one original anchor: {anchor!r}")
-    return text.index(anchor)
+    return find_once(text, anchor)
 
 
 def _divergence_expression(source: Path):
     """Read the existing scalar PURE stencil instead of duplicating its formula."""
-    from fparser.common.readfortran import FortranStringReader
-    from fparser.two.parser import ParserFactory
-    from fparser.two.utils import walk
-
-    tree = ParserFactory().create(std="f2008")(FortranStringReader(source.read_text()))
-    matches = []
-    for node in walk(tree):
-        if type(node).__name__ != "Function_Subprogram":
-            continue
-        header = next(x for x in node.content if type(x).__name__ == "Function_Stmt")
-        if str(header.items[1]).lower() == "divergence4uniform":
-            matches.append((node, header))
-    if len(matches) != 1:
-        raise ValueError("Expected the original scalar Divergence4Uniform function")
-    function, header = matches[0]
-    if ("pure" not in str(header.items[0]).lower()
-            or [str(x).lower() for x in header.items[2].items] !=
-            ["i", "j", "k", "u", "v", "w", "dx", "dy", "dz"]):
-        raise ValueError("Unsupported Divergence4Uniform signature")
-    execution = next(x for x in function.content if type(x).__name__ == "Execution_Part")
-    statements = [x for x in execution.content if type(x).__name__ != "Comment"]
-    if (len(statements) != 1 or type(statements[0]).__name__ != "Assignment_Stmt"
-            or str(statements[0].items[0]).lower() != "divergence4uniform"):
-        raise ValueError("Divergence4Uniform must remain one scalar result expression")
-    constants = [x for x in walk(function) if type(x).__name__ == "Type_Declaration_Stmt"
-                 and "parameter" in str(x.items[1]).lower()]
-    names = {str(item.items[0]).lower() for declaration in constants for item in declaration.items[2].items}
-    if names != {"c1", "c3"}:
-        raise ValueError("Unexpected constants in the original divergence stencil")
-    expression = str(statements[0].items[2])
+    info = inline_pure_scalar_function(source.read_text(), "Divergence4Uniform")
+    expression = info["expression"]
     for name in ("dx", "dy", "dz"):
         expression = re.sub(r"\b" + name + r"\b", name + "min", expression, flags=re.I)
-    return expression, "".join("    " + str(x) + "\n" for x in constants)
+    return expression, info["constants_source"]
 
 
 def materialize_pressure_stencils(source: str | Path, directory: str | Path):
@@ -86,6 +63,7 @@ def materialize_pressure_stencils(source: str | Path, directory: str | Path):
     text = source.read_bytes().decode("utf-8")
     operators = source.with_name("numerical_operators.f90")
     operator_identity = _identity(operators)
+    div_info = inline_pure_scalar_function(operators.read_text(), "Divergence4Uniform")
     divergence, divergence_constants = _divergence_expression(operators)
     helper_names = ("BuildPoissonRHS", "CorrectPoissonVelocity", "UpdatePoissonPressure")
     if any(re.search(r"(?i)\b" + name + r"\b", text) for name in helper_names):
@@ -103,9 +81,9 @@ def materialize_pressure_stencils(source: str | Path, directory: str | Path):
         original_body = body[begin:end]
         moved = original_body
         if name == "BuildPoissonRHS":
-            actual = "Divergence4Uniform(i, j, k, U, V, W, dxmin, dymin, dzmin)"
-            _once(moved, actual)
-            moved = moved.replace(actual, "(" + divergence + ")")
+            moved, expanded_count = expand_pure_calls_in_text(moved, div_info)
+            if expanded_count != 1:
+                raise ValueError(f"Expected one Divergence4Uniform call in {name}")
             declarations += divergence_constants
         call = "    call " + name + "(" + arguments + ")\n\n"
         helper = ("\n  subroutine " + name + "(" + arguments + ")\n"
@@ -152,7 +130,7 @@ def materialize_pressure_stencils(source: str | Path, directory: str | Path):
     replacement = text
     for edit in reversed(edits):
         replacement = replacement[:edit["start"]] + edit["replacement"] + replacement[edit["end"]:]
-    endings = list(re.finditer(r"(?im)^\s*end\s+module(?:\s+pressure)?\s*$", replacement))
+    endings = list(re.finditer(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", replacement))
     if len(endings) != 1:
         raise ValueError("Expected one original pressure module end")
     at = endings[0].start()
@@ -217,6 +195,68 @@ def prepare_pressure_device_entries(prepared, project_root, compiler_root, pytho
     return record
 
 
+def _insert_after_update_pressure(text: str, addition: str) -> str:
+    """Insert ``addition`` immediately after the ``if (update_pressure)`` block."""
+    try:
+        return replace_once(text, "    end if !update_pressure", addition, after=True, insert=True)
+    except ValueError:
+        pass
+    from fparser.two.utils import walk
+
+    lo, hi = _routine(text, "PressureCorrection")
+    body = text[lo:hi]
+    tree = parse_fortran(body)
+    for node in walk(tree):
+        if type(node).__name__ != "If_Construct":
+            continue
+        then_stmt = next((c for c in node.content if type(c).__name__ == "If_Then_Stmt"), None)
+        end_stmt = next((c for c in reversed(node.content) if type(c).__name__ == "End_If_Stmt"), None)
+        if then_stmt is None or end_stmt is None:
+            continue
+        if re.search(r"\bupdate_pressure\b", str(then_stmt), re.IGNORECASE):
+            lines = body.splitlines(keepends=True)
+            end_line = end_stmt.item.span[1]
+            pos = sum(len(l) for l in lines[:end_line])
+            updated = body[:pos] + addition.lstrip("\n") + "\n" + body[pos:]
+            return text[:lo] + updated + text[hi:]
+    raise ValueError("Pressure outlining requires update_pressure block in PressureCorrection")
+
+
+def _verify_pressure_tail_routines(pressure_text: str, boundaries_text: str) -> tuple[str, str]:
+    """Structurally verify FixPressureToReference and Bound_Pr without rigid SHA-256 locks."""
+    from fparser.two.utils import walk
+
+    try:
+        r_lo, r_hi = find_routine_span(pressure_text, "FixPressureToReference")
+        f_lo, f_hi = find_routine_span(boundaries_text, "Bound_Pr")
+    except ValueError as error:
+        raise ValueError("Missing source routine for pressure tail") from error
+    ref_body = pressure_text[r_lo:r_hi]
+    face_body = boundaries_text[f_lo:f_hi]
+    ref_tree = parse_fortran(ref_body)
+    face_tree = parse_fortran(face_body)
+    ref_assignments = [
+        re.sub(r"\s+", "", str(n)).lower()
+        for n in walk(ref_tree)
+        if type(n).__name__ == "Assignment_Stmt"
+    ]
+    ref_names = {str(n).lower() for n in walk(ref_tree) if type(n).__name__ == "Name"}
+    if (
+        "pr" not in ref_names
+        or "pressure_reference_none" not in ref_names
+        or "pressure_reference_boundary" not in ref_names
+        or not any("pr(i,j,k)=pr(i,j,k)-" in stmt for stmt in ref_assignments)
+    ):
+        raise ValueError("GPU pressure tail requires the approved reference and original Bound_Pr formulas")
+    face_names = {str(n).lower() for n in walk(face_tree) if type(n).__name__ == "Name"}
+    if not {"pr", "prbtype", "bc_periodic", "bc_dirichlet"}.issubset(face_names):
+        raise ValueError("GPU pressure tail requires the approved reference and original Bound_Pr formulas")
+    return (
+        hashlib.sha256(ref_body.encode()).hexdigest(),
+        hashlib.sha256(face_body.encode()).hexdigest(),
+    )
+
+
 def materialize_resident_pressure(entries, main_source, directory):
     """Wire compiled stencils and the device solver into the original frame.
 
@@ -279,40 +319,84 @@ def materialize_resident_pressure(entries, main_source, directory):
         helpers.append(body)
         lo, hi = _routine(replacement, name)
         native = replacement[lo:hi]
-        signature = re.search(r"(?i)subroutine\s+" + name + r"\(([^)]*)\)", native)
+        signature = re.search(r"(?is)subroutine\s+" + name + r"\s*\(([^)]*)\)", native)
+        if signature is None:
+            raise ValueError(f"Expected subroutine signature for {name}")
+        sig_args = " ".join(signature.group(1).replace("&", " ").split())
         anchor = {"BuildPoissonRHS": "    if (discretization_order == 4) then",
                   "CorrectPoissonVelocity": "    !$omp parallel private (i,j,k)",
                   "UpdatePoissonPressure": "      if (pressure_solution%projection_method==PROJECTION_METHOD_PRESSURE) then"}[name]
         at = _once(native, anchor)
-        dispatch = ("    if (resident_pressure%active) then\n      call " + name + "GPU(" + signature[1]
+        dispatch = ("    if (resident_pressure%active) then\n      call " + name + "GPU(" + sig_args
                     + ")\n      return\n    endif\n\n")
         replacement = replacement[:lo] + native[:at] + dispatch + native[at:] + replacement[hi:]
 
-    replacement = replacement.replace("  use Parameters\n", "  use Parameters\n"
+    replacement = replace_once(
+        replacement,
+        "  use Parameters\n",
         "  use, intrinsic :: iso_c_binding\n  use fort_scoped_memory, only: FORT_SCOPE_GPU\n"
         "  use elmm_gpu_pressure, only: elmm_gpu_pressure_config_v1\n"
-        "  use elmm_resident_pressure_state, only: resident_pressure => resident_flow, pressure_require\n" + "".join(uses), 1)
-    replacement = replacement.replace("  type(pressure_solution_control) :: pressure_solution\n",
-        "  type(pressure_solution_control) :: pressure_solution\n"
-        "  public :: FinalizeResidentPressure\n", 1)
-    replacement = replacement.replace("    call PrePoisson(U,V,W,Q,RHS,dt2,mass_flux)",
-        "    call StartResidentPressure(Phi,RHS)\n\n    call PrePoisson(U,V,W,Q,RHS,dt2,mass_flux)", 1)
-    replacement = replacement.replace("          call Poiss_PoisFFT(Phi,RHS)",
-        "          if (resident_pressure%active) then\n            call resident_pressure%solve()\n"
-        "          else\n            call Poiss_PoisFFT(Phi,RHS)\n          endif", 1)
-    replacement = replacement.replace("    call Bound_Phi(Phi)",
-        "    if (resident_pressure%active) then\n      call resident_pressure%halo()\n"
-        "    else\n      call Bound_Phi(Phi)\n    endif", 1)
-    replacement = replacement.replace("      call Poiss_Residue(Phi, RHS, res)",
-        "      if (resident_pressure%active) call resident_pressure%observe_scratch()\n"
-        "      call Poiss_Residue(Phi, RHS, res)", 1)
-    replacement = replacement.replace("      call FixPressureToReference(Pr)",
-        "      if (resident_pressure%active) call resident_pressure%publish()\n"
-        "      call FixPressureToReference(Pr)", 1)
-    replacement = replacement.replace("    end if !update_pressure", "    end if !update_pressure\n"
-        "    if (resident_pressure%active .and. .not. resident_pressure%joined) call resident_pressure%publish()", 1)
-    replacement = replacement.replace("  end subroutine PressureCorrection", "    if (.not. resident_pressure%joined) resident_pressure%active = .false.\n"
-        "  end subroutine PressureCorrection", 1)
+        "  use elmm_resident_pressure_state, only: resident_pressure => resident_flow, pressure_require\n" + "".join(uses),
+        after=True,
+        insert=True,
+    )
+    replacement = replace_once(
+        replacement,
+        "  type(pressure_solution_control) :: pressure_solution\n",
+        "  public :: FinalizeResidentPressure\n",
+        after=True,
+        insert=True,
+    )
+    replacement = replace_once(
+        replacement,
+        "    call PrePoisson(U,V,W,Q,RHS,dt2,mass_flux)",
+        "    call StartResidentPressure(Phi,RHS)\n\n",
+        after=False,
+        insert=True,
+    )
+    poiss_lo, poiss_hi, poiss_raw, _ = find_call_span(replacement, "Poiss_PoisFFT", within_routine="PressureCorrection")
+    replacement = (
+        replacement[:poiss_lo]
+        + "          if (resident_pressure%active) then\n            call resident_pressure%solve()\n"
+        + "          else\n"
+        + poiss_raw
+        + "\n          endif"
+        + replacement[poiss_hi:]
+    )
+    bound_lo, bound_hi, bound_raw, _ = find_call_span(replacement, "Bound_Phi", within_routine="PressureCorrection")
+    replacement = (
+        replacement[:bound_lo]
+        + "    if (resident_pressure%active) then\n      call resident_pressure%halo()\n"
+        + "    else\n"
+        + bound_raw
+        + "\n    endif"
+        + replacement[bound_hi:]
+    )
+    res_lo, res_hi, res_raw, _ = find_call_span(replacement, "Poiss_Residue", within_routine="PressureCorrection")
+    replacement = (
+        replacement[:res_lo]
+        + "      if (resident_pressure%active) call resident_pressure%observe_scratch()\n"
+        + res_raw
+        + replacement[res_hi:]
+    )
+    fix_lo, fix_hi, fix_raw, _ = find_call_span(replacement, "FixPressureToReference", within_routine="PostPoisson")
+    replacement = (
+        replacement[:fix_lo]
+        + "      if (resident_pressure%active) call resident_pressure%publish()\n"
+        + fix_raw
+        + replacement[fix_hi:]
+    )
+    replacement = _insert_after_update_pressure(
+        replacement,
+        "\n    if (resident_pressure%active .and. .not. resident_pressure%joined) call resident_pressure%publish()",
+    )
+    replacement = replace_once(
+        replacement,
+        "  end subroutine PressureCorrection",
+        "    if (.not. resident_pressure%joined) resident_pressure%active = .false.\n",
+        after=False,
+        insert=True,
+    )
 
     state_helpers = '''
   subroutine StartResidentPressure(Phi,RHS)
@@ -346,7 +430,7 @@ def materialize_resident_pressure(entries, main_source, directory):
     call resident_pressure%finish()
   end subroutine
 '''
-    ending = re.search(r"(?im)^\s*end\s+module(?:\s+pressure)?\s*$", replacement)
+    ending = re.search(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", replacement)
     replacement = replacement[:ending.start()] + "\n".join(helpers) + state_helpers + replacement[ending.start():]
     # C-interoperable addresses must outlive each numerical child. All borrowed
     # registrations end within PressureCorrection, and saved scratch has TARGET.
@@ -366,10 +450,14 @@ def materialize_resident_pressure(entries, main_source, directory):
 
     main_source = Path(main_source).resolve(strict=True)
     main = main_source.read_text()
-    anchor = "  call DeallocateGlobals"
-    _once(main, anchor)
-    main = main.replace(anchor, "  block\n    use Pressure, only: FinalizeResidentPressure\n"
-                        "    call FinalizeResidentPressure()\n  end block\n\n" + anchor)
+    main = replace_once(
+        main,
+        "  call DeallocateGlobals",
+        "  block\n    use Pressure, only: FinalizeResidentPressure\n"
+        "    call FinalizeResidentPressure()\n  end block\n\n",
+        after=False,
+        insert=True,
+    )
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     pressure_path, main_path = directory / source.name, directory / main_source.name
@@ -397,31 +485,17 @@ def materialize_resident_pressure_tail(integrated, boundaries_source, directory)
         raise ValueError("Integrated pressure source changed")
     text = pressure.read_text()
     boundaries_source = Path(boundaries_source).resolve(strict=True)
-
-    def routine_sha(source, name):
-        start = re.search(r"(?im)^  subroutine " + name + r"\(", source)
-        if start is None:
-            raise ValueError("Missing source routine for pressure tail: " + name)
-        end = re.search(r"(?im)^  end subroutine[^\n]*", source[start.start():])
-        if end is None:
-            raise ValueError("Unterminated pressure-tail source routine")
-        return hashlib.sha256(source[start.start():start.start() + end.end()].encode()).hexdigest()
-
-    reference_sha = routine_sha(text, "FixPressureToReference")
-    faces_sha = routine_sha(boundaries_source.read_text(), "Bound_Pr")
-    if (reference_sha != "74de3c6757cfba541cf1b58d464596f464af134e982f136a591ac04730eb1a3c"
-            or faces_sha != "cceb68be8061dda1ef5f697e5f42e1227492caa3567be06cf241905e65b0922d"):
-        raise ValueError("GPU pressure tail requires the approved reference and original Bound_Pr formulas")
+    reference_sha, faces_sha = _verify_pressure_tail_routines(text, boundaries_source.read_text())
     anchor = ("      if (resident_pressure%active) call resident_pressure%publish()\n"
               "      call FixPressureToReference(Pr)\n    \n      call Bound_Pr(Pr)")
-    _once(text, anchor)
-    text = text.replace(anchor, '''      if (ResidentPressureTailSupported()) then
+    s_span, e_span = find_unique_span(text, anchor)
+    text = text[:s_span] + '''      if (ResidentPressureTailSupported()) then
         call ResidentPressureTail(Pr)
       else
         if (resident_pressure%active) call resident_pressure%publish()
         call FixPressureToReference(Pr)
         call Bound_Pr(Pr)
-      endif''')
+      endif''' + text[e_span:]
     helpers = '''
   logical function ResidentPressureTailSupported() result(supported)
     supported = resident_pressure%active .and. min(Prnx,Prny,Prnz) >= 3
@@ -451,7 +525,7 @@ def materialize_resident_pressure_tail(integrated, boundaries_source, directory)
       int([Prnx,Prny,Prnz],c_int32_t),int(PoissonBtype,c_int32_t),reference,report))
   end subroutine
 '''
-    end = re.search(r"(?im)^\s*end\s+module(?:\s+pressure)?\s*$", text)
+    end = re.search(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", text)
     text = text[:end.start()] + helpers + text[end.start():]
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)

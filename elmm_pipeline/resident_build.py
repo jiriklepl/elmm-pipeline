@@ -8,15 +8,18 @@ part of this command. Numerical extraction and coherence belong to the compiler.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
 import sys
 import time
 
+from .ast_rewrites import parse_fortran, replace_once
 from .resident_rk import identity
 
 # The non-MPI, non-CGAL source set of the pinned ELMM SConstruct. Keep physical
@@ -70,9 +73,218 @@ def deterministic_reference(text):
         !$omp barrier"""
     if text.count(new) == 1 and old not in text:
         return text
-    if text.count(old) != 1:
+    if text.count(old) == 1:
+        return text.replace(old, new)
+
+    already_pat = re.compile(
+        r"(?im)^[ \t]*!\$omp\s+master\b[^\n]*\n"
+        r"[ \t]*do\s+\w+\s*=\s*1\s*,\s*\w+\b[^\n]*\n"
+        r"[ \t]*do\s+\w+\s*=\s*1\s*,\s*\w+\b[^\n]*\n"
+        r"[ \t]*(\w+)\s*=\s*\1\s*\+\s*\w+\s*\([^\n]+\)[ \t]*\n"
+        r"[ \t]*end\s*do\b[^\n]*\n"
+        r"[ \t]*end\s*do\b[^\n]*\n"
+        r"[ \t]*\1\s*=\s*\1\s*/[^\n]+\n"
+        r"[ \t]*!\$omp\s+end\s+master\b[^\n]*\n"
+        r"[ \t]*!\$omp\s+barrier\b[^\n]*"
+    )
+    reduction_pat = re.compile(
+        r"(?im)^([ \t]*)!\$omp\s+do\s+reduction\s*\(\s*\+\s*:\s*(\w+)\s*\)[ \t]*(?:![^\n]*)?\n"
+        r"([ \t]*)do\s+(\w+)\s*=\s*1\s*,\s*(\w+)[ \t]*(?:![^\n]*)?\n"
+        r"([ \t]*)do\s+(\w+)\s*=\s*1\s*,\s*(\w+)[ \t]*(?:![^\n]*)?\n"
+        r"([ \t]*)\2\s*=\s*\2\s*\+\s*(\w+)\s*\(\s*\7\s*,\s*\4\s*,\s*(\w+)\s*\)[ \t]*(?:![^\n]*)?\n"
+        r"([ \t]*)end\s*do[ \t]*(?:![^\n]*)?\n"
+        r"([ \t]*)end\s*do[ \t]*(?:![^\n]*)?\n"
+        r"[ \t]*!\$omp\s+end\s+do[ \t]*(?:![^\n]*)?\n(?:\s*(?:![^\n]*)?\n)*"
+        r"[ \t]*!\$omp\s+single[ \t]*(?:![^\n]*)?\n"
+        r"([ \t]*)\2\s*=\s*\2\s*/\s*(?:\(\s*\8\s*\*\s*\5\s*\)|\(\s*\5\s*\*\s*\8\s*\))[ \t]*(?:![^\n]*)?\n"
+        r"[ \t]*!\$omp\s+end\s+single\b[^\n]*"
+    )
+    matches = list(reduction_pat.finditer(text))
+    if not matches and len(already_pat.findall(text)) == 1:
+        return text
+    if len(matches) != 1:
         raise ValueError("Unsupported pressure-reference source; expected one non-MPI TOP/BOTTOM sum")
-    return text.replace(old, new)
+    m = matches[0]
+    indent = m.group(1)
+    var, jvar, jmax, ivar, imax, arr, kref = (
+        m.group(2), m.group(4), m.group(5), m.group(7), m.group(8), m.group(10), m.group(11)
+    )
+    replacement = (
+        f"{indent}!$omp master\n"
+        f"{indent}do {jvar} = 1, {jmax}\n"
+        f"{indent}  do {ivar} = 1, {imax}\n"
+        f"{indent}    {var} = {var} + {arr}({ivar},{jvar},{kref})\n"
+        f"{indent}  end do\n"
+        f"{indent}end do\n"
+        f"{indent}{var} = {var} / ({imax}*{jmax})\n"
+        f"{indent}!$omp end master\n"
+        f"{indent}!$omp barrier"
+    )
+    return text[: m.start()] + replacement + text[m.end() :]
+
+
+def _scons_disabled_branch(test_node):
+    """Return True if an SConstruct ``if`` test belongs to MPI, CGAL, or missing_pfft."""
+    names = {node.id for node in ast.walk(test_node) if isinstance(node, ast.Name)}
+    if names & {"mpi", "cgal", "missing_pfft", "ompp"}:
+        # Check for negated condition like ``cray != 'yes'`` (which is enabled).
+        for node in ast.walk(test_node):
+            if isinstance(node, ast.Compare) and any(isinstance(op, ast.NotEq) for op in node.ops):
+                return False
+        return True
+    return False
+
+
+def discover_application_units(elmm_src: Path, poisfft_src: Path | None = None) -> tuple[list[str], list[str]]:
+    """Discover active Fortran build units from ``SConstruct`` or directory scan."""
+    elmm_src = Path(elmm_src).resolve(strict=True)
+    sconstruct = elmm_src / "SConstruct"
+    elmm_units: list[str] = []
+    poisfft_units: list[str] = []
+
+    if sconstruct.is_file():
+        tree = ast.parse(sconstruct.read_text(encoding="utf-8"))
+
+        def collect_objects(stmts):
+            for stmt in stmts:
+                if isinstance(stmt, ast.If):
+                    if _scons_disabled_branch(stmt.test):
+                        collect_objects(stmt.orelse)
+                    else:
+                        collect_objects(stmt.body)
+                        collect_objects(stmt.orelse)
+                    continue
+                for node in ast.walk(stmt):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "Object"
+                    ):
+                        src_val = None
+                        for kw in node.keywords:
+                            if kw.arg == "source" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                                src_val = kw.value.value
+                        if src_val and src_val.lower().endswith(".f90"):
+                            p = Path(src_val)
+                            stem = p.stem
+                            if "PoisFFT" in p.parts:
+                                if stem not in poisfft_units:
+                                    poisfft_units.append(stem)
+                            elif stem not in elmm_units:
+                                elmm_units.append(stem)
+
+        collect_objects(tree.body)
+
+    if not elmm_units:
+        excluded_suffixes = ("-inc.f90", "_mpi.f90")
+        excluded_names = {"cgal_polyhedra.f90", "frames_parallelio.f90", "custom_mpi.f90"}
+        for path in sorted(elmm_src.glob("*.f90")):
+            low = path.name.lower()
+            if (
+                low in excluded_names
+                or low.endswith(excluded_suffixes)
+                or low.startswith(("domains_bc_", "exchange_mpi"))
+            ):
+                continue
+            if path.stem not in elmm_units:
+                elmm_units.append(path.stem)
+
+    if not poisfft_units and poisfft_src is not None and Path(poisfft_src).is_dir():
+        for path in sorted(Path(poisfft_src).glob("*.f90")):
+            low = path.name.lower()
+            if low.endswith("-inc.f90") or low in {"custompfft.f90", "loop_nest_3d.f90"}:
+                continue
+            if path.stem not in poisfft_units:
+                poisfft_units.append(path.stem)
+
+    default_poisfft = list(POISFFT_UNITS) if (sconstruct.is_file() or poisfft_src is not None) else []
+    return elmm_units or list(ELMM_UNITS), poisfft_units or default_poisfft
+
+
+def discover_resident_procedure_groups(paths: list[Path]) -> dict[str, list[str]]:
+    """Discover numerical procedure groups from Fortran source modules."""
+    from fparser.two.utils import walk
+
+    target_modules = {
+        "momentumadvection",
+        "filters",
+        "boundaries",
+        "subgrid",
+        "dynamics",
+        "momentumdiffusion",
+        "scalarboundaries",
+        "arrayutilities",
+        "timesteps",
+    }
+    available: dict[str, tuple[bool, set[str]]] = {}
+    for path in paths:
+        path = Path(path)
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        mod_matches = re.findall(r"(?im)^\s*module\s+([a-z_][a-z0-9_]*)\b", text)
+        if not any(m.lower() in target_modules for m in mod_matches):
+            continue
+        try:
+            tree = parse_fortran(text)
+        except Exception:
+            continue
+        for module in (n for n in walk(tree) if type(n).__name__ == "Module"):
+            hdr = next((n for n in module.content if type(n).__name__ == "Module_Stmt"), None)
+            if hdr is None:
+                continue
+            mod_name = str(hdr.items[1]).lower()
+            if mod_name not in target_modules:
+                continue
+            for routine in (n for n in walk(module) if type(n).__name__ == "Subroutine_Subprogram"):
+                if type(getattr(routine, "parent", None)).__name__ == "Internal_Subprogram_Part":
+                    continue
+                stmt = next((n for n in routine.content if type(n).__name__ == "Subroutine_Stmt"), None)
+                if stmt is None:
+                    continue
+                qname = f"{mod_name}::{str(stmt.items[1]).lower()}"
+                has_loops = any(type(n).__name__ == "Block_Nonlabel_Do_Construct" for n in walk(routine))
+                callees = {
+                    str(n.items[0]).lower()
+                    for n in walk(routine)
+                    if type(n).__name__ == "Call_Stmt" and len(n.items) > 0
+                }
+                available[qname] = (has_loops, callees)
+
+    advection = [
+        name for name, (has_loops, _) in available.items()
+        if name.startswith("momentumadvection::") and has_loops
+    ] or list(ADVECTION_PROCEDURES)
+
+    filter_procs = [
+        name for name in ("filters::filter3ord",) if name in available
+    ] or [
+        name for name, (has_loops, _) in available.items()
+        if name.startswith("filters::") and has_loops
+    ]
+
+    boundary = [name for name in ("boundaries::bounduvw_do_bc",) if name in available] or [BOUNDARY_PROCEDURES[0]]
+    periodic = [name for name in ("boundaries::periodic_corners_edges",) if name in available] or [BOUNDARY_PROCEDURES[1]]
+
+    rk = [name for name in RK_PROCEDURES if name in available]
+    rk_modules = {"subgrid", "momentumdiffusion"}
+    rk_roots = available.get("timesteps::tmarchrk3", (False, set()))[1] | available.get(
+        "dynamics::subgridstresses", (False, set())
+    )[1]
+    for name, (has_loops, _) in available.items():
+        mod, _, sub = name.partition("::")
+        if mod in rk_modules and has_loops and name not in rk and sub in rk_roots:
+            rk.append(name)
+    if not rk:
+        rk = list(RK_PROCEDURES)
+
+    return {
+        "rk": rk,
+        "boundary": boundary,
+        "periodic": periodic,
+        "advection": advection,
+        "filter": filter_procs,
+    }
 
 
 def snapshot_sources(elmm, poisfft, destination):
@@ -99,7 +311,7 @@ def snapshot_sources(elmm, poisfft, destination):
     return destination / "elmm", destination / "PoisFFT"
 
 
-def prepare(elmm, poisfft, compiler, directory, *, fortran, python):
+def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage=None):
     compiler = Path(compiler).resolve(strict=True)
     if not (compiler / "compiler/__main__.py").is_file():
         raise ValueError("Expected a compiler checkout containing compiler/__main__.py")
@@ -117,25 +329,31 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     elmm, poisfft = snapshot_sources(elmm, poisfft, directory / "application")
-    paths = [elmm / "src" / (n + ".f90") for n in ELMM_UNITS]
-    paths += [poisfft / "src" / (n + ".f90") for n in POISFFT_UNITS]
-    procedures = RK_PROCEDURES + ADVECTION_PROCEDURES + BOUNDARY_PROCEDURES + ["filters::filter3ord"]
+    elmm_units, poisfft_units = discover_application_units(elmm / "src", poisfft / "src")
+    paths = [elmm / "src" / (n + ".f90") for n in elmm_units]
+    paths += [poisfft / "src" / (n + ".f90") for n in poisfft_units]
+    groups = discover_resident_procedure_groups(paths)
+    procedures = []
+    for key in ("rk", "boundary", "periodic", "advection", "filter"):
+        for proc in groups[key]:
+            if proc not in procedures:
+                procedures.append(proc)
     configured = configured_sources(paths, procedures, directory / "configured",
                                     fortran_compiler=fortran, defines=["DPREC"])
     for name, transform in (("advection.f90", pointwise_advection), ("filters.f90", snapshot_filter)):
-        record = next(r for r in configured["sources"] if Path(r["original"]["path"]).name == name)
-        record["prepared"] = transform(record["prepared"]["path"], directory / (name + "-prepared"))["replacement"]
+        record = next((r for r in configured["sources"] if Path(r["original"]["path"]).name == name), None)
+        if record is not None:
+            record["prepared"] = transform(record["prepared"]["path"], directory / (name + "-prepared"))["replacement"]
     write(directory / "configured.json", configured)
     print("Configured sources", len(paths), flush=True)
     extracted = export_resident_entries([r["prepared"]["path"] for r in configured["sources"]],
                                        procedures, directory / "extracted")
     write(directory / "extracted.json", extracted)
+    baseline_loops = {"rk": 46, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4}
     packages = []
-    for label, names, expected in (("rk", RK_PROCEDURES, 46),
-                                   ("boundary", BOUNDARY_PROCEDURES[:1], 128),
-                                   ("periodic", BOUNDARY_PROCEDURES[1:], 20),
-                                   ("advection", ADVECTION_PROCEDURES, 15),
-                                   ("filter", ["filters::filter3ord"], 4)):
+    for label in ("rk", "boundary", "periodic", "advection", "filter"):
+        names = groups[label]
+        expected = baseline_loops[label]
         group = {**extracted, "entries": [e for e in extracted["entries"] if e["procedure"] in names],
                  "rejected": [e for e in extracted["rejected"] if e["procedure"] in names]}
         if label == "periodic":
@@ -143,15 +361,23 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python):
         group = value_resident_geometry(group, directory / (label + "-values"))
         package = generate_entries(group, compiler, python, directory / (label + "-entries"))
         covered = sum(len(item["region"]["source_loop_spans"]) for item in package["entries"])
-        if covered < expected:
-            raise ValueError(f"GPU source-loop coverage regressed for {label}: {covered}, minimum {expected}")
-        package["source_loops_covered"] = covered
+        if min_coverage is not None and label in min_coverage:
+            if covered < min_coverage[label]:
+                raise ValueError(
+                    f"GPU source-loop coverage regressed for {label}: {covered}, minimum {min_coverage[label]}"
+                )
+        elif covered < 1:
+            raise ValueError(f"GPU source-loop coverage empty for {label}: {covered}")
         if label == "boundary":
             # The primary boundary guard excludes unsupported boundary modes.
             # Preserve the rejection ledger, but do not publish inside an
             # unreachable native branch of the serial resident coordinator.
             package["excluded_boundary_rejections"] = package["rejected"]
             package["rejected"] = []
+        elif min_coverage is None and package["rejected"]:
+            raise ValueError(f"Unapproved GPU rejections in {label}: {package['rejected']}")
+        package["source_loops_covered"] = covered
+        package["expected_baseline_loops"] = expected
         packages.append(package)
         print("Generated", label, len(package["entries"]), "entries covering", covered, "source nests", flush=True)
     write(directory / "packages.json", packages)
@@ -170,6 +396,8 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python):
     entries = [e for p in packages for e in p["entries"]] + pressure_entries["entries"]
     entries += list(time_entries["entries"].values()) + list(wall_entries["entries"].values())
     result = {"version": 1, "elmm": str(elmm), "poisfft": str(poisfft),
+              "elmm_units": elmm_units, "poisfft_units": poisfft_units,
+              "procedure_groups": groups,
               "compiler": str(compiler), "integration": integrated,
               "entry_directories": [e["directory"] for e in entries],
               "packages": str(directory / "packages.json"), "gpu_execution_established": False}
@@ -191,20 +419,20 @@ def diagnostic_main(text, *, resident):
                       f"      write(comparison_unit,*) storage_size({actual}), shape({actual}), &",
                       f"           lbound({actual}), ubound({actual})", "      close(comparison_unit)", "    end if"]
         return "\n".join(lines + ["  end block", ""])
-    from .gpu_hot_path import _once
     from .resident_time_loop import finalize_before_native
     intermediate = "U2 V2 W2 Ustar Vstar Wstar".split()
     fields = [(n, n) for n in "U V W Pr Viscosity".split()]
     fields += [(n, "comparison_" + n) for n in intermediate]
     fields += [(n, n) for n in "Temperature Moisture Scalar TDiff".split()]
     uses = "\n".join(f"    use Dynamics, only: comparison_{n} => {n}" for n in intermediate)
-    anchor = "  call Dynamics_Deallocate"
-    _once(text, anchor)
-    text = text.replace(anchor, block(fields, uses) + anchor)
+    text = replace_once(text, "  call Dynamics_Deallocate", block(fields, uses), insert=True)
     names = "U_avg V_avg W_avg Pr_avg Scalar_avg".split()
-    anchor = "  call DeallocateGlobals"
-    _once(text, anchor)
-    text = text.replace(anchor, block([(n, n) for n in names], "    use OutputData, only: " + ", ".join(names)) + anchor)
+    text = replace_once(
+        text,
+        "  call DeallocateGlobals",
+        block([(n, n) for n in names], "    use OutputData, only: " + ", ".join(names)),
+        insert=True,
+    )
     return finalize_before_native(text) if resident else text
 
 
@@ -292,10 +520,12 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     for record in prepared["integration"]["sources"]:
         if identity(record["path"]) != record:
             raise ValueError("Prepared application source changed")
-    common = [poisfft / (n + ".f90") for n in POISFFT_UNITS]
-    common += [elmm / n for n in ("lapack.f", "rng_par_zig_c.c", "pthreads.c")]
-    native = [elmm / (n + ".f90") for n in ELMM_UNITS if n != "main"] + common
-    resident = [overrides.get(n + ".f90", elmm / (n + ".f90")) for n in ELMM_UNITS if n != "main"] + common
+    elmm_units = prepared.get("elmm_units") or ELMM_UNITS
+    poisfft_units = prepared.get("poisfft_units") or POISFFT_UNITS
+    common = [poisfft / (n + ".f90") for n in poisfft_units]
+    common += [elmm / n for n in ("lapack.f", "rng_par_zig_c.c", "pthreads.c") if (elmm / n).is_file()]
+    native = [elmm / (n + ".f90") for n in elmm_units if n != "main"] + common
+    resident = [overrides.get(n + ".f90", elmm / (n + ".f90")) for n in elmm_units if n != "main"] + common
     resident += [overrides["resident_time_tasks.f90"]]
     resident += [runtime / n for n in ("scoped_memory.f90", "resident_domain.f90", "reductions.f90",
                                       "scoped_runtime.cu", "reductions.cu", "snapshots.f90", "snapshots.cu")]

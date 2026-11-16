@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .bootstrap import ensure_repo, setup
-from .build import build, preprocessing_defines
+from .build import build, build_generic_project, preprocessing_defines
 from .common import (
     ROOT,
     clean_environment,
@@ -22,8 +22,9 @@ from .common import (
 from .configuration import prepare_config
 from .gpu_validation import gpu_activity, native_policy_exercised, trace_environment
 from .instrumentation import execution_coverage
+from .project_profile import ProjectProfile, load_project_profile
 from .report import render, summary
-from .validation import compare_vtk, read_vtk, validate_log
+from .validation import compare_numeric_files, compare_vtk, read_vtk, validate_generic_log, validate_log
 
 TOOLS = ("baseline", "local")
 
@@ -91,14 +92,23 @@ def scoped_configuration(args):
     return values
 
 
-def prepare_build(tool, args, setup_state, compilers):
-    defines = preprocessing_defines(args.build_arg)
+def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile | None = None, explicit_source_root: Path | None = None):
+    profile = profile or ProjectProfile()
+    generic_mode = profile.build_mode != "scons-elmm" or explicit_source_root is not None
+    defines = list(profile.default_defines) if generic_mode else preprocessing_defines(args.build_arg)
     repositories = ROOT / ".cache" / "repos"
-    key_data = {"tool": tool, "dependencies": setup_state["pins"], "compilers": compilers,
-                "packages": setup_state["packages"].get(tool), "build_args": args.build_arg,
+    if generic_mode:
+        if explicit_source_root is None:
+            raise ValueError("--source-root is required when using a generic build profile")
+        source_hashes = {profile.name: digest_tree(explicit_source_root)}
+    else:
+        source_hashes = {name: digest_tree(repositories / name / "src") for name in ("elmm", "PoisFFT")}
+    key_data = {"tool": tool, "profile": profile.to_dict(),
+                "dependencies": setup_state.get("pins", {}), "compilers": compilers,
+                "packages": setup_state.get("packages", {}).get(tool), "build_args": args.build_arg,
                 "preprocessor_defines": defines,
-                "native_libraries": setup_state["native"],
-                "source_hashes": {name: digest_tree(repositories / name / "src") for name in ("elmm", "PoisFFT")}}
+                "native_libraries": setup_state.get("native", {}),
+                "source_hashes": source_hashes}
     paths = [ROOT / "elmm_pipeline" / "build.py"]
     # The build helper imports this module for CPU and GPU builds alike.
     paths.append(ROOT / "elmm_pipeline" / "gpu_toolchain.py")
@@ -109,7 +119,12 @@ def prepare_build(tool, args, setup_state, compilers):
     if tool == "local" and getattr(args, "memory_model", "scoped") == "scoped":
         scope_options = scoped_configuration(args)
         from .scoped_adaptation import scope_inputs
-        root, scope_sources = scope_inputs(repositories / "elmm" / "src", scope_options)
+        base_src = (
+            (explicit_source_root / profile.source_subdir if profile.source_subdir else explicit_source_root)
+            if generic_mode
+            else (repositories / "elmm" / "src")
+        )
+        root, scope_sources = scope_inputs(base_src, scope_options)
         scope_options = {**scope_options, "source": str(scope_sources[0].relative_to(root)),
                          "source_files": [str(path.relative_to(root)) for path in scope_sources[1:]]}
         key_data["scope"] = {"entry": scope_options["entry"], "source": scope_options["source"],
@@ -151,7 +166,7 @@ def prepare_build(tool, args, setup_state, compilers):
     stamp = directory / "complete.json"
     if stamp.is_file():
         data = json.loads(stamp.read_text())
-        binary = directory / "bin" / "ELMM"
+        binary = directory / "bin" / profile.executable_name
         if binary.is_file() and hashlib.sha256(binary.read_bytes()).hexdigest() == data["binary_sha256"]:
             return binary, data
     if directory.exists():
@@ -169,14 +184,25 @@ def prepare_build(tool, args, setup_state, compilers):
             shutil.copy2(profile_path, copied_profile)
             gpu_options["calibration_profile"] = str(copied_profile)
     ignore = shutil.ignore_patterns(".git", "__pycache__", "*.o", "*.mod", ".sconsign*")
-    for name in ("elmm", "PoisFFT"):
-        shutil.copytree(repositories / name, directory / name, ignore=ignore)
-    source_root = directory / "elmm" / "src"
+    if generic_mode:
+        project_copy = directory / "project"
+        shutil.copytree(explicit_source_root, project_copy, ignore=ignore)
+        source_root = (project_copy / profile.source_subdir) if profile.source_subdir else project_copy
+        scope_base_src = (
+            explicit_source_root / profile.source_subdir
+            if profile.source_subdir
+            else explicit_source_root
+        )
+    else:
+        for name in ("elmm", "PoisFFT"):
+            shutil.copytree(repositories / name, directory / name, ignore=ignore)
+        source_root = directory / "elmm" / "src"
+        scope_base_src = repositories / "elmm" / "src"
     if scope_options:
         facts = json.loads(scope_options["capture_facts"].read_text())
         from .local_adapter import LocalAdapterError, remap_scope_facts
         try:
-            facts = remap_scope_facts(facts, repositories / "elmm" / "src", source_root)
+            facts = remap_scope_facts(facts, scope_base_src, source_root)
         except LocalAdapterError as error:
             raise ValueError(str(error)) from error
         copied_facts = directory / "scope-captures.json"
@@ -186,7 +212,7 @@ def prepare_build(tool, args, setup_state, compilers):
             copied_contracts = directory / "scope-effect-contracts.json"
             shutil.copy2(scope_options["effect_contracts"], copied_contracts)
             scope_options["effect_contracts"] = copied_contracts
-    adapter = {"tool": "baseline", "coverage": "Unmodified ELMM source"}
+    adapter = {"tool": "baseline", "coverage": f"Unmodified {profile.name} source"}
     if tool != "baseline":
         from .adaptation import adapt_project
         adapter = adapt_project(tool, source_root, ROOT / ".cache/envs" / tool / "bin/python",
@@ -199,14 +225,29 @@ def prepare_build(tool, args, setup_state, compilers):
         if not adapter["regions"] and not adapter.get("native_success"):
             return None, {"identity": key_data, "adapter": adapter,
                           "reason": "No eligible regions accepted by this backend; native code preserved."}
-    binary = build(directory / "elmm", directory / "PoisFFT", directory / "bin",
-                   ROOT / ".cache/envs/build/bin/python", ROOT / ".cache/native/lib",
-                   args.jobs, args.threads, args.build_arg,
-                   extra_sources=[Path(p) for p in adapter.get("extra_sources", [])],
-                   patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
-                   gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain,
-                   **({"pressure_backend": adapter["pressure_backend"]} if "pressure_backend" in adapter else {}),
-                   **({"application_build": adapter["application_build"]} if "application_build" in adapter else {}))
+    if generic_mode:
+        binary = build_generic_project(
+            project_copy,
+            directory / "bin",
+            profile=profile,
+            jobs=args.jobs,
+            threads=args.threads,
+            extra_sources=[Path(p) for p in adapter.get("extra_sources", [])],
+            patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
+            gpu_sources=adapter.get("gpu_sources", []),
+            gpu_options=args.gpu_toolchain,
+            defines=defines,
+            application_build=adapter.get("application_build"),
+        )
+    else:
+        binary = build(directory / "elmm", directory / "PoisFFT", directory / "bin",
+                       ROOT / ".cache/envs/build/bin/python", ROOT / ".cache/native/lib",
+                       args.jobs, args.threads, args.build_arg,
+                       extra_sources=[Path(p) for p in adapter.get("extra_sources", [])],
+                       patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
+                       gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain,
+                       **({"pressure_backend": adapter["pressure_backend"]} if "pressure_backend" in adapter else {}),
+                       **({"application_build": adapter["application_build"]} if "application_build" in adapter else {}))
     data = {"identity": key_data, "adapter": adapter,
             "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
             "changed_source_sha256": {name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
@@ -221,8 +262,15 @@ def prepare_build(tool, args, setup_state, compilers):
 def run(args):
     if args.warmups < 0:
         raise ValueError("--warmups cannot be negative")
+    profile = load_project_profile(getattr(args, "project_profile", None))
+    explicit_source_root = (
+        Path(args.source_root).resolve(strict=True)
+        if getattr(args, "source_root", None) is not None
+        else None
+    )
+    generic_mode = profile.build_mode != "scons-elmm" or explicit_source_root is not None
     scope_options = scoped_configuration(args)
-    defines = preprocessing_defines(args.build_arg)
+    defines = list(profile.default_defines) if generic_mode else preprocessing_defines(args.build_arg)
     if args.gpu_policy not in {"sections", "auto"}:
         raise ValueError("Ordinary GPU policies were removed; use sections or auto")
     if args.calibration_profile:
@@ -237,20 +285,31 @@ def run(args):
         if not args.gpu_toolchain["device"]["available"]:
             raise ValueError("GPU execution is unavailable in this environment: " +
                              str(args.gpu_toolchain["device"]["error"]))
-    if not (ROOT / ".cache/setup.json").exists():
-        raise ValueError("Run pipeline.py setup first")
-    setup_state = json.loads((ROOT / ".cache/setup.json").read_text())
-    pins = json.loads((ROOT / "dependencies.json").read_text())
-    if setup_state["pins"] != pins:
-        raise ValueError("Dependency pins changed; run setup again")
-    for name, spec in pins.items():
-        ensure_repo(name, spec)
-    for tool in args.tools:
-        if tool != "baseline":
-            installed = command([ROOT / ".cache/envs" / tool / "bin/python", "-m", "pip", "freeze"],
-                                env=python_environment())[0].splitlines()
-            if installed != setup_state["packages"].get(tool):
-                raise ValueError(f"{tool} environment changed; run setup to record updated packages")
+    setup_file = ROOT / ".cache/setup.json"
+    if not generic_mode:
+        if not setup_file.exists():
+            raise ValueError("Run pipeline.py setup first")
+        setup_state = json.loads(setup_file.read_text())
+        pins = json.loads((ROOT / "dependencies.json").read_text())
+        if setup_state["pins"] != pins:
+            raise ValueError("Dependency pins changed; run setup again")
+        for name, spec in pins.items():
+            ensure_repo(name, spec)
+        for tool in args.tools:
+            if tool != "baseline":
+                installed = command([ROOT / ".cache/envs" / tool / "bin/python", "-m", "pip", "freeze"],
+                                    env=python_environment())[0].splitlines()
+                if installed != setup_state["packages"].get(tool):
+                    raise ValueError(f"{tool} environment changed; run setup to record updated packages")
+        missing = set(args.tools) - set(setup_state["tools"])
+        if missing:
+            raise ValueError(f"Run setup for missing tools: {', '.join(sorted(missing))}")
+    else:
+        setup_state = (
+            json.loads(setup_file.read_text())
+            if setup_file.exists()
+            else {"pins": {}, "packages": {}, "native": {}, "tools": ["baseline"]}
+        )
     # SCons executes from src/, so resolve explicitly supplied custom files now.
     normalized_args = []
     for arg in args.build_arg:
@@ -259,20 +318,24 @@ def run(args):
             value = str(Path(value).resolve())
         normalized_args.append(key + separator + value)
     args.build_arg = normalized_args
-    missing = set(args.tools) - set(setup_state["tools"])
-    if missing:
-        raise ValueError(f"Run setup for missing tools: {', '.join(sorted(missing))}")
-    source = Path(args.config).resolve() if args.config else ROOT / ".cache/repos/elmm/examples" / args.example
+    source = (
+        Path(args.config).resolve()
+        if args.config
+        else (explicit_source_root if explicit_source_root is not None else ROOT / ".cache/repos/elmm/examples" / args.example)
+    )
     tag = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     destination = Path(args.output).resolve() if args.output else ROOT / "results" / tag
     if destination.exists():
         raise ValueError(f"Output directory must be new: {destination}")
     destination.mkdir(parents=True)
-    configuration = prepare_config(source, destination / "config", steps=args.steps, advection=args.advection)
+    configuration = prepare_config(
+        source, destination / "config", steps=args.steps, advection=args.advection, profile=profile
+    )
     configuration["sha256"] = digest_tree(destination / "config")
     configuration["original_sha256"] = digest_tree(source if source.is_dir() else source.parent)
     compilers = compiler_identity()
-    report = {"schema_version": 3, "created_utc": tag, "configuration": configuration,
+    report = {"schema_version": 3, "created_utc": tag, "profile": profile.to_dict(),
+              "configuration": configuration,
               "settings": {"threads": args.threads, "repeats": args.repeats, "warmups": args.warmups,
                            "target": args.target, "gpu_profile": args.gpu_profile,
                            "gpu_policy": args.gpu_policy,
@@ -288,7 +351,7 @@ def run(args):
                            "source_patterns": args.source_pattern, "selection": args.select,
                            "exclusions": args.exclude, "marked_only": args.marked_only,
                            "coverage_enabled": not args.no_coverage,
-                           "environment": {k: v for k, v in clean_environment(args.threads).items()
+                           "environment": {k: v for k, v in clean_environment(args.threads, strip_prefixes=profile.env_strip_prefixes).items()
                                            if k.startswith(("OMP_", "OPENBLAS_", "MKL_"))}},
               "dependencies": setup_state["pins"], "packages": setup_state["packages"],
               "host": {"platform": platform.platform(), "machine": platform.machine(),
@@ -312,7 +375,10 @@ def run(args):
         for tool in args.tools:
             print(f"Preparing {tool} application build", flush=True)
             report["variants"][tool] = {"status": "pending", "runs": []}
-            binary, build_metadata = prepare_build(tool, args, setup_state, compilers)
+            binary, build_metadata = prepare_build(
+                tool, args, setup_state, compilers,
+                profile=profile, explicit_source_root=explicit_source_root,
+            )
             if binary is None:
                 report["variants"][tool] = {"status": "unsupported", "build": build_metadata,
                                             "reason": build_metadata["reason"]}
@@ -321,10 +387,16 @@ def run(args):
             report["variants"][tool] = {"status": "pending", "build": build_metadata, "runs": []}
             artifact_dir = destination / "sources" / tool
             artifact_dir.mkdir(parents=True)
+            copy_src_base = (
+                (binary.parent.parent / "project" / profile.source_subdir
+                 if profile.source_subdir else binary.parent.parent / "project")
+                if generic_mode
+                else (binary.parent.parent / "elmm/src")
+            )
             for relative in build_metadata["adapter"].get("changed_files", []):
                 target = artifact_dir / "native" / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(binary.parent.parent / "elmm/src" / relative, target)
+                shutil.copy2(copy_src_base / relative, target)
             shutil.copy2(binary.parent / "build.log", artifact_dir / "build.log")
             calibration = binary.parent.parent / "calibration.json"
             if calibration.is_file():
@@ -340,11 +412,12 @@ def run(args):
             if gpu_build.exists():
                 shutil.copytree(gpu_build, artifact_dir / "gpu-build")
         reference = None
+        reference_dir = None
         reference_steps = None
         sequence = list(binaries)
 
         def execute(tool, label, *, warmup, trace=False):
-            nonlocal reference, reference_steps
+            nonlocal reference, reference_dir, reference_steps
             variant = report["variants"][tool]
             directory = destination / "runs" / tool / label
             shutil.copytree(destination / "config", directory)
@@ -352,14 +425,18 @@ def run(args):
             if output.exists():
                 shutil.rmtree(output)
             print(f"Running {tool} {label}", flush=True)
-            environment = trace_environment(clean_environment(args.threads), tool, enabled=trace)
+            environment = trace_environment(
+                clean_environment(args.threads, strip_prefixes=profile.env_strip_prefixes),
+                tool,
+                enabled=trace,
+            )
             argv = [binaries[tool], *configuration["runtime_arguments"]]
-            profile = None
+            profile_rec = None
             if trace and args.gpu_profile == "nsys":
                 from .gpu_profiling import profile_command
-                log, wall, profile = profile_command(argv, directory / "profile", environment,
-                                                     directory, timeout=args.timeout)
-                if profile.get("application_executed") is False:
+                log, wall, profile_rec = profile_command(argv, directory / "profile", environment,
+                                                         directory, timeout=args.timeout)
+                if profile_rec.get("application_executed") is False:
                     log, wall = command(argv, cwd=directory, env=environment,
                                         log=directory / "run.log", timeout=args.timeout)
                 else:
@@ -367,8 +444,13 @@ def run(args):
             else:
                 log, wall = command(argv, cwd=directory, env=environment,
                                     log=directory / "run.log", timeout=args.timeout)
-            timings = validate_log(log, configuration["expected_max_steps"],
-                                   expected_completed_steps=reference_steps)
+            if profile.validation_mode == "elmm-vtk":
+                timings = validate_log(log, configuration["expected_max_steps"],
+                                       expected_completed_steps=reference_steps)
+            else:
+                timings = validate_generic_log(
+                    log, mode=profile.validation_mode, expected_completed_steps=reference_steps
+                )
             if tool != "baseline":
                 adapter = variant["build"]["adapter"]
                 timings["execution_coverage"] = execution_coverage(
@@ -377,15 +459,27 @@ def run(args):
                     timings["gpu_activity"] = gpu_activity(log, tool, adapter["regions"],
                                                             scope_manifest=adapter.get("scope_manifest"),
                                                             scope_packages=adapter.get("scope_packages"))
-                    if profile is not None:
-                        timings["gpu_profile"] = profile
-            vtk = read_vtk(output / "out.vtk")
-            timings["grid_shape"] = list(vtk[0])
-            if reference is None:
-                if tool != "baseline":
-                    raise RuntimeError("First run must be baseline")
-                reference, reference_steps = vtk, timings["completed_steps"]
-            validation = compare_vtk(reference, vtk, atol=args.atol, rtol=args.rtol)
+                    if profile_rec is not None:
+                        timings["gpu_profile"] = profile_rec
+            if profile.validation_mode == "elmm-vtk":
+                vtk = read_vtk(output / "out.vtk")
+                timings["grid_shape"] = list(vtk[0])
+                if reference is None:
+                    if tool != "baseline":
+                        raise RuntimeError("First run must be baseline")
+                    reference, reference_steps = vtk, timings["completed_steps"]
+                validation = compare_vtk(reference, vtk, atol=args.atol, rtol=args.rtol)
+            else:
+                if reference_dir is None:
+                    if tool != "baseline":
+                        raise RuntimeError("First run must be baseline")
+                    reference_dir, reference_steps = directory, timings["completed_steps"]
+                if profile.output_files:
+                    validation = compare_numeric_files(
+                        reference_dir, directory, profile.output_files, atol=args.atol, rtol=args.rtol
+                    )
+                else:
+                    validation = {"passed": True, "atol": args.atol, "rtol": args.rtol, "fields": {}}
             record = {"warmup": warmup, "label": label, "wall_seconds": wall, **timings,
                       "validation": validation, "log": str(directory.relative_to(destination) / "run.log")}
             if not validation["passed"]:
@@ -459,6 +553,8 @@ def main():
     select = measure.add_mutually_exclusive_group()
     select.add_argument("--example", default="channel", help="ELMM examples/ subdirectory (default: channel)")
     select.add_argument("--config", help="Any configuration directory, or a .conf file in it")
+    measure.add_argument("--project-profile", type=Path, help="Optional declarative schema-v1 project profile JSON")
+    measure.add_argument("--source-root", type=Path, help="Explicit Fortran application root directory")
     measure.add_argument("--tools", type=tool_list, default=["baseline"])
     measure.add_argument("--target", choices=("cpu", "gpu"), default="cpu",
                          help="GPU uses local CUDA; baseline remains CPU/OpenMP")

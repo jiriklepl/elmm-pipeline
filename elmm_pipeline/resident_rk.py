@@ -12,6 +12,17 @@ import re
 import subprocess
 from pathlib import Path
 
+from .ast_rewrites import (
+    find_all_calls,
+    find_call_span,
+    find_routine_span,
+    find_unique_span,
+    inline_tile_scratch_nests,
+    parse_fortran,
+    promote_line_snapshots,
+    replace_once,
+)
+
 
 def identity(path):
     path = Path(path).resolve(strict=True)
@@ -125,8 +136,15 @@ def value_resident_geometry(extracted, directory):
                   if p["lower_bound_dimension"] is not None or p["resource"] in grid]
         text = Path(original["input_path"]).read_text()
         for name in values:
-            pattern = r"(?im)^(integer|real\(8\)), intent\(in\) :: " + re.escape(name) + r"$"
-            text, count = re.subn(pattern, r"\1, value, intent(in) :: " + name, text)
+            pattern = (
+                r"(?im)^([ \t]*(?:integer(?:\s*\([^)]+\))?|real(?:\s*\([^)]+\))?|double\s+precision)"
+                r"(?:(?!\bvalue\b)[^\n])*?),\s*intent\s*\(\s*in\s*\)\s*::\s*("
+                + re.escape(name)
+                + r")\s*$"
+            )
+            if re.search(rf"(?im)^[ \t]*[^\n]*\bvalue\b[^\n]*::\s*{re.escape(name)}\s*$", text):
+                continue
+            text, count = re.subn(pattern, r"\1, value, intent(in) :: \2", text)
             if count != 1:
                 raise ValueError("Unexpected resident scalar declaration: " + name)
         path = directory / Path(original["input_path"]).name
@@ -317,107 +335,30 @@ def materialize_entries(packages, directory):
 
 
 def pointwise_advection(source, directory):
-    """Inline ELMM's private tile flux arrays into their original consumers.
+    """Inline private tile flux arrays into their original consumers.
 
     Read formulas from the source. Each private flux has one point definition;
     a consumer offset selects that definition at the corresponding global point.
-    Keep the three directional updates and their original arithmetic order.
+    Keep the directional updates and their original arithmetic order.
     This removes CPU cache tiles, without changing the advection discretization.
     """
-    from fparser.common.readfortran import FortranStringReader
-    from fparser.two.parser import ParserFactory
-    from fparser.two.utils import walk
-
     source = Path(source).resolve(strict=True)
     text = source.read_text()
-    lines = text.splitlines(keepends=True)
-    tree = ParserFactory().create(std="f2008")(FortranStringReader(text, ignore_comments=False))
-    changes = []
-
-    def statements(node):
-        return [item for item in node.content if type(item).__name__ not in {"Comment", "Nonlabel_Do_Stmt", "End_Do_Stmt"}]
-
-    def inner(loop, variable):
-        header = next(item for item in loop.content if type(item).__name__ == "Nonlabel_Do_Stmt")
-        if str(header.items[1].items[1][0]).lower() != variable:
-            raise ValueError("Unexpected advection tile iterator")
-        children = statements(loop)
-        if len(children) != 1 or type(children[0]).__name__ != "Block_Nonlabel_Do_Construct":
-            raise ValueError("Unexpected advection tile nesting")
-        return children[0]
-
-    def shift(expression, offsets):
-        return re.sub(r"\b[ijk]\b", lambda match: "(" + match[0] + "+(" + str(offsets["ijk".index(match[0].lower())]) + "))", expression, flags=re.I)
-
-    for routine in (node for node in walk(tree) if type(node).__name__ == "Subroutine_Subprogram"):
-        header = next(node for node in routine.content if type(node).__name__ == "Subroutine_Stmt")
-        name = str(header.items[1]).lower()
-        if name not in {"cd4divu", "cd4divv", "cd4divw"}:
-            continue
-        component = name[-1].upper()
-        mask = next((node for node in walk(routine) if type(node).__name__ == "Type_Declaration_Stmt"
-                     and re.search(r"\bi_mask4\b", str(node), re.I)), None)
-        if mask is None or "[-1,9,9,-1]" not in re.sub(r"\s+", "", str(mask)).lower():
-            raise ValueError("Unsupported fourth-order interpolation mask")
-        execution = next(node for node in routine.content if type(node).__name__ == "Execution_Part")
-        tiles = [node for node in execution.content if type(node).__name__ == "Block_Nonlabel_Do_Construct"]
-        if len(tiles) != 3:
-            raise ValueError("Expected three directional advection tiles")
-        for tile in tiles:
-            bi = inner(inner(tile, "bk"), "bj")
-            pair = statements(bi)
-            if len(pair) != 2 or any(type(node).__name__ != "Block_Nonlabel_Do_Construct" for node in pair):
-                raise ValueError("Advection tile must have one producer and one consumer nest")
-            producer, consumer = pair
-            producer_leaf = inner(inner(producer, "k"), "j")
-            consumer_leaf = inner(inner(consumer, "k"), "j")
-            definitions = {}
-            for statement in statements(producer_leaf):
-                if type(statement).__name__ != "Assignment_Stmt":
-                    raise ValueError("Advection flux producer is not straight-line arithmetic")
-                lhs, _, rhs = statement.items
-                key = str(lhs).replace(" ", "").lower()
-                if key in {"li", "lj", "lk"}:
-                    continue
-                expression = str(rhs)
-                for local, value in definitions.items():
-                    if "(" not in local:
-                        expression = re.sub(r"\b" + re.escape(local) + r"\b", "(" + value + ")", expression, flags=re.I)
-                definitions[key] = expression
-            if set(key for key in definitions if "(" in key) != {"uv1(li,lj,lk)", "uv3(li,lj,lk)"}:
-                raise ValueError("Advection producer has unexpected scratch storage")
-            body = []
-            for statement in statements(consumer_leaf):
-                if type(statement).__name__ == "Assignment_Stmt" and str(statement.items[0]).lower() in {"li", "lj", "lk"}:
-                    continue
-                rendered = str(statement)
-                for reference in reversed(list(walk(statement))):
-                    if type(reference).__name__ != "Part_Ref" or str(reference.items[0]).lower() not in {"uv1", "uv3"}:
-                        continue
-                    offsets = []
-                    for axis, index in zip(("li", "lj", "lk"), reference.items[1].items, strict=True):
-                        match = re.fullmatch(axis + r"(?:([+-])(\d+))?", re.sub(r"\s+", "", str(index)).lower())
-                        if match is None:
-                            raise ValueError("Nonconstant advection scratch offset")
-                        offsets.append(0 if match[1] is None else int(match[1] + match[2]))
-                    value = definitions[str(reference.items[0]).lower() + "(li,lj,lk)"]
-                    rendered = rendered.replace(str(reference), "(" + shift(value, offsets) + ")")
-                body.append(rendered)
-            replacement = (f"    do k=1,{component}nz\n      do j=1,{component}ny\n        do i=1,{component}nx\n"
-                           + "\n".join(body) + "\n        enddo\n      enddo\n    enddo\n")
-            first = next(node for node in tile.content if type(node).__name__ == "Nonlabel_Do_Stmt").item.span[0]
-            last = tile.content[-1].item.span[1]
-            changes.append((first, last, replacement))
-    if len(changes) != 9:
+    updated, changes = inline_tile_scratch_nests(text)
+    if not changes:
         raise ValueError("Incomplete fourth-order advection preparation")
-    for first, last, replacement in sorted(changes, reverse=True):
-        lines[first-1:last] = [replacement]
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     target = directory / source.name
-    target.write_text("".join(lines))
-    record = {"version": 1, "kind": "pointwise_advection", "original": identity(source), "replacement": identity(target),
-              "directional_updates": len(changes), "formula_source": "original private flux definitions and consumer expressions"}
+    target.write_text(updated)
+    record = {
+        "version": 1,
+        "kind": "pointwise_advection",
+        "original": identity(source),
+        "replacement": identity(target),
+        "directional_updates": len(changes),
+        "formula_source": "original private flux definitions and consumer expressions",
+    }
     (directory / "pointwise-advection.json").write_text(json.dumps(record, indent=2) + "\n")
     return record
 
@@ -430,51 +371,23 @@ def snapshot_filter(source, directory):
     seven-term accumulation order while exposing independent output points.
     Retire the temporary through coherence before Fortran deallocates it.
     """
-    from .gpu_hot_path import _once, _routine
-
     source = Path(source).resolve(strict=True)
     text = source.read_text()
-    lo, hi = _routine(text, "Filter3ord")
-    body = text[lo:hi]
-    declaration = "    real(knd) :: tmp(-2:ubound(U,dir))"
-    _once(body, declaration)
-    body = body.replace(declaration, "    real(knd), allocatable :: tmp(:,:,:)\n")
-    anchor = "    mini = lbound(U,1) + 3"
-    _once(body, anchor)
-    body = body.replace(anchor, "    allocate(tmp(-2:ubound(U,1),-2:ubound(U,2),-2:ubound(U,3)))\n"
-                        "    do k=-2,ubound(U,3)\n      do j=-2,ubound(U,2)\n        do i=-2,ubound(U,1)\n"
-                        "          tmp(i,j,k)=U(i,j,k)\n        enddo\n      enddo\n    enddo\n\n" + anchor)
-    for assignment in ("tmp = U(:,j,k)", "tmp = U(i,:,k)", "tmp = U(i,j,:)"):
-        _once(body, assignment)
-        body = body.replace(assignment, "! Input line is in the complete snapshot.")
-    for index, coordinates in (("ii", "ii,j,k"), ("jj", "i,jj,k"), ("kk", "i,j,kk")):
-        _once(body, "tmp(" + index + ")")
-        body = body.replace("tmp(" + index + ")", "tmp(" + coordinates + ")")
-    # Express the seven fixed stencil offsets directly. The compiler can then
-    # lower the small private weight array without a variable indexing loop.
-    for axis, index in (("i", "ii"), ("j", "jj"), ("k", "kk")):
-        loop = re.search(r"(?im)^\s*do " + index + r" = " + axis + r"-3, " + axis + r"\+3\b.*?^\s*end do\b",
-                         body, re.S)
-        if loop is None:
-            raise ValueError("Missing original seven-point filter accumulation")
-        original = loop[0]
-        shifted = re.sub(r"\b" + index + r"\b", "(" + axis + "+" + index + ")", original)
-        shifted = shifted.replace("(" + axis + "+" + index + ")-" + axis, index)
-        shifted = shifted.replace("do (" + axis + "+" + index + ") = " + axis + "-3, " + axis + "+3",
-                                  "do " + index + " = -3, 3")
-        body = body[:loop.start()] + shifted + body[loop.end():]
-    ending = re.search(r"(?im)^\s*end subroutine Filter3ord", body)
-    if ending is None:
-        raise ValueError("Missing filter procedure end")
-    body = body[:ending.start()] + ("\n    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-            "      call resident_flow%release_real64(tmp)\n    end block\n") + body[ending.start():]
+    updated, edits = promote_line_snapshots(text)
+    if not edits:
+        raise ValueError("Expected at least one line-snapshot filter routine")
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     target = directory / source.name
-    target.write_text(text[:lo] + body + text[hi:])
-    record = {"version": 1, "kind": "snapshot_filter", "original": identity(source), "replacement": identity(target),
-              "arithmetic": "original Filter3ord weights, conditions and accumulation order",
-              "lifetime": "retire snapshot after queued readers before automatic deallocation"}
+    target.write_text(updated)
+    record = {
+        "version": 1,
+        "kind": "snapshot_filter",
+        "original": identity(source),
+        "replacement": identity(target),
+        "arithmetic": "original Filter3ord weights, conditions and accumulation order",
+        "lifetime": "retire snapshot after queued readers before automatic deallocation",
+    }
     (directory / "snapshot-filter.json").write_text(json.dumps(record, indent=2) + "\n")
     return record
 
@@ -512,39 +425,100 @@ def addressable_arrays(text):
     return "".join(lines)
 
 
-def contiguous_periodic_boundary(text):
-    from .gpu_hot_path import _once, _routine
+def _decl_shape_lower_bounds(node, entity_shape):
+    attrs_str = re.sub(r"\s+", "", str(node.items[1] or "")).lower()
+    if entity_shape is not None:
+        return re.sub(r"\s+", "", str(entity_shape)).lower()
+    m = re.search(r"dimension\(([^()]+)\)", attrs_str)
+    return m.group(1) if m else ""
 
-    start, end = _routine(text, "BoundUVW_do_BC")
-    owner = text[start:end]
-    call_pattern = r"(?im)^\s*call\s+periodic_corners_edges\s*\(([^)]*)\)"
-    calls = re.findall(call_pattern, owner)
-    if (sorted(re.sub(r"\s+", "", call).lower() for call in calls) != ["u,1", "v,2", "w,3"]
-            or re.search(call_pattern, text[:start] + text[end:])):
+
+def contiguous_periodic_boundary(text):
+    from fparser.two.utils import walk
+
+    b_lo, b_hi = find_routine_span(text, "BoundUVW_do_BC")
+    owner = text[b_lo:b_hi]
+    all_calls = find_all_calls(text, "periodic_corners_edges")
+    outside = [c for c in all_calls if not (b_lo <= c[0] and c[1] <= b_hi)]
+    inside = [c for c in all_calls if b_lo <= c[0] and c[1] <= b_hi]
+    normalized_calls = sorted(re.sub(r"\s+", "", ",".join(c[3])).lower() for c in inside)
+    if outside or normalized_calls != ["u,1", "v,2", "w,3"]:
         raise ValueError("Unsupported periodic boundary callers")
-    _once(owner, "real(knd), intent(inout), contiguous :: U(-2:,-2:,-2:), "
-                 "V(-2:,-2:,-2:), W(-2:,-2:,-2:)")
-    start, end = _routine(text, "periodic_corners_edges")
-    body = text[start:end]
-    declaration = "real(knd), intent(inout) :: U(-2:,-2:,-2:)"
-    _once(body, declaration)
-    body = body.replace(declaration, "real(knd), intent(inout), contiguous :: U(-2:,-2:,-2:)")
-    return text[:start] + body + text[end:]
+
+    owner_tree = parse_fortran(owner)
+    found_owner_arrays: dict[str, bool] = {}
+    for decl in walk(owner_tree):
+        if type(decl).__name__ != "Type_Declaration_Stmt":
+            continue
+        dtype_str = re.sub(r"\s+", "", str(decl.items[0])).lower()
+        attrs_str = re.sub(r"\s+", "", str(decl.items[1] or "")).lower()
+        if not dtype_str.startswith("real"):
+            continue
+        if "intent(inout)" not in attrs_str or "contiguous" not in attrs_str:
+            continue
+        for ent in decl.items[2].items:
+            vname = str(ent.items[0]).lower()
+            if vname in {"u", "v", "w"} and _decl_shape_lower_bounds(decl, ent.items[1]) == "-2:,-2:,-2:":
+                found_owner_arrays[vname] = True
+    if set(found_owner_arrays) != {"u", "v", "w"}:
+        raise ValueError("BoundUVW_do_BC must declare contiguous U, V, W arrays")
+
+    p_lo, p_hi = find_routine_span(text, "periodic_corners_edges")
+    body = text[p_lo:p_hi]
+    body_tree = parse_fortran(body)
+    target_spans = []
+    for decl in walk(body_tree):
+        if type(decl).__name__ != "Type_Declaration_Stmt":
+            continue
+        dtype_str = re.sub(r"\s+", "", str(decl.items[0])).lower()
+        attrs_str = re.sub(r"\s+", "", str(decl.items[1] or "")).lower()
+        if not dtype_str.startswith("real") or "intent(inout)" not in attrs_str:
+            continue
+        for ent in decl.items[2].items:
+            if str(ent.items[0]).lower() == "u" and _decl_shape_lower_bounds(decl, ent.items[1]) == "-2:,-2:,-2:":
+                target_spans.append((decl.item.span, "contiguous" in attrs_str))
+    if len(target_spans) != 1:
+        raise ValueError("Unsupported U declaration in periodic_corners_edges")
+    (first_line, last_line), has_contig = target_spans[0]
+    if not has_contig:
+        lines = body.splitlines(keepends=True)
+        chunk = "".join(lines[first_line - 1 : last_line])
+        before, after = chunk.split("::", 1)
+        lines[first_line - 1 : last_line] = [before.rstrip() + ", contiguous ::" + after]
+        body = "".join(lines)
+    return text[:p_lo] + body + text[p_hi:]
 
 
 def contiguous_filter_arguments(text):
-    from .gpu_hot_path import _routine
+    from fparser.two.utils import walk
 
     for routine in ("Filter3ord", "Filter"):
-        start, end = _routine(text, routine)
+        start, end = find_routine_span(text, routine)
         body = text[start:end]
-        for declaration in (
-            "real(knd), dimension(-2:,-2:,-2:), intent(inout)",
-            "integer, dimension(-2:,-2:,-2:), intent(in)",
-        ):
-            if body.count(declaration) != 1:
-                raise ValueError("Unsupported filter array declaration in " + routine)
-            body = body.replace(declaration, declaration + ", contiguous")
+        tree = parse_fortran(body)
+        real_decls = []
+        int_decls = []
+        for decl in walk(tree):
+            if type(decl).__name__ != "Type_Declaration_Stmt":
+                continue
+            dtype_str = re.sub(r"\s+", "", str(decl.items[0])).lower()
+            attrs_str = re.sub(r"\s+", "", str(decl.items[1] or "")).lower()
+            shapes = [_decl_shape_lower_bounds(decl, ent.items[1]) for ent in decl.items[2].items]
+            if "-2:,-2:,-2:" not in shapes:
+                continue
+            if dtype_str.startswith("real") and "intent(inout)" in attrs_str:
+                real_decls.append((decl.item.span, "contiguous" in attrs_str))
+            elif dtype_str.startswith("integer") and "intent(in)" in attrs_str and "intent(inout)" not in attrs_str:
+                int_decls.append((decl.item.span, "contiguous" in attrs_str))
+        if len(real_decls) != 1 or len(int_decls) != 1:
+            raise ValueError("Unsupported filter array declaration in " + routine)
+        lines = body.splitlines(keepends=True)
+        for (first_line, last_line), has_contig in sorted(real_decls + int_decls, key=lambda x: x[0][0], reverse=True):
+            if not has_contig:
+                chunk = "".join(lines[first_line - 1 : last_line])
+                before, after = chunk.split("::", 1)
+                lines[first_line - 1 : last_line] = [before.rstrip() + ", contiguous ::" + after]
+        body = "".join(lines)
         text = text[:start] + body + text[end:]
     return text
 
@@ -563,7 +537,7 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     directory.mkdir(parents=True, exist_ok=False)
     replacements = {item["original"]["path"]: item["replacement"]["path"] for item in numerical["sources"]}
     sources = {Path(item["original"]["path"]).name: Path(replacements.get(item["prepared"]["path"], item["prepared"]["path"]))
-               for item in configured["sources"] if "/elmm/src/" in item["original"]["path"]}
+               for item in configured["sources"] if "poisfft" not in item["original"]["path"].lower()}
     # Only modules whose numerical code or address contracts are changed need
     # rebuilding. No source graph owner or legacy placement wrapper is retained.
     names = {"parameters.f90", "arrayutilities.f90", "subgrid.f90", "dynamics.f90", "momentum_diffusion.f90",
@@ -577,60 +551,69 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     output["filters.f90"] = contiguous_filter_arguments(output["filters.f90"])
 
     arrays = output["arrayutilities.f90"]
-    begin = re.search(r"(?im)^\s*subroutine set_int_3D\(", arrays)
-    if begin is None:
-        raise ValueError("Missing integer-valued REAL64 fill overload")
-    end = re.search(r"(?im)^\s*end subroutine[^\n]*", arrays[begin.start():])
-    stop = begin.start() + end.end()
+    arr_lo, arr_hi = find_routine_span(arrays, "set_int_3D")
     # Conversion is scalar and exact under the original assignment rules. One
     # implementation owns the fill, including ordering against queued readers.
-    arrays = arrays[:begin.start()] + '''
-    subroutine set_int_3D(to,from)
+    arrays = arrays[:arr_lo] + '''    subroutine set_int_3D(to,from)
       real(knd),contiguous,intent(out) :: to(:,:,:)
       integer,intent(in) :: from
       call set_3D(to,real(from,knd))
-    end subroutine
-''' + arrays[stop:]
+    end subroutine''' + arrays[arr_hi:]
     output["arrayutilities.f90"] = arrays
 
     def at_once(text, anchor, addition, after=False):
-        position = _once(text, anchor) + (len(anchor) if after else 0)
-        return text[:position] + addition + text[position:]
+        return replace_once(text, anchor, addition, after=after, insert=True)
 
     def publish_block(indent="    "):
         return (indent + "block\n" + indent + "  use elmm_resident_pressure_state, only: resident_flow\n"
                 + indent + "  if (resident_flow%active) call resident_flow%publish()\n" + indent + "end block\n")
 
     tsteps = output["tsteps.f90"]
-    lo, hi = _routine(tsteps, "TMarchRK3")
+    lo, hi = find_routine_span(tsteps, "TMarchRK3")
     body = tsteps[lo:hi]
     body = at_once(body, "    use RungeKutta_coefficients\n", "    use, intrinsic :: iso_c_binding\n"
                    "    use elmm_resident_pressure_state, only: resident_flow\n", after=True)
-    body = at_once(body, "      call SubgridStresses(U, V, W, Pr, Temperature, Moisture)",
-                   "      if (.not. resident_flow%joined) then\n"
-                   "        if (ResidentRKSupported()) then\n"
-                   "          call resident_flow%begin_epoch(0_c_int,2147483648_c_size_t)\n"
-                   "          resident_flow%joined=.true.\n        endif\n      endif\n\n")
-    end = body.rfind("    end do")
-    if end < 0:
+    sub_lo, _, _, _ = find_call_span(body, "SubgridStresses")
+    begin_epoch_code = (
+        "      if (.not. resident_flow%joined) then\n"
+        "        if (ResidentRKSupported()) then\n"
+        "          call resident_flow%begin_epoch(0_c_int,2147483648_c_size_t)\n"
+        "          resident_flow%joined=.true.\n        endif\n      endif\n\n"
+    )
+    body = body[:sub_lo] + begin_epoch_code + body[sub_lo:]
+    end_do_matches = list(re.finditer(r"(?im)^[ \t]*end\s*do\b[^\n]*", body))
+    if not end_do_matches:
         raise ValueError("Missing RK stage loop")
-    end += len("    end do")
-    body = body[:end] + ("\n    if (resident_flow%joined) then\n"
-                         "      call resident_flow%end_epoch()\n      resident_flow%joined=.false.\n    endif\n") + body[end:]
+    end_pos = end_do_matches[-1].end()
+    body = body[:end_pos] + ("\n    if (resident_flow%joined) then\n"
+                             "      call resident_flow%end_epoch()\n      resident_flow%joined=.false.\n    endif\n") + body[end_pos:]
     tsteps = tsteps[:lo] + body + tsteps[hi:]
-    lo, hi = _routine(tsteps, "IBMassSources")
+    lo, hi = find_routine_span(tsteps, "IBMassSources")
     body = tsteps[lo:hi]
     # In the configured serial application an empty point set leaves the
     # complete Q allocation at +0. Bound_Q only adds those zero halo values.
     # Keep the reached GPU fill and avoid constructing a false host consumer.
-    _once(body, "    call set(Q, 0)")
-    body = body.replace("    call set(Q, 0)", "    call set(Q, 0._knd)\n"
-                        "    if (size(Up)+size(Vp)+size(Wp)==0) return\n" + publish_block())
+    try:
+        body = replace_once(
+            body,
+            "    call set(Q, 0)",
+            "    call set(Q, 0._knd)\n"
+            "    if (size(Up)+size(Vp)+size(Wp)==0) return\n" + publish_block(),
+        )
+    except ValueError:
+        s_lo, s_hi, s_call, _ = find_call_span(body, "set")
+        body = (
+            body[:s_lo]
+            + s_call
+            + "\n    if (size(Up)+size(Vp)+size(Wp)==0) return\n"
+            + publish_block()
+            + body[s_hi:]
+        )
     tsteps = tsteps[:lo] + body + tsteps[hi:]
     # These unported immersed-boundary operations are reached only when their
     # point arrays contain work. Empty primary-channel paths keep all replicas.
     tsteps = at_once(tsteps, "    if (size(Up) + size(Vp) + size(Wp)>0) then\n", publish_block("      "), after=True)
-    lo, hi = _routine(tsteps, "NullInterior")
+    lo, hi = find_routine_span(tsteps, "NullInterior")
     body = tsteps[lo:hi]
     body = at_once(body, "    !$omp parallel private(i)",
                    "    if (nUnull+nVnull+nWnull>0) then\n" + publish_block("      ") + "    endif\n")
@@ -654,20 +637,23 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     supported = supported .and. .not. any(pressure_solution%correct_mass_flux)
   end function
 '''
-    end = re.search(r"(?im)^\s*end module TimeSteps\b", tsteps)
+    end = re.search(r"(?im)^\s*end\s*module(?:\s+TimeSteps)?\b", tsteps)
     if end is None:
         raise ValueError("Missing timestep module end")
-    output["tsteps.f90"] = tsteps[:end.start()] + supported + tsteps[end.start():]
+    # Match the TimeSteps module end specifically when multiple modules exist.
+    ts_end = re.search(r"(?im)^\s*end\s*module\s+TimeSteps\b", tsteps)
+    end_mod = ts_end if ts_end is not None else end
+    output["tsteps.f90"] = tsteps[:end_mod.start()] + supported + tsteps[end_mod.start():]
 
     dynamics = output["dynamics.f90"]
-    lo, hi = _routine(dynamics, "Convection")
+    lo, hi = find_routine_span(dynamics, "Convection")
     body = dynamics[lo:hi]
     body = at_once(body, "  contains", "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
                    "      call resident_flow%release_real64(beta)\n      call resident_flow%release_real64(rho)\n    end block\n\n")
     output["dynamics.f90"] = dynamics[:lo] + body + dynamics[hi:]
 
     dynamics = output["dynamics.f90"]
-    lo, hi = _routine(dynamics, "SubgridStresses")
+    lo, hi = find_routine_span(dynamics, "SubgridStresses")
     body = dynamics[lo:hi]
     # Wall-model records still live on the host. Their field inputs are reads:
     # observing the current allocation must preserve every device replica.
@@ -692,11 +678,13 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     end block
 
 '''
-    first_wall = body.index("    if (wallmodeltype>0) then")
+    wall_if = re.search(r"(?im)^[ \t]*if\s*\(\s*wallmodeltype\s*>\s*0\s*\)\s*then\b", body)
+    if wall_if is None:
+        raise ValueError("Missing wallmodeltype branch in SubgridStresses")
+    first_wall = wall_if.start()
     body = body[:first_wall] + wall_observation + body[first_wall:]
-    original = "                      call ComputeViscsWM(U,V,W,Pr,Temperature,Moisture)"
-    _once(body, original)
-    body = body.replace(original, '''      block
+    wm_lo, wm_hi, wm_call, _ = find_call_span(body, "ComputeViscsWM")
+    body = body[:wm_lo] + '''      block
         use, intrinsic :: iso_c_binding
         use elmm_resident_pressure_state, only: resident_flow
         integer(c_int64_t) :: wall_write
@@ -708,30 +696,45 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
               [maxval(WMPoints%xi),maxval(WMPoints%yj),maxval(WMPoints%zk)],.true.)
           endif
         endif
-        call ComputeViscsWM(U,V,W,Pr,Temperature,Moisture)
+''' + wm_call + '''
         if (wall_write/=0) call resident_flow%host_end(wall_write)
-      end block''')
+      end block''' + body[wm_hi:]
     output["dynamics.f90"] = dynamics[:lo] + body + dynamics[hi:]
 
     # Optional forcing keeps its existing condition and native implementation.
     # Enter coherence only when it actually has work; these calls are empty in
     # both primary channel configurations.
     linear = output["linearforcing.f90"]
-    start = re.search(r"(?im)^\s*subroutine\s+linear_forcing\(", linear).start()
-    before, body = linear[:start], linear[start:]
+    l_lo, l_hi = find_routine_span(linear, "linear_forcing")
+    before, body, after_lin = linear[:l_lo], linear[l_lo:l_hi], linear[l_hi:]
     body = at_once(body, "    if (enable_linear_forcing) then\n", publish_block("      "), after=True)
-    output["linearforcing.f90"] = before + body
+    output["linearforcing.f90"] = before + body + after_lin
     volumes = output["volumesources.f90"]
-    lo, hi = _routine(volumes, "ResistanceForce")
+    lo, hi = find_routine_span(volumes, "ResistanceForce")
     body = volumes[lo:hi]
     body = at_once(body, "           if (allocated(src)) then\n",
                    "             if (size(src)>0) then\n" + publish_block("               ") + "             endif\n", after=True)
     output["volumesources.f90"] = volumes[:lo] + body + volumes[hi:]
     sponge = output["sponge.f90"]
-    anchor = "    if (enable_top_rayleigh_damping) call rayleigh_damping_top_uvw(U2, V2, W2, U, V, W)"
-    _once(sponge, anchor)
-    output["sponge.f90"] = sponge.replace(anchor, "    if (enable_top_rayleigh_damping) then\n" + publish_block("      ")
-                                          + "      call rayleigh_damping_top_uvw(U2, V2, W2, U, V, W)\n    endif")
+    s_lo, s_hi = find_routine_span(sponge, "rayleigh_damping_uvw")
+    s_body = sponge[s_lo:s_hi]
+    r_lo, r_hi, r_call, _ = find_call_span(s_body, "rayleigh_damping_top_uvw")
+    s_if_match = re.search(
+        r"(?im)^[ \t]*if\s*\(\s*enable_top_rayleigh_damping\s*\)\s*",
+        s_body[:r_lo],
+    )
+    if s_if_match is not None and s_if_match.end() >= r_lo - 2:
+        span_lo = s_if_match.start()
+        s_body = (
+            s_body[:span_lo]
+            + "    if (enable_top_rayleigh_damping) then\n"
+            + publish_block("      ")
+            + "      " + r_call.lstrip() + "\n    endif"
+            + s_body[r_hi:]
+        )
+    else:
+        s_body = at_once(s_body, "    if (enable_top_rayleigh_damping) call rayleigh_damping_top_uvw(U2, V2, W2, U, V, W)", "")
+    output["sponge.f90"] = sponge[:s_lo] + s_body + sponge[s_hi:]
 
     records = []
     for name, text in output.items():

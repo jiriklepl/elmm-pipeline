@@ -8,16 +8,38 @@ def data_lines(path):
             if (s := re.split(r"[!#]", line)[0].strip())]
 
 
-def prepare_config(source, destination, *, steps=None, advection=None):
+def prepare_config(source, destination, *, steps=None, advection=None, profile=None):
     source, destination = Path(source).resolve(), Path(destination)
-    if source.is_file():
+    if source.is_file() and (profile is None or profile.config_mode == "elmm-conf"):
         source = source.parent
-    if destination.resolve() == source or source in destination.resolve().parents:
+    config_root = source.parent if source.is_file() else source
+    if destination.resolve() == config_root or config_root in destination.resolve().parents:
         raise ValueError("Configuration snapshot must be outside the input configuration directory")
-    if not (source / "main.conf").is_file():
-        raise ValueError(f"Configuration needs main.conf: {source}")
     if destination.exists():
         raise ValueError(f"Configuration snapshot already exists: {destination}")
+
+    if profile is not None and profile.config_mode == "generic":
+        if source.is_dir():
+            shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        elif source.is_file():
+            destination.mkdir(parents=True, exist_ok=False)
+            shutil.copy2(source, destination / source.name)
+        else:
+            raise ValueError(f"Configuration path does not exist: {source}")
+        overrides = {}
+        if steps is not None:
+            if steps <= 0:
+                raise ValueError("--steps must be positive")
+            overrides["steps"] = steps
+        return {
+            "source": str(source),
+            "overrides": overrides,
+            "expected_max_steps": steps,
+            "runtime_arguments": list(profile.runtime_arguments),
+        }
+
+    if not (source / "main.conf").is_file():
+        raise ValueError(f"Configuration needs main.conf: {source}")
     # Copy every asset, including input/ and relative profiles. Dereference symlinks
     # so the snapshot can be moved independently of the source configuration.
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git", "__pycache__"))

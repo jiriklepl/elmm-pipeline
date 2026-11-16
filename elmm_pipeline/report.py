@@ -18,11 +18,22 @@ def render(report):
     gpu = settings.get("target", "cpu") == "gpu"
     execution = ("CPU/OpenMP baseline; local CUDA offload"
                  if gpu else "CPU/OpenMP")
+    advection_str = (
+        f"; effective advection method **{configuration['advection_method']}**"
+        if "advection_method" in configuration
+        else ""
+    )
+    elmm_dep = report.get("dependencies", {}).get("elmm")
+    rev_line = (
+        f"ELMM revision: `{elmm_dep['revision']}`."
+        if isinstance(elmm_dep, dict) and "revision" in elmm_dep
+        else f"Project profile: `{report.get('profile', {}).get('name', 'elmm')}`."
+    )
     lines = ["# ELMM application benchmark", "",
-             f"Configuration: `{configuration['source']}`; effective advection method **{configuration['advection_method']}**.", "",
+             f"Configuration: `{configuration['source']}`{advection_str}.", "",
              f"Overrides: `{configuration['overrides']}`. Effective input files are in `config/`.", "",
              f"{execution}; double precision; {settings['threads']} host threads; {settings['repeats']} measured repeats and {settings['warmups']} warmups per variant.",
-             f"ELMM revision: `{report['dependencies']['elmm']['revision']}`.", "",
+             rev_line, "",
              "| Variant | Status | Steps/run | Step time, median (s) | Wall time, median (s) | Baseline/step time | Validation |",
              "|---|---|---:|---:|---:|---:|---|"]
     if report.get("error"):
@@ -33,13 +44,15 @@ def render(report):
             lines.append(f"| {name} | {variant['status']} | — | — | — | — | {variant.get('reason', '')} |")
             continue
         summary = variant["summary"]
-        step = summary["time_steps_seconds"]["median"]
+        step_info = summary.get("time_steps_seconds")
+        step = step_info["median"] if step_info else None
+        step_cell = f"{step:.2f}" if step is not None else "—"
         wall = summary["wall_seconds"]["median"]
         speedup = f"{baseline['median'] / step:.3f}×" if baseline and step else "—"
         counts = ', '.join(str(n) for n in sorted({r['completed_steps'] for r in variant['runs']}))
-        lines.append(f"| {name} | ok | {counts} | {step:.2f} | {wall:.3f} | {speedup} | pass |")
+        lines.append(f"| {name} | ok | {counts} | {step_cell} | {wall:.3f} | {speedup} | pass |")
     transformed = [v["summary"]["time_steps_seconds"] for name, v in report["variants"].items()
-                   if name != "baseline" and v["status"] == "ok"]
+                   if name != "baseline" and v["status"] == "ok" and v["summary"].get("time_steps_seconds")]
     if baseline and transformed and settings["repeats"] >= 3 and all(
             v["min"] <= baseline["max"] and baseline["min"] <= v["max"] for v in transformed):
         lines.extend(["", "All transformed variants' timing ranges overlap the baseline's range. These samples do not establish a clear application-level speedup."])
@@ -122,8 +135,12 @@ def render(report):
     for name, variant in report["variants"].items():
         if variant["status"] == "ok":
             data = variant["summary"]
-            steps = data["time_steps_seconds"]
-            poisson = data["poisson_seconds"]
-            share = f"; Poisson timer / step timer: {100 * poisson['median'] / steps['median']:.1f}%" if poisson and steps["median"] else ""
-            lines.append(f"- {name}: step-time range {steps['min']:.2f}–{steps['max']:.2f} s{share}.")
+            steps = data.get("time_steps_seconds")
+            poisson = data.get("poisson_seconds")
+            if steps is not None:
+                share = f"; Poisson timer / step timer: {100 * poisson['median'] / steps['median']:.1f}%" if poisson and steps["median"] else ""
+                lines.append(f"- {name}: step-time range {steps['min']:.2f}–{steps['max']:.2f} s{share}.")
+            elif data.get("wall_seconds") is not None:
+                wall_info = data["wall_seconds"]
+                lines.append(f"- {name}: wall-time range {wall_info['min']:.3f}–{wall_info['max']:.3f} s.")
     return "\n".join(lines) + "\n"

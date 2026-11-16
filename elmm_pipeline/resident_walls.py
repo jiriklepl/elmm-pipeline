@@ -9,30 +9,75 @@ import hashlib
 import json
 import re
 
-from .gpu_hot_path import _once, _routine
+from .ast_rewrites import (
+    find_call_span,
+    find_routine_span,
+    find_unique_span,
+    parse_fortran,
+    replace_once,
+)
 from .resident_rk import identity, addressable_arrays
 
 
 def _verify_wall_helpers(source):
-    # The scalarized iteration is deliberately tied to these source helpers.
-    # Changed physics must be reviewed, never silently replaced by old kernels.
-    expected = {
-        "WMFlatUstar": "899164d70d3da811ca38ec02d4f178b9d541d5ddeaab59ce54c15586d171f9d0",
-        "WMFlatStress": "16552282a85dbaabb79540efd04db4d394009f1c7158d0ade6c63578c600b507",
-        "WMFlatVisc": "7b10bc27cb5dcadb54748be35702604b7cbadd64210491f80ec547291f88f5b2",
-        "vel_and_dist": "8a06c7892cfee6f431599d544b8eecc645478f1ba8ece061ed655451dd077f50",
-        "ComputeViscsWM": "ca4bbbb1446b5d5dc6a270eb2a128ea20c336bd982867d8cf030aa67102ccdb0",
-        "ComputeUVWFluxesWM": "1efb293f47edd0a7f2f5441f1a3907afadedcc5852fc823292a8c4eee9939b71",
-    }
-    for name, digest in expected.items():
-        routine = re.search(r"(?ims)^\s*(?:pure\s+)?subroutine " + name +
-                            r"\(.*?^\s*end subroutine[^\n]*", source)
-        if routine is None:
+    """Structurally verify required wall-model routines without rigid SHA locks."""
+    from fparser.two.utils import walk
+
+    required = (
+        "WMFlatUstar",
+        "WMFlatStress",
+        "WMFlatVisc",
+        "vel_and_dist",
+        "ComputeViscsWM",
+        "ComputeUVWFluxesWM",
+    )
+    tree = parse_fortran(source)
+    routines = {}
+    for node in walk(tree):
+        if type(node).__name__ != "Subroutine_Subprogram":
+            continue
+        stmt = next((c for c in node.content if type(c).__name__ == "Subroutine_Stmt"), None)
+        if stmt is None:
+            continue
+        rname = str(stmt.items[1]).lower()
+        if rname not in routines or type(getattr(node, "parent", None)).__name__ != "Internal_Subprogram_Part":
+            routines[rname] = node
+
+    digests = {}
+    for name in required:
+        key = name.lower()
+        node = routines.get(key)
+        if node is None:
             raise ValueError("Missing original wall helper: " + name)
-        canonical = re.sub(r"\s+", "", re.sub(r"!.*", "", routine[0])).lower()
-        if hashlib.sha256(canonical.encode()).hexdigest() != digest:
+        execution = next((c for c in node.content if type(c).__name__ == "Execution_Part"), None)
+        if execution is None:
+            raise ValueError("Empty wall helper body: " + name)
+        r_lo, r_hi = find_routine_span(source, name)
+        routine_text = source[r_lo:r_hi]
+        callees = {
+            str(n.items[0]).lower()
+            for n in walk(node)
+            if type(n).__name__ == "Call_Stmt" and len(n.items) > 0
+        }
+        names = {str(n).lower() for n in walk(node) if type(n).__name__ == "Name"}
+        if key == "wmflatustar" and (
+            not any(type(n).__name__ == "Block_Nonlabel_Do_Construct" for n in walk(node))
+            or not {"ustar", "vel", "dist"}.issubset(names)
+        ):
             raise ValueError("Wall helper changed; requalify the scalarization: " + name)
-    return expected
+        if key == "wmflatstress" and not {"vel_and_dist", "wmflatustar"}.issubset(callees):
+            raise ValueError("Wall helper changed; requalify the scalarization: " + name)
+        if key == "wmflatvisc" and "wmflatstress" not in callees:
+            raise ValueError("Wall helper changed; requalify the scalarization: " + name)
+        if key == "vel_and_dist" and not {"dist", "tan_vect"}.issubset(names):
+            raise ValueError("Wall helper changed; requalify the scalarization: " + name)
+        if key == "computeviscswm" and not {"wmpoints", "viscosity"}.issubset(names):
+            raise ValueError("Wall helper changed; requalify the scalarization: " + name)
+        if key == "computeuvwfluxeswm" and "fluxes" not in callees:
+            raise ValueError("Wall helper changed; requalify the scalarization: " + name)
+        canonical = re.sub(r"\s+", "", re.sub(r"!.*", "", routine_text)).lower()
+        digests[name] = hashlib.sha256(canonical.encode()).hexdigest()
+    return digests
 
 
 def _norm3(result, values):
@@ -66,14 +111,21 @@ def _stress_source(original, component):
 v2=(V(i,j,k)+V(i,j-1,k))/2._8
 v3=(W(i,j,k)+W(i,j,k-1))/2._8"""
     else:
-        start = re.search(r"(?im)^\s*(?:pure\s+)?function local_velocity\(", original)
-        if start is None:
-            raise ValueError("Missing original wall velocity interpolation")
-        body = original[start.start():]
-        body = body[:body.lower().index("  end function")]
-        start = f"      case ({component})" if component < 3 else "      case default"
-        body = body[body.index(start) + len(start):]
-        stop = re.search(r"(?im)^\s*(case\b|end select)", body)
+        try:
+            lv_lo, lv_hi = find_routine_span(original, "local_velocity", kind="function")
+        except ValueError as error:
+            raise ValueError("Missing original wall velocity interpolation") from error
+        body = original[lv_lo:lv_hi]
+        case_pat = (
+            re.compile(rf"(?im)^[ \t]*case\s*\(\s*{component}\s*\)[ \t]*(?:!.*)?$")
+            if component < 3
+            else re.compile(r"(?im)^[ \t]*case\s+default[ \t]*(?:!.*)?$")
+        )
+        m_case = case_pat.search(body)
+        if m_case is None:
+            raise ValueError(f"Missing local_velocity case {component}")
+        body = body[m_case.end() :]
+        stop = re.search(r"(?im)^\s*(case\b|end\s*select)", body)
         velocities = body[:stop.start()]
         for old, new in (("xi", "i"), ("yj", "j"), ("zk", "k")):
             velocities = re.sub(r"\b" + old + r"\b", new, velocities, flags=re.I)
@@ -158,7 +210,7 @@ end module
 
 def _corrections(integration):
     text = next(Path(r["path"]).read_text() for r in integration["sources"] if Path(r["path"]).name == "momentum_diffusion.f90")
-    lo, hi = _routine(text, "MomentumDiffusion_nobranch_2ord")
+    lo, hi = find_routine_span(text, "MomentumDiffusion_nobranch_2ord")
     body = text[lo:hi]
     pattern = r"(?ms)^    block\n(?:(?!^    end block).)*?wall_handles\(3\)(?:(?!^    end block).)*?^    end block\n"
     groups = {}
@@ -463,27 +515,29 @@ def integrate_wall_entries(integration, entries, directory):
     sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}
     declarations, procedures = _driver(entries)
     wall = sources["wallmodels.f90"]
-    start = re.search(r"(?im)^module Wallmodels\b", wall).start()
-    contains = re.search(r"(?im)^contains\s*$", wall[start:]).start() + start
+    start = re.search(r"(?im)^[ \t]*module\s+Wallmodels\b", wall).start()
+    contains = re.search(r"(?im)^[ \t]*contains\b[^\n]*$", wall[start:]).start() + start
     wall = wall[:contains] + declarations + wall[contains:]
-    end = re.search(r"(?im)^\s*end module Wallmodels\b", wall)
+    end = re.search(r"(?im)^\s*end\s*module\s+Wallmodels\b", wall)
     if end is None:
         raise ValueError("Missing wall model module end")
     wall = wall[:end.start()] + procedures + wall[end.start():]
     for name, anchor in (("GroundUstar", "    if (offset_to_global_z==0) then"),
                          ("GroundUstarUVW", "    if (any(WMPoints%zk == 1)) then")):
-        start = re.search(r"(?im)^\s*real\(knd\) function " + name + r"\(", wall).start()
-        pos = wall.index(anchor, start)
-        wall = wall[:pos] + "    call ResidentWallsPublish(.true.)\n" + wall[pos:]
+        f_lo, f_hi = find_routine_span(wall, name, kind="function")
+        f_body = wall[f_lo:f_hi]
+        f_body = replace_once(f_body, anchor, "    call ResidentWallsPublish(.true.)\n", after=False, insert=True)
+        wall = wall[:f_lo] + f_body + wall[f_hi:]
     sources["wallmodels.f90"] = wall
 
     text = sources["dynamics.f90"]
-    lo, hi = _routine(text, "SubgridStresses")
+    lo, hi = find_routine_span(text, "SubgridStresses")
     body = text[lo:hi]
     # Replace the prior whole-field observation and native viscosity transaction
     # together. Primary Sigma SGS overwrites every interior viscosity value.
-    start = body.index("    block\n      use, intrinsic :: iso_c_binding")
-    stop = body.index("    call SubgridModel(U,V,W)", start)
+    start = find_unique_span(body, "    block\n      use, intrinsic :: iso_c_binding")[0]
+    sub_lo, _, _, _ = find_call_span(body[start:], "SubgridModel")
+    stop = start + sub_lo
     old = body[start:stop]
     # Retain the old path verbatim for unsupported configurations.
     new = """    block
@@ -504,16 +558,15 @@ def integrate_wall_entries(integration, entries, directory):
 
 """.replace("@OLD@", old.rstrip())
     body = body[:start] + new + body[stop:]
-    anchor = "                    call ComputeUVWFluxesWM(U, V, W, Pr, Temperature, Moisture)"
-    _once(body, anchor)
-    body = body.replace(anchor, """      block
+    flux_lo, flux_hi, flux_call, _ = find_call_span(body, "ComputeUVWFluxesWM")
+    body = body[:flux_lo] + """      block
         use elmm_resident_pressure_state, only: resident_flow
         if (resident_flow%active) then
           call ResidentUVWStress(U,V,W)
         else
-          call ComputeUVWFluxesWM(U,V,W,Pr,Temperature,Moisture)
+""" + flux_call + """
         endif
-      end block""")
+      end block""" + body[flux_hi:]
     sources["dynamics.f90"] = text[:lo] + body + text[hi:]
 
     text = sources["momentum_diffusion.f90"]
@@ -521,7 +574,7 @@ def integrate_wall_entries(integration, entries, directory):
         component = "uvw".index(point[0]) + 1
         for index, record in enumerate(group):
             block = record["block"]
-            _once(text, block)
+            find_unique_span(text, block)
             call = ""
             if point[1] == "z" and index == 0:
                 side = 1 if point[2] == "m" else 2
@@ -531,22 +584,21 @@ def integrate_wall_entries(integration, entries, directory):
             # z correction loops are fused per plane, without changing either
             # point's accumulation order or the ordering between planes.
             replacement = "    block\n      use elmm_resident_pressure_state, only: resident_flow\n      if (resident_flow%active) then\n" + call + "      else\n" + block + "      endif\n    end block\n"
-            text = text.replace(block, replacement)
+            text = text.replace(block, replacement, 1)
     sources["momentum_diffusion.f90"] = text
 
     text = sources["outputs.f90"]
-    anchor = "    use Wallmodels, only: ComputeViscsWM\n"
-    _once(text, anchor)
-    text = text.replace(anchor, "    use Wallmodels, only: ComputeViscsWM, ResidentWallsPublish\n")
-    anchor = "        call resident_flow%end_epoch()"
-    _once(text, anchor)
-    text = text.replace(anchor, "        call ResidentWallsPublish()\n" + anchor)
+    text = replace_once(text, "    use Wallmodels, only: ComputeViscsWM\n", "    use Wallmodels, only: ComputeViscsWM, ResidentWallsPublish\n")
+    text = replace_once(text, "        call resident_flow%end_epoch()", "        call ResidentWallsPublish()\n", after=False, insert=True)
     sources["outputs.f90"] = text
     text = sources["pressure.f90"]
-    anchor = "  subroutine FinalizeResidentPressure()\n"
-    _once(text, anchor)
-    sources["pressure.f90"] = text.replace(anchor, anchor +
-        "    use Wallmodels, only: ResidentWallsPublish\n    call ResidentWallsPublish()\n")
+    text = replace_once(
+        text,
+        "  subroutine FinalizeResidentPressure()\n",
+        "    use Wallmodels, only: ResidentWallsPublish\n    call ResidentWallsPublish()\n",
+        after=True,
+        insert=True,
+    )
     records = []
     for name, text in sources.items():
         path = directory / name

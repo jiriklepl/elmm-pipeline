@@ -5,7 +5,13 @@ and the five snapshotted fields are eligible. Other output retains the original
 coherent host path, after joining earlier snapshots. No application arithmetic
 or serializer is replaced. The worker owns a deep copy of each frame object.
 """
-from .gpu_hot_path import _once
+from .ast_rewrites import (
+    find_call_span,
+    find_once,
+    find_routine_span,
+    find_unique_span,
+    replace_once,
+)
 
 
 DECLARATIONS = """
@@ -160,21 +166,23 @@ PROCEDURES = """
 
 def asynchronous_frames(common, vtk, main):
     """Transform the checked source version; preserve native fallback bodies."""
-    anchor = "  use iso_c_binding, only: c_ptr"
-    _once(common, anchor)
-    common = common.replace(anchor, "  use, intrinsic :: iso_c_binding\n"
-                            "  use fort_scoped_memory, only: fort_scope_external_binding_v1")
-    anchor = "    logical :: in_progress = .false."
-    _once(common, anchor)
-    common = common.replace(anchor, anchor + "\n    logical :: resident_snapshot = .false.")
-    anchor = "  interface Add"
-    pos = _once(common, anchor)
-    common = common[:pos] + DECLARATIONS + "\n" + common[pos:]
-    anchor = "        block\n          use, intrinsic :: iso_c_binding"
-    pos = _once(common, anchor)
-    # Keep the existing read-only publication block for unsupported output.
-    end = _once(common, "        call D%DoSave") + len("        call D%DoSave")
-    original = common[pos:end]
+    common = replace_once(
+        common,
+        "  use iso_c_binding, only: c_ptr",
+        "  use, intrinsic :: iso_c_binding\n"
+        "  use fort_scoped_memory, only: fort_scope_external_binding_v1",
+    )
+    common = replace_once(
+        common,
+        "    logical :: in_progress = .false.",
+        "\n    logical :: resident_snapshot = .false.",
+        after=True,
+        insert=True,
+    )
+    common = replace_once(common, "  interface Add", DECLARATIONS + "\n", after=False, insert=True)
+    pos = find_once(common, "        block\n          use, intrinsic :: iso_c_binding")
+    _, dosave_hi, _, _ = find_call_span(common, "D%DoSave")
+    original = common[pos:dosave_hi]
     replacement = """        block
           use elmm_resident_pressure_state, only: resident_flow
           if (resident_flow%active .and. D%resident_snapshot .and. &
@@ -185,15 +193,14 @@ def asynchronous_frames(common, vtk, main):
 """ + original + """
           endif
         end block"""
-    common = common[:pos] + replacement + common[end:]
-    anchor = "end module"
-    pos = _once(common, anchor)
-    common = common[:pos] + PROCEDURES + "\n" + common[pos:]
+    common = common[:pos] + replacement + common[dosave_hi:]
+    common = replace_once(common, "end module", PROCEDURES + "\n", after=False, insert=True)
     # VTK Fill reads only snapshots plus immutable grid/type geometry in this
     # subset. Exclude LiquidWater/global thermodynamic helper paths explicitly.
-    anchor = "  end subroutine TFrameDomain_SetRest"
-    _once(vtk, anchor)
-    vtk = vtk.replace(anchor, """
+    vtk = replace_once(
+        vtk,
+        "  end subroutine TFrameDomain_SetRest",
+        """
     select type(D)
     type is(TFrameDomain)
       D%resident_snapshot = .not.enable_buoyancy .and. .not.enable_moisture .and. &
@@ -201,20 +208,32 @@ def asynchronous_frames(common, vtk, main):
     class default
       D%resident_snapshot = .false.
     end select
-""" + anchor)
-    lo = _once(vtk, "  subroutine SaveVTKFrames(")
-    hi = _once(vtk, "  subroutine FinalizeVTKFrames")
+""",
+        after=False,
+        insert=True,
+    )
+    lo, hi = find_routine_span(vtk, "SaveVTKFrames")
     body = vtk[lo:hi]
-    anchor = "      do i=1,size(FrameDomains)"
-    _once(body, anchor)
-    body = body.replace(anchor, "      call BeginResidentFrameBatch(size(FrameDomains))\n" + anchor)
-    anchor = "      end do"
-    _once(body, anchor)
-    body = body.replace(anchor, anchor + "\n      call FlushResidentFrameBatch()")
+    body = replace_once(
+        body,
+        "      do i=1,size(FrameDomains)",
+        "      call BeginResidentFrameBatch(size(FrameDomains))\n",
+        after=False,
+        insert=True,
+    )
+    body = replace_once(
+        body,
+        "      end do",
+        "\n      call FlushResidentFrameBatch()",
+        after=True,
+        insert=True,
+    )
     vtk = vtk[:lo] + body + vtk[hi:]
-    anchor = "    use Pressure, only: FinalizeResidentPressure\n    call FinalizeResidentPressure()"
-    _once(main, anchor)
-    main = main.replace(anchor, "    use Frames_common, only: FinalizeResidentOutput\n" +
-                        "    use Pressure, only: FinalizeResidentPressure\n" +
-                        "    call FinalizeResidentOutput()\n    call FinalizeResidentPressure()")
+    main = replace_once(
+        main,
+        "    use Pressure, only: FinalizeResidentPressure\n    call FinalizeResidentPressure()",
+        "    use Frames_common, only: FinalizeResidentOutput\n"
+        "    use Pressure, only: FinalizeResidentPressure\n"
+        "    call FinalizeResidentOutput()\n    call FinalizeResidentPressure()",
+    )
     return common, vtk, main

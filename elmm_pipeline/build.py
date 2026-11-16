@@ -19,6 +19,7 @@ import venv
 
 from .build_receipts import file_identity, snapshot_inputs, summarize_build
 from .gpu_toolchain import GPUSource, compile_gpu_sources, validate_gpu_sources
+from .project_profile import ProjectProfile
 
 
 SCONS_VERSION = "4.11.1"
@@ -456,6 +457,157 @@ def build(
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     build_manifest["build_receipts"] = {"path": str(receipt_path), "status": receipt["status"],
                                        "identity": receipt.get("identity")}
+    if application_token is not None:
+        from .application_build import attest
+
+        build_manifest["application_build"] = attest(application_build, application_token, receipt_path, build_dir)
+    (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
+    return binary
+
+
+def build_generic_project(
+    source_root: Path,
+    build_dir: Path,
+    *,
+    profile: ProjectProfile,
+    jobs: int = 1,
+    threads: int = 1,
+    extra_sources: list[Path] | None = None,
+    patched_sources: list[Path] | None = None,
+    gpu_sources: list[GPUSource] | list[dict] | None = None,
+    gpu_options: dict | None = None,
+    defines: list[str] | None = None,
+    application_build: dict | None = None,
+) -> Path:
+    """Build a generic Fortran project configured by a declarative ``ProjectProfile``."""
+    if jobs < 1 or threads < 1:
+        raise ValueError("jobs and threads must be positive")
+    source_root = Path(source_root).resolve(strict=True)
+    build_dir = Path(build_dir).resolve()
+    build_dir.mkdir(parents=True, exist_ok=True)
+    active_defines = list(profile.default_defines) if defines is None else list(defines)
+    sources = [Path(path).resolve(strict=True) for path in (extra_sources or [])]
+    patched = [Path(path).resolve(strict=True) for path in (patched_sources or [])]
+    gpu_units = validate_gpu_sources(gpu_sources or [])
+
+    input_roots = {
+        source_root,
+        *[p.parent for p in sources],
+        *[Path(u["source"]).parent for u in gpu_units],
+    }
+    input_hashes = snapshot_inputs(input_roots, exclude=[build_dir])
+
+    application_token = None
+    application_macros = None
+    if application_build is not None:
+        from .application_build import attest, preflight
+
+        application_token = preflight(application_build, build_dir)
+        application_macros = application_token["macros"]
+
+    gpu_build = (
+        compile_gpu_sources(
+            gpu_units,
+            build_dir,
+            gpu_options,
+            defines=active_defines,
+            jobs=jobs,
+            **({"application_macros": application_macros} if application_macros else {}),
+        )
+        if gpu_units
+        else None
+    )
+
+    binary = build_dir / profile.executable_name
+    gpu_objects = list(gpu_build["objects"]) if gpu_build else []
+    gpu_link_flags: list[str] = []
+    if gpu_build:
+        for d in gpu_build.get("library_dirs", []):
+            gpu_link_flags.append(f"-L{d}")
+        for lib in gpu_build.get("libraries", []):
+            gpu_link_flags.append(f"-l{lib}")
+        for rp in gpu_build.get("rpaths", []):
+            gpu_link_flags.append(f"-Wl,-rpath,{rp}")
+        gpu_link_flags.extend(gpu_build.get("link_flags", []))
+
+    env = _python_environment()
+    env["OMP_NUM_THREADS"] = str(threads)
+    env["OMP_DYNAMIC"] = "FALSE"
+    env["PIPELINE_SOURCE_ROOT"] = str(source_root)
+    env["PIPELINE_BUILD_DIR"] = str(build_dir)
+    env["PIPELINE_EXECUTABLE"] = str(binary)
+    env["PIPELINE_EXTRA_SOURCES"] = os.pathsep.join(str(p) for p in sources)
+    env["PIPELINE_GPU_OBJECTS"] = os.pathsep.join(str(p) for p in gpu_objects)
+    env["PIPELINE_LINK_FLAGS"] = " ".join(gpu_link_flags)
+
+    if profile.build_mode == "command":
+        placeholders = {
+            "{source_root}": str(source_root),
+            "{build_dir}": str(build_dir),
+            "{executable}": str(binary),
+            "{jobs}": str(jobs),
+            "{threads}": str(threads),
+        }
+        command: list[str] = []
+        for token in profile.build_command or ():
+            if token == "{extra_sources}":
+                command.extend(str(p) for p in sources)
+            elif token == "{gpu_objects}":
+                command.extend(str(p) for p in gpu_objects)
+            elif token == "{gpu_link_flags}":
+                command.extend(gpu_link_flags)
+            else:
+                expanded = token
+                for key, val in placeholders.items():
+                    expanded = expanded.replace(key, val)
+                command.append(expanded)
+        with (build_dir / "build.log").open("w", encoding="utf-8") as log:
+            completed = subprocess.run(command, cwd=source_root, env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+        commands_executed = [command]
+    elif profile.build_mode == "cmake":
+        cmake_dir = build_dir / "cmake"
+        configure_cmd = [
+            "cmake", "-S", str(source_root), "-B", str(cmake_dir),
+            "-DCMAKE_BUILD_TYPE=Release",
+        ]
+        build_cmd = ["cmake", "--build", str(cmake_dir), "--parallel", str(jobs)]
+        with (build_dir / "build.log").open("w", encoding="utf-8") as log:
+            c1 = subprocess.run(configure_cmd, cwd=source_root, env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+            completed = (
+                subprocess.run(build_cmd, cwd=source_root, env=env, stdout=log, stderr=subprocess.STDOUT, check=False)
+                if c1.returncode == 0
+                else c1
+            )
+        if not binary.is_file() and (cmake_dir / profile.executable_name).is_file():
+            shutil.copy2(cmake_dir / profile.executable_name, binary)
+        commands_executed = [configure_cmd, build_cmd]
+    else:
+        raise ValueError(f"Unsupported generic build_mode: {profile.build_mode}")
+
+    if completed.returncode != 0 or not binary.is_file():
+        raise RuntimeError(f"Project build failed for {profile.name}; inspect {build_dir / 'build.log'}")
+
+    build_manifest = {
+        "profile": profile.to_dict(),
+        "argv": commands_executed[-1],
+        "commands": commands_executed,
+        "cwd": str(source_root),
+        "preprocessing_defines": active_defines,
+        "extra_sources": [str(p) for p in sources],
+        "patched_sources": [str(p) for p in patched],
+    }
+    if gpu_build:
+        build_manifest["gpu"] = gpu_build
+    receipt = {
+        "schema_version": 1,
+        "kind": "application-build-receipts",
+        "status": "unavailable" if gpu_build is None else "generic",
+        "placement_authority": False,
+        "binary_sha256": file_identity(binary)["sha256"],
+        "input_hashes": input_hashes,
+    }
+    receipt_path = build_dir / "build-receipts.json"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     if application_token is not None:
         from .application_build import attest
 

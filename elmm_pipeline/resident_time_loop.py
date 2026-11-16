@@ -9,7 +9,12 @@ from pathlib import Path
 import json
 import re
 
-from .gpu_hot_path import _once, _routine
+from .ast_rewrites import (
+    find_call_span,
+    find_routine_span,
+    find_unique_span,
+    replace_once,
+)
 from .resident_rk import addressable_arrays, identity
 
 
@@ -144,12 +149,10 @@ def finalize_before_native(text):
     if "    use Frames_common, only: FinalizeResidentOutput\n" in text:
         finalizer = finalizer.replace("    use Pressure", "    use Frames_common, only: FinalizeResidentOutput\n    use Pressure")
         finalizer = finalizer.replace("    call FinalizeResidentPressure()", "    call FinalizeResidentOutput()\n    call FinalizeResidentPressure()")
-    _once(text, finalizer)
-    text = text.replace(finalizer, "")
+    text = replace_once(text, finalizer, "")
     diagnostic = "  block\n    use Dynamics, only: comparison_U2 => U2"
     anchor = diagnostic if diagnostic in text else "  call Dynamics_Deallocate"
-    position = _once(text, anchor)
-    return text[:position] + finalizer + text[position:]
+    return replace_once(text, anchor, finalizer, after=False, insert=True)
 
 
 def integrate_time_loop(integration, configured, entries, directory):
@@ -158,36 +161,45 @@ def integrate_time_loop(integration, configured, entries, directory):
     sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}
     originals = {Path(r["original"]["path"]).name: Path(r["prepared"]["path"]) for r in configured["sources"]}
     cut = "\n    if (resident_flow%joined) then\n      call resident_flow%end_epoch()\n      resident_flow%joined=.false.\n    endif\n"
-    _once(sources["tsteps.f90"], cut)
-    sources["tsteps.f90"] = sources["tsteps.f90"].replace(cut, "\n")
+    sources["tsteps.f90"] = replace_once(sources["tsteps.f90"], cut, "\n")
 
     # First-step setup remains native. Subsequent reached CFL work sees the
     # same domain as RK and output, including swapped physical allocations.
     text = sources["dynamics.f90"]
-    lo, hi = _routine(text, "TimeStepLength")
+    lo, hi = find_routine_span(text, "TimeStepLength")
     body = text[lo:hi]
     anchor = "    subroutine get_U_dx_max\n"
-    _once(body, anchor)
-    body = body.replace(anchor, anchor + """      use elmm_resident_pressure_state, only: resident_flow
+    body = replace_once(
+        body,
+        anchor,
+        """      use elmm_resident_pressure_state, only: resident_flow
       use elmm_resident_time_tasks, only: ResidentCFL
       if (resident_flow%active) then
         if (gridtype/=GRID_UNIFORM) error stop 'resident CFL requires uniform grid'
         call ResidentCFL(U,V,W,Prnx,Prny,Prnz,dxmin,dymin,dzmin,U_dx_max,nan)
         return
       endif
-""")
+""",
+        after=True,
+        insert=True,
+    )
     sources["dynamics.f90"] = text[:lo] + body + text[hi:]
 
     text = originals["outputs.f90"].read_text()
-    lo, hi = _routine(text, "OutTStep")
+    lo, hi = find_routine_span(text, "OutTStep")
     body = text[lo:hi]
-    anchor = "    use Wallmodels, only: ComputeViscsWM\n"
-    _once(body, anchor)
-    body = body.replace(anchor, anchor + "    use elmm_resident_pressure_state, only: resident_flow\n"
-                        "    use elmm_resident_time_tasks, only: ResidentAverage\n")
-    anchor = "    if (.not.called) then"
-    pos = _once(body, anchor)
-    body = body[:pos] + """    if (resident_flow%active) then
+    body = replace_once(
+        body,
+        "    use Wallmodels, only: ComputeViscsWM\n",
+        "    use elmm_resident_pressure_state, only: resident_flow\n"
+        "    use elmm_resident_time_tasks, only: ResidentAverage\n",
+        after=True,
+        insert=True,
+    )
+    body = replace_once(
+        body,
+        "    if (.not.called) then",
+        """    if (resident_flow%active) then
       if (size(probes)>0 .or. enable_profiles .or. store%probes_fluxes==1 .or. &
           store%tke==1 .or. store%avg_UU_prime>0 .or. Btype(To)==BC_AUTOMATIC_FLUX .or. &
           enable_buoyancy .or. enable_moisture .or. num_of_scalars>0) then
@@ -196,21 +208,30 @@ def integrate_time_loop(integration, configured, entries, directory):
       endif
     endif
 
-""" + body[pos:]
+""",
+        after=False,
+        insert=True,
+    )
     for field, offset in (("U", "0,0,0"), ("V", "0,0,0"), ("W", "0,0,0"), ("Pr", "2,2,2")):
         original = f"{field}_avg = {field}_avg + {field}" + ("(1:Prnx,1:Prny,1:Prnz)" if field == "Pr" else "") + " * time_weight"
-        _once(body, original)
-        body = body.replace(original, f"""if (resident_flow%active) then
+        s_lo, s_hi = find_unique_span(body, original)
+        matched = body[s_lo:s_hi]
+        body = (
+            body[:s_lo]
+            + f"""if (resident_flow%active) then
           call ResidentAverage({field},{field}_avg,lbound({field}),lbound({field}_avg),[{offset}],time_weight)
         else
-          {original}
-        endif""")
+          {matched}
+        endif"""
+            + body[s_hi:]
+        )
     sources["outputs.f90"] = text[:lo] + body + text[hi:]
 
     text = originals["frames_common.f90"].read_text()
-    anchor = "        call D%Fill(U, V, W, Pr, Viscosity, Temperature, Moisture, Scalar)"
-    pos = _once(text, anchor)
-    text = text[:pos] + """        block
+    f_lo, f_hi, f_call, _ = find_call_span(text, "D%Fill")
+    text = (
+        text[:f_lo]
+        + """        block
           use, intrinsic :: iso_c_binding
           use elmm_resident_pressure_state, only: resident_flow
           integer(c_int64_t) :: frame_reads(5)
@@ -223,7 +244,10 @@ def integrate_time_loop(integration, configured, entries, directory):
             call resident_flow%observe(frame_reads)
           endif
         end block
-""" + text[pos:]
+"""
+        + f_call
+        + text[f_hi:]
+    )
     sources["frames_common.f90"] = text
     # Their derived-type bindings import the changed frame declaration.
     for name in ("vtkframes.f90", "frames.f90", "surfacemapframes.f90"):
