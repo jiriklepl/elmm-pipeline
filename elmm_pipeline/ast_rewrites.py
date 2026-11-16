@@ -430,13 +430,18 @@ def find_routine_span(text: str, name: str, *, kind: str = "subroutine") -> tupl
     start_pat = re.compile(
         rf"(?im)^[ \t]*(?:(?:pure|elemental|recursive|impure|module)\s+)*{kind}\s+{re.escape(name)}\b(?:\s*\(|[ \t]*(?:!.*)?$)"
     )
-    end_pat = re.compile(
-        rf"(?im)^[ \t]*end\s*{kind}(?:\s+{re.escape(name)})?\b[^\n]*"
-    )
     starts = list(start_pat.finditer(text))
-    ends = list(end_pat.finditer(text))
-    if len(starts) == 1 and len(ends) == 1 and starts[0].start() < ends[0].start():
-        return starts[0].start(), ends[0].end()
+    if len(starts) == 1:
+        named_end = re.search(
+            rf"(?im)^[ \t]*end\s*{kind}\s+{re.escape(name)}\b[^\n]*",
+            text[starts[0].end():],
+        )
+        end = named_end or re.search(
+            rf"(?im)^[ \t]*end\s*{kind}[ \t]*(?:!.*)?$",
+            text[starts[0].end():],
+        )
+        if end is not None:
+            return starts[0].start(), starts[0].end() + end.end()
     raise ValueError(f"Expected one complete original {name} procedure")
 
 
@@ -492,7 +497,7 @@ def _split_top_level_args(arg_str: str) -> list[str]:
 def find_all_calls(text: str, callee_name: str) -> list[tuple[int, int, str, list[str]]]:
     """Find all non-comment ``call <callee_name>(...)`` occurrences in ``text``."""
     mask = _comment_mask(text)
-    pattern = re.compile(rf"(?im)(?:^[ \t]*|(?<=\))\s*)call\s+{re.escape(callee_name)}\b")
+    pattern = re.compile(rf"(?im)(?:^[ \t]*|(?<=\))[ \t]*)call\s+{re.escape(callee_name)}\b")
     results: list[tuple[int, int, str, list[str]]] = []
     n = len(text)
     for m in pattern.finditer(text):
@@ -1158,7 +1163,7 @@ def promote_line_snapshots(
             raise ValueError(f"Missing procedure end in {rname}")
         release_block = (
             "\n    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-            f"      call resident_flow%release_real64({tmp_name})\n    end block\n"
+            f"      call resident_flow%release_real({tmp_name})\n    end block\n"
         )
         body = body[: ending.start()] + release_block + body[ending.start() :]
         text = text[:r_lo] + body + text[r_hi:]

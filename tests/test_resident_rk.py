@@ -184,3 +184,26 @@ def test_generated_bindings_include_source_origins(tmp_path):
     assert len(result["sources"]) == 1
     assert "bind_real64(u,lbound(u),.true., &\n          origin='example::update::u')" in generated
     assert "bind_integer32(mask,lbound(mask),.true., &\n          origin='example::update::mask')" in generated
+
+
+def test_configured_sources_skips_include_fragments_and_discover_excludes_inc(tmp_path):
+    from elmm_pipeline.resident_build import discover_application_units
+    from elmm_pipeline.resident_rk import configured_sources
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "list-inc-def.f90").write_text("  type list_node\n    TYPEPARAM :: item\n  end type\n")
+    (src / "list-inc-proc.f90").write_text("  subroutine add(item)\n    TYPEPARAM :: item\n  end subroutine\n")
+    (src / "mod.f90").write_text("module m\ncontains\nsubroutine s()\nend subroutine\nend module\n")
+    units, _ = discover_application_units(src)
+    assert units == ["mod"]
+    gfortran = shutil.which("gfortran") or shutil.which("gfortran-15")
+    if gfortran:
+        configured = configured_sources(
+            [src / "list-inc-def.f90", src / "mod.f90"],
+            ["m::s"],
+            tmp_path / "configured",
+            fortran_compiler=gfortran,
+            defines=[],
+        )
+        assert len(configured["sources"]) == 2

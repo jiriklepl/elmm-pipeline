@@ -16,8 +16,12 @@ module elmm_resident_pressure_state
     logical :: joined=.false.
   contains
     procedure :: start => pressure_start
-    procedure :: bind3 => pressure_bind3
-    procedure :: bind1 => pressure_bind1
+    procedure :: pressure_bind3_f32
+    procedure :: pressure_bind3_f64
+    generic :: bind3 => pressure_bind3_f32, pressure_bind3_f64
+    procedure :: pressure_bind1_f32
+    procedure :: pressure_bind1_f64
+    generic :: bind1 => pressure_bind1_f32, pressure_bind1_f64
     procedure :: solve => pressure_solve
     procedure :: halo => pressure_halo
     procedure :: observe_scratch => pressure_observe_scratch
@@ -32,7 +36,8 @@ contains
       if (any(self%config%solver%sizes /= config%solver%sizes) .or. &
           any(self%config%solver%lengths /= config%solver%lengths) .or. &
           any(self%config%solver%boundary_conditions /= config%solver%boundary_conditions) .or. &
-          self%config%solver%approximation /= config%solver%approximation) then
+          self%config%solver%approximation /= config%solver%approximation .or. &
+          self%config%solver%flags /= config%solver%flags) then
         if (self%joined) error stop 'pressure configuration changed inside an RK epoch'
         call self%finish()
       endif
@@ -44,7 +49,18 @@ contains
     endif
   end subroutine
 
-  function pressure_bind3(self, values, lower, initialized, persistent, origin) result(handle)
+  function pressure_bind3_f32(self, values, lower, initialized, persistent, origin) result(handle)
+    class(resident_pressure_state), intent(inout) :: self
+    real(c_float), contiguous, target, intent(in) :: values(:,:,:)
+    integer, intent(in) :: lower(3)
+    logical, intent(in) :: initialized
+    logical, optional, intent(in) :: persistent
+    character(*), optional, intent(in) :: origin
+    integer(c_int64_t) :: handle
+    handle=self%bind_real32(values,lower,initialized,persistent,origin)
+  end function
+
+  function pressure_bind3_f64(self, values, lower, initialized, persistent, origin) result(handle)
     class(resident_pressure_state), intent(inout) :: self
     real(c_double), contiguous, target, intent(in) :: values(:,:,:)
     integer, intent(in) :: lower(3)
@@ -55,7 +71,17 @@ contains
     handle=self%bind_real64(values,lower,initialized,persistent,origin)
   end function
 
-  function pressure_bind1(self, values, lower, initialized, origin) result(handle)
+  function pressure_bind1_f32(self, values, lower, initialized, origin) result(handle)
+    class(resident_pressure_state), intent(inout) :: self
+    real(c_float), contiguous, target, intent(in) :: values(:)
+    integer, intent(in) :: lower(1)
+    logical, intent(in) :: initialized
+    character(*), optional, intent(in) :: origin
+    integer(c_int64_t) :: handle
+    handle=self%bind_real32(values,lower,initialized,origin=origin)
+  end function
+
+  function pressure_bind1_f64(self, values, lower, initialized, origin) result(handle)
     class(resident_pressure_state), intent(inout) :: self
     real(c_double), contiguous, target, intent(in) :: values(:)
     integer, intent(in) :: lower(1)

@@ -137,6 +137,37 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(environment["OMP_DYNAMIC"], "FALSE")
         self.assertEqual(environment["OPENBLAS_NUM_THREADS"], "1")
 
+    def test_grid_domain_time_stepping_and_re_overrides(self):
+        (self.source / "grid.conf").write_text(
+            "F\nF\nF\n-6\n-2\n0\n12\n4\n2\n128\n64\n64\n"
+        )
+        (self.source / "main.conf").write_text(
+            "\n".join(["4", "3", "1.5", "1", "0", "0", "0", "40", "50", "70000", "1E-7", "8", "1E-9", "0.0001"]) + "\n"
+        )
+        metadata = prepare_config(
+            self.source,
+            self.destination,
+            grid="64x32x32",
+            domain_size="6,2,1",
+            end_time=1.5,
+            cfl=0.25,
+            re_number=10000,
+        )
+        self.assertEqual(metadata["overrides"]["grid"], {"nx": 64, "ny": 32, "nz": 32})
+        self.assertEqual(metadata["overrides"]["domain_size"], {"lx": 6.0, "ly": 2.0, "lz": 1.0})
+        self.assertEqual(metadata["overrides"]["end_time"], 1.5)
+        self.assertEqual(metadata["overrides"]["cfl"], 0.25)
+        self.assertEqual(metadata["overrides"]["re"], 10000.0)
+        grid_lines = [line.split("!")[0].strip() for line in (self.destination / "grid.conf").read_text().splitlines()
+                      if line.split("!")[0].strip()]
+        self.assertEqual(grid_lines[6:12], ["6", "2", "1", "64", "32", "32"])
+        main_lines = [line.split("!")[0].strip() for line in (self.destination / "main.conf").read_text().splitlines()
+                      if line.split("!")[0].strip()]
+        self.assertEqual(main_lines[9], "10000")
+        ts_text = (self.destination / "time_stepping.conf").read_text()
+        self.assertIn("end_time = 1.5", ts_text)
+        self.assertIn("CFL = 0.25", ts_text)
+
 
 def successful_log(steps=7, ending=""):
     return (f"tstep: 1\ntstep: {steps}\n{ending}\n"

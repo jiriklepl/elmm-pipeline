@@ -95,7 +95,8 @@ def scoped_configuration(args):
 def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile | None = None, explicit_source_root: Path | None = None):
     profile = profile or ProjectProfile()
     generic_mode = profile.build_mode != "scons-elmm" or explicit_source_root is not None
-    defines = list(profile.default_defines) if generic_mode else preprocessing_defines(args.build_arg)
+    precision = getattr(args, "precision", "dp")
+    defines = list(profile.default_defines) if generic_mode else preprocessing_defines(args.build_arg, precision=precision)
     repositories = ROOT / ".cache" / "repos"
     if generic_mode:
         if explicit_source_root is None:
@@ -246,6 +247,7 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
                        extra_sources=[Path(p) for p in adapter.get("extra_sources", [])],
                        patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
                        gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain,
+                       precision=precision,
                        **({"pressure_backend": adapter["pressure_backend"]} if "pressure_backend" in adapter else {}),
                        **({"application_build": adapter["application_build"]} if "application_build" in adapter else {}))
     data = {"identity": key_data, "adapter": adapter,
@@ -270,7 +272,8 @@ def run(args):
     )
     generic_mode = profile.build_mode != "scons-elmm" or explicit_source_root is not None
     scope_options = scoped_configuration(args)
-    defines = list(profile.default_defines) if generic_mode else preprocessing_defines(args.build_arg)
+    precision = getattr(args, "precision", "dp")
+    defines = list(profile.default_defines) if generic_mode else preprocessing_defines(args.build_arg, precision=precision)
     if args.gpu_policy not in {"sections", "auto"}:
         raise ValueError("Ordinary GPU policies were removed; use sections or auto")
     if args.calibration_profile:
@@ -329,7 +332,10 @@ def run(args):
         raise ValueError(f"Output directory must be new: {destination}")
     destination.mkdir(parents=True)
     configuration = prepare_config(
-        source, destination / "config", steps=args.steps, advection=args.advection, profile=profile
+        source, destination / "config", steps=args.steps, advection=args.advection,
+        grid=getattr(args, "grid", None), domain_size=getattr(args, "domain_size", None),
+        end_time=getattr(args, "end_time", None), cfl=getattr(args, "cfl", None),
+        re_number=getattr(args, "re", None), profile=profile,
     )
     configuration["sha256"] = digest_tree(destination / "config")
     configuration["original_sha256"] = digest_tree(source if source.is_dir() else source.parent)
@@ -346,6 +352,7 @@ def run(args):
                                 "sha256": hashlib.sha256(args.calibration_profile.read_bytes()).hexdigest()}
                                 if args.calibration_profile else None),
                            "timeout_seconds": args.timeout, "atol": args.atol, "rtol": args.rtol,
+                           "precision": precision,
                            "build_args": args.build_arg,
                            "preprocessor_defines": defines,
                            "source_patterns": args.source_pattern, "selection": args.select,
@@ -583,13 +590,20 @@ def main():
                          help="Profile separate GPU validation runs; measured runs never use profiling")
     measure.add_argument("--steps", type=positive, help="Explicit cap; omitted preserves the original duration")
     measure.add_argument("--advection", type=int, choices=(2, 4, 5, 6), help="Explicitly override main.conf method")
+    measure.add_argument("--precision", choices=("dp", "sp"), default="dp",
+                         help="Floating-point precision: dp (double, default) or sp (single)")
+    measure.add_argument("--grid", help="Override grid cell counts as NXxNYxNZ or NX,NY,NZ")
+    measure.add_argument("--domain-size", help="Override domain lengths as LXxLYxLZ or LX,LY,LZ")
+    measure.add_argument("--end-time", type=float, help="Override time_stepping.conf end_time")
+    measure.add_argument("--cfl", type=float, help="Override time_stepping.conf CFL")
+    measure.add_argument("--re", type=float, help="Override main.conf Reynolds number Re")
     measure.add_argument("--threads", type=positive, default=4)
     measure.add_argument("--jobs", type=positive, default=min(8, os.cpu_count() or 1))
     measure.add_argument("--repeats", type=positive, default=3)
     measure.add_argument("--warmups", type=int, default=1)
     measure.add_argument("--timeout", type=positive, default=3600, help="Maximum seconds per application process")
-    measure.add_argument("--atol", type=float, default=1e-6)
-    measure.add_argument("--rtol", type=float, default=1e-5)
+    measure.add_argument("--atol", type=float, default=None)
+    measure.add_argument("--rtol", type=float, default=None)
     measure.add_argument("--output", help="New result directory (default: results/<UTC timestamp>)")
     measure.add_argument("--build-arg", action="append", default=[], help="Repeat SCons name=value options, including custom hooks")
     measure.add_argument("--fc", help="GNU Fortran compiler executable (e.g. gfortran-15)")
@@ -618,6 +632,10 @@ def main():
             print(f"Discovered {len(data['regions'])} eligible regions; diagnostics in {args.output}")
         else:
             args.source_pattern = args.source_pattern or ["**/*.f90"]
+            if args.atol is None:
+                args.atol = 5e-3 if getattr(args, "precision", "dp") == "sp" else 1e-6
+            if args.rtol is None:
+                args.rtol = 5e-3 if getattr(args, "precision", "dp") == "sp" else 1e-5
             if any(not math.isfinite(t) or t < 0 for t in (args.atol, args.rtol)):
                 raise ValueError("Validation tolerances must be finite and nonnegative")
             run(args)

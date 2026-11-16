@@ -80,13 +80,13 @@ def _verify_wall_helpers(source):
     return digests
 
 
-def _norm3(result, values):
+def _norm3(result, values, kind_suffix="_8"):
     """The pinned GNU Fortran NORM2 lowering, including scaling and order."""
-    lines = ["norm_scale=1._8", "norm_value=0._8"]
+    lines = [f"norm_scale=1.{kind_suffix}", f"norm_value=0.{kind_suffix}"]
     for value in values:
-        lines += [f"if ({value}/=0._8) then", f"  norm_abs=abs({value})",
+        lines += [f"if ({value}/=0.{kind_suffix}) then", f"  norm_abs=abs({value})",
                   "  if (norm_abs>norm_scale) then", "    norm_ratio=norm_scale/norm_abs",
-                  "    norm_value=(norm_ratio*norm_ratio)*norm_value+1._8", "    norm_scale=norm_abs",
+                  f"    norm_value=(norm_ratio*norm_ratio)*norm_value+1.{kind_suffix}", "    norm_scale=norm_abs",
                   "  else", "    norm_ratio=norm_abs/norm_scale",
                   "    norm_value=norm_ratio*norm_ratio+norm_value", "  endif", "endif"]
     return "\n".join(lines + [f"{result}=sqrt(norm_value)*norm_scale"])
@@ -105,11 +105,13 @@ def _shift_arrays(text, arrays):
     return text
 
 
-def _stress_source(original, component):
+def _stress_source(original, component, *, precision="dp"):
+    real_type = "real(8)" if precision == "dp" else "real(4)"
+    kind_suffix = "_8" if precision == "dp" else "_4"
     if component == 0:
-        velocities = """v1=(U(i,j,k)+U(i-1,j,k))/2._8
-v2=(V(i,j,k)+V(i,j-1,k))/2._8
-v3=(W(i,j,k)+W(i,j,k-1))/2._8"""
+        velocities = f"""v1=(U(i,j,k)+U(i-1,j,k))/2.{kind_suffix}
+v2=(V(i,j,k)+V(i,j-1,k))/2.{kind_suffix}
+v3=(W(i,j,k)+W(i,j,k-1))/2.{kind_suffix}"""
     else:
         try:
             lv_lo, lv_hi = find_routine_span(original, "local_velocity", kind="function")
@@ -129,13 +131,13 @@ v3=(W(i,j,k)+W(i,j,k-1))/2._8"""
         velocities = body[:stop.start()]
         for old, new in (("xi", "i"), ("yj", "j"), ("zk", "k")):
             velocities = re.sub(r"\b" + old + r"\b", new, velocities, flags=re.I)
-        velocities = re.sub(r"vel\((\d)\)", r"v\1", velocities, flags=re.I).replace("_knd", "_8")
+        velocities = re.sub(r"vel\((\d)\)", r"v\1", velocities, flags=re.I).replace("_knd", kind_suffix)
     velocities = _shift_arrays(velocities, dict(U=3, V=3, W=3))
     # A bounded active flag preserves the original convergence/50-iteration
     # ordering while keeping the point loop expressible by ordinary lowering.
     flux = "" if component == 0 else f"""
-{_norm3('mag', ('v1', 'v2', 'v3'))}
-if (mag>sqrt(epsilon(1._8))) then
+{_norm3('mag', ('v1', 'v2', 'v3'), kind_suffix)}
+if (mag>sqrt(epsilon(1.{kind_suffix}))) then
   fval=(v{component}/mag)*star**2*reciprocal
   if (direction==5) fval=-fval
 else
@@ -148,32 +150,32 @@ flux(i,j)=fval
 implicit none
 contains
 subroutine stress({args})
-real(8), intent(in) :: u(:,:,:),v(:,:,:),w(:,:,:)
-real(8), intent(inout) :: ustar(:,:)
-{"real(8), intent(out) :: flux(:,:)" if component else ""}
+{real_type}, intent(in) :: u(:,:,:),v(:,:,:),w(:,:,:)
+{real_type}, intent(inout) :: ustar(:,:)
+{f"{real_type}, intent(out) :: flux(:,:)" if component else ""}
 integer, value, intent(in) :: nx,ny,k
-real(8), value, intent(in) :: distance_z,viscosity
-{"real(8), value, intent(in) :: reciprocal" if component else ""}
+{real_type}, value, intent(in) :: distance_z,viscosity
+{f"{real_type}, value, intent(in) :: reciprocal" if component else ""}
 {"integer, value, intent(in) :: direction" if component else ""}
 integer :: i,j,iteration,done
-real(8) :: v1,v2,v3,dot,dist,vel,mag,star,star2,lam,zpl,fval
-real(8) :: norm_scale,norm_value,norm_ratio,norm_abs
+{real_type} :: v1,v2,v3,dot,dist,vel,mag,star,star2,lam,zpl,fval
+{real_type} :: norm_scale,norm_value,norm_ratio,norm_abs
 do j=1,ny
  do i=1,nx
   {velocities}
-  {_norm3('dist', ('0._8', '0._8', 'distance_z'))}
-  v1=v1-0._8
-  v2=v2-0._8
-  v3=v3-0._8
-  dot=((0._8+v1*0._8)+v2*0._8)+v3*distance_z
-  v1=v1-dot*0._8/dist**2
-  v2=v2-dot*0._8/dist**2
+  {_norm3('dist', (f'0.{kind_suffix}', f'0.{kind_suffix}', 'distance_z'), kind_suffix)}
+  v1=v1-0.{kind_suffix}
+  v2=v2-0.{kind_suffix}
+  v3=v3-0.{kind_suffix}
+  dot=((0.{kind_suffix}+v1*0.{kind_suffix})+v2*0.{kind_suffix})+v3*distance_z
+  v1=v1-dot*0.{kind_suffix}/dist**2
+  v2=v2-dot*0.{kind_suffix}/dist**2
   v3=v3-dot*distance_z/dist**2
-  {_norm3('vel', ('v1', 'v2', 'v3'))}
+  {_norm3('vel', ('v1', 'v2', 'v3'), kind_suffix)}
   star=ustar(i,j)
   if (vel/=0) then
     lam=sqrt(viscosity*vel/dist)
-    if (dist*lam/viscosity<5._8) then
+    if (dist*lam/viscosity<5.{kind_suffix}) then
       star=lam
     else
       done=0
@@ -181,14 +183,14 @@ do j=1,ny
         if (done==0) then
           star2=star
           zpl=dist*star2/viscosity
-          if (zpl<=5._8) then
+          if (zpl<=5.{kind_suffix}) then
             star=sqrt(viscosity*vel/dist)
-          else if (zpl<30._8) then
+          else if (zpl<30.{kind_suffix}) then
             star=vel/(5*log(zpl)-3.05)
           else
-            star=vel/(log(zpl)/0.4_8+5.5_8)
+            star=vel/(log(zpl)/0.4{kind_suffix}+5.5{kind_suffix})
           endif
-          if (abs(star-star2)/abs(star)<1e-4_8) then
+          if (abs(star-star2)/abs(star)<1e-4{kind_suffix}) then
             done=1
           else if (iteration>=50) then
             star=0
@@ -226,15 +228,17 @@ def _corrections(integration):
     return groups
 
 
-def generate_wall_entries(integration, compiler_root, python, directory):
+def generate_wall_entries(integration, compiler_root, python, directory, *, precision="dp"):
     from .local_adapter import transform
 
+    real_type = "real(8)" if precision == "dp" else "real(4)"
+    kind_suffix = "_8" if precision == "dp" else "_4"
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     wall = next(r for r in integration["sources"] if Path(r["path"]).name == "wallmodels.f90")
     original = Path(wall["path"]).read_text()
     helpers = _verify_wall_helpers(original)
-    sources = {"stress" + str(c): (_stress_source(original, c), f"resident_wall_stress_{c}::stress") for c in range(4)}
+    sources = {"stress" + str(c): (_stress_source(original, c, precision=precision), f"resident_wall_stress_{c}::stress") for c in range(4)}
     groups = _corrections(integration)
     for component, letter in enumerate("uvw", 1):
         for side in "mp":
@@ -254,14 +258,14 @@ def generate_wall_entries(integration, compiler_root, python, directory):
 implicit none
 contains
 subroutine correction(result,velocity,nu,flux,nx,ny,k,recdzmin2)
-real(8), intent(inout) :: result(:,:,:)
-real(8), intent(in) :: velocity(:,:,:),nu(:,:,:),flux(:,:)
+{real_type}, intent(inout) :: result(:,:,:)
+{real_type}, intent(in) :: velocity(:,:,:),nu(:,:,:),flux(:,:)
 integer, value, intent(in) :: nx,ny,k
-real(8), value, intent(in) :: recdzmin2
+{real_type}, value, intent(in) :: recdzmin2
 integer :: i,j
 do j=1,ny
  do i=1,nx
-{statements.replace('_knd', '_8')}
+{statements.replace('_knd', kind_suffix)}
  enddo
 enddo
 end subroutine
@@ -421,15 +425,15 @@ def _driver(entries):
     integer(c_int64_t) :: handles(3),star_handle,flux_handle
     integer :: side
     if (resident_wall_epoch/=resident_flow%generation) error stop 'wall epoch not prepared'
-    handles(1)=resident_flow%bind_real64(U,lbound(U),.true.,origin='walls::stress::u')
-    handles(2)=resident_flow%bind_real64(V,lbound(V),.true.,origin='walls::stress::v')
-    handles(3)=resident_flow%bind_real64(W,lbound(W),.true.,origin='walls::stress::w')
+    handles(1)=resident_flow%bind_real(U,lbound(U),.true.,origin='walls::stress::u')
+    handles(2)=resident_flow%bind_real(V,lbound(V),.true.,origin='walls::stress::v')
+    handles(3)=resident_flow%bind_real(W,lbound(W),.true.,origin='walls::stress::w')
     do side=1,2
       associate(p=>resident_planes(side,component))
         if (p%nx==0) cycle
-        star_handle=resident_flow%bind_real64(p%star,[1,1],.true.,origin='walls::stress::star')
+        star_handle=resident_flow%bind_real(p%star,[1,1],.true.,origin='walls::stress::star')
         flux_handle=0
-        if (component>0) flux_handle=resident_flow%bind_real64(p%flux,[1,1],.false.,origin='walls::stress::flux')
+        if (component>0) flux_handle=resident_flow%bind_real(p%flux,[1,1],.false.,origin='walls::stress::flux')
         select case(component)
 @STRESS@
         end select
@@ -449,10 +453,10 @@ def _driver(entries):
     if (resident_wall_epoch/=resident_flow%generation) error stop 'wall correction outside prepared epoch'
     associate(p=>resident_planes(side,component))
       if (p%nx==0) return
-      handles(1)=resident_flow%bind_real64(result,lbound(result),.true.,origin='walls::correction::result')
-      handles(2)=resident_flow%bind_real64(velocity,lbound(velocity),.true.,origin='walls::correction::velocity')
-      handles(3)=resident_flow%bind_real64(nu,lbound(nu),.true.,origin='walls::correction::nu')
-      flux_handle=resident_flow%bind_real64(p%flux,[1,1],.false.,origin='walls::correction::flux')
+      handles(1)=resident_flow%bind_real(result,lbound(result),.true.,origin='walls::correction::result')
+      handles(2)=resident_flow%bind_real(velocity,lbound(velocity),.true.,origin='walls::correction::velocity')
+      handles(3)=resident_flow%bind_real(nu,lbound(nu),.true.,origin='walls::correction::nu')
+      flux_handle=resident_flow%bind_real(p%flux,[1,1],.false.,origin='walls::correction::flux')
       select case(component*10+side)
 @CORRECTION@
       end select
@@ -478,7 +482,7 @@ def _driver(entries):
       do side=1,last_side
         associate(p=>resident_planes(side,component))
           if (p%nx==0) cycle
-          handle=resident_flow%bind_real64(p%star,[1,1],.true.,origin='walls::publish::star')
+          handle=resident_flow%bind_real(p%star,[1,1],.true.,origin='walls::publish::star')
           call resident_flow%observe([handle])
           if (component==0) then
             do j=1,p%ny
@@ -489,7 +493,7 @@ def _driver(entries):
           else
             points=>WMPointsUVW(side+4,component)%points
             if (.not.diagnostics) then
-              handle=resident_flow%bind_real64(p%flux,[1,1],.false.,origin='walls::publish::flux')
+              handle=resident_flow%bind_real(p%flux,[1,1],.false.,origin='walls::publish::flux')
               call resident_flow%observe([handle])
             endif
             do j=1,p%ny

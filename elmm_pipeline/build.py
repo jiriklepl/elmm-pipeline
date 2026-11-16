@@ -46,13 +46,16 @@ PREPROCESSOR_SWITCHES = {
 }
 
 
-def preprocessing_defines(extra_args: list[str]) -> list[str]:
+def preprocessing_defines(extra_args: list[str], *, precision: str = "dp") -> list[str]:
     """Validate supported build options and return their exact active macros.
 
-    Analysis and compilation both use GNU Fortran, -O3, -fopenmp and DPREC.
+    Analysis and compilation both use GNU Fortran, -O3, -fopenmp and the
+    selected precision (DPREC for dp, omitted for sp).
     Arbitrary compiler flags and compiler-family/ABI changes need a richer build
     description before they can be supported; reject them before discovery.
     """
+    if precision not in {"dp", "sp"}:
+        raise ValueError(f"Unsupported precision {precision!r}: expected 'dp' or 'sp'")
     protected = {"dir", "prec", "mpi", "openmp", "comp", "cray", "ompp"}
     booleans = set(PREPROCESSOR_SWITCHES) | {"fast", "lto", "prof", "diag", "cgal", "aggressive", "sanitize"}
     paths_or_libraries = {"SB", "PB", "lapack_blas"}
@@ -74,7 +77,8 @@ def preprocessing_defines(extra_args: list[str]) -> list[str]:
         elif key not in paths_or_libraries:
             raise ValueError(f"Unsupported build argument {argument!r}: unknown option; use supported named SCons options")
         options[key] = value
-    return ["DPREC", *[macro for key, macro in PREPROCESSOR_SWITCHES.items() if options.get(key) == "yes"]]
+    base = ["DPREC"] if precision == "dp" else []
+    return [*base, *[macro for key, macro in PREPROCESSOR_SWITCHES.items() if options.get(key) == "yes"]]
 
 
 def _python_environment() -> dict[str, str]:
@@ -190,6 +194,7 @@ def build(
     gpu_options: dict | None = None,
     application_build: dict | None = None,
     pressure_backend: dict | None = None,
+    precision: str = "dp",
 ) -> Path:
     """Build double-precision ELMM and return the absolute executable path.
 
@@ -219,7 +224,7 @@ def build(
         )
     if not (poisfft_root / "src" / "poisfft.f90").is_file():
         raise ValueError(f"Invalid PoisFFT source tree: {poisfft_root}")
-    defines = preprocessing_defines(extra_args)
+    defines = preprocessing_defines(extra_args, precision=precision)
     sources = [Path(path).resolve() for path in (extra_sources or [])]
     for path in sources:
         if not path.is_file() or path.suffix.lower() not in {".f90", ".f", ".cpp", ".cc", ".c"}:
@@ -413,7 +418,7 @@ def build(
     env["OMP_DYNAMIC"] = "FALSE"
     command = [
         str(scons_python), "-m", "SCons", "-f", script.name, "-j", str(jobs),
-        "fast=yes", "aggressive=no", "lto=no", "openmp=yes", "prec=dp",
+        "fast=yes", "aggressive=no", "lto=no", "openmp=yes", f"prec={precision}",
         f"dir={build_dir}", *extra_args,
     ]
     build_manifest = {"argv": command, "cwd": str(source_dir),

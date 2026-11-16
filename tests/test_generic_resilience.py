@@ -284,7 +284,7 @@ end module filters_mod
     assert "tmp((i+ii),j,k)" in text
     assert "tmp(i,(j+jj),k)" in text
     assert "tmp(i,j,(k+kk))" in text
-    assert "resident_flow%release_real64(tmp)" in text
+    assert "resident_flow%release_real(tmp)" in text
 
 
 def test_divergence_expression_and_pressure_stencils_renamed_args(tmp_path: Path) -> None:
@@ -767,8 +767,8 @@ contains
   subroutine Convection()
     block
       use elmm_resident_pressure_state, only: resident_flow
-      call resident_flow%release_real64(beta)
-      call resident_flow%release_real64(rho)
+      call resident_flow%release_real(beta)
+      call resident_flow%release_real(rho)
     end block
   end subroutine Convection
 end module Dynamics
@@ -793,7 +793,7 @@ contains
       origin='filters::filter3ord::tmp')
     block
       use elmm_resident_pressure_state, only: resident_flow
-      call resident_flow%release_real64(tmp)
+      call resident_flow%release_real(tmp)
     end block
   end subroutine Filter3ord
 end module Filters
@@ -805,6 +805,6 @@ end module Filters
         tmp_path / "ws_out",
     )
     filt_out = (tmp_path / "ws_out" / "filters.f90").read_text(encoding="utf-8")
-    assert "acquire_work_real64_3" in filt_out
-    assert "release_work_real64_3" in filt_out
+    assert "acquire_work_real_3" in filt_out
+    assert "release_work_real_3" in filt_out
     assert len(ws["sources"]) == 3

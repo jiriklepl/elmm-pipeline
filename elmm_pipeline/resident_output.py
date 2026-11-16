@@ -81,8 +81,8 @@ PROCEDURES = """
     integer(c_size_t) :: total
     integer(c_int32_t) :: slot
     integer :: i
-    bytes=8_c_size_t*[size(U,kind=c_size_t),size(V,kind=c_size_t),size(W,kind=c_size_t), &
-                     size(Pr,kind=c_size_t),size(Viscosity,kind=c_size_t)]
+    bytes=int(storage_size(0._knd)/8,c_size_t)*[size(U,kind=c_size_t),size(V,kind=c_size_t), &
+                     size(W,kind=c_size_t),size(Pr,kind=c_size_t),size(Viscosity,kind=c_size_t)]
     total=sum(bytes)
     if (.not.c_associated(resident_output_queue)) then
       call pressure_require(fort_snapshot_create_v1(resident_flow%domain,total,268435456_c_size_t,resident_output_queue))
@@ -101,16 +101,16 @@ PROCEDURES = """
     resident_frames(slot)%shapes(:,3)=shape(W)
     resident_frames(slot)%shapes(:,4)=shape(Pr)
     resident_frames(slot)%shapes(:,5)=shape(Viscosity)
-    resident_pending_bindings(1)%buffer=resident_flow%bind_real64(U,lbound(U),.true.,origin='frame_snapshot::u')
-    resident_pending_bindings(2)%buffer=resident_flow%bind_real64(V,lbound(V),.true.,origin='frame_snapshot::v')
-    resident_pending_bindings(3)%buffer=resident_flow%bind_real64(W,lbound(W),.true.,origin='frame_snapshot::w')
-    resident_pending_bindings(4)%buffer=resident_flow%bind_real64(Pr,lbound(Pr),.true.,origin='frame_snapshot::pr')
-    resident_pending_bindings(5)%buffer=resident_flow%bind_real64(Viscosity,lbound(Viscosity),.true., &
+    resident_pending_bindings(1)%buffer=resident_flow%bind_real(U,lbound(U),.true.,origin='frame_snapshot::u')
+    resident_pending_bindings(2)%buffer=resident_flow%bind_real(V,lbound(V),.true.,origin='frame_snapshot::v')
+    resident_pending_bindings(3)%buffer=resident_flow%bind_real(W,lbound(W),.true.,origin='frame_snapshot::w')
+    resident_pending_bindings(4)%buffer=resident_flow%bind_real(Pr,lbound(Pr),.true.,origin='frame_snapshot::pr')
+    resident_pending_bindings(5)%buffer=resident_flow%bind_real(Viscosity,lbound(Viscosity),.true., &
                                   origin='frame_snapshot::viscosity')
     do i=1,5
-      resident_pending_bindings(i)%element_type=FORT_SCOPE_REAL64
+      resident_pending_bindings(i)%element_type=merge(FORT_SCOPE_REAL64,FORT_SCOPE_REAL32,storage_size(0._knd)==64)
       resident_pending_bindings(i)%rank=3
-      resident_pending_bindings(i)%element_bytes=8
+      resident_pending_bindings(i)%element_bytes=int(storage_size(0._knd)/8,c_size_t)
       resident_pending_bindings(i)%access%flags=FORT_SCOPE_READ_ALL
     enddo
     endif
@@ -135,8 +135,8 @@ PROCEDURES = """
     status=FORT_SCOPE_ARGUMENT
     if (slot<1 .or. slot>2) return
     n=resident_frames(slot)%shapes
-    if (bytes/=8_c_size_t*sum(product(int(n,c_size_t),dim=1))) return
-    call c_f_pointer(payload,flat,[bytes/8_c_size_t])
+    if (bytes/=int(storage_size(0._knd)/8,c_size_t)*sum(product(int(n,c_size_t),dim=1))) return
+    call c_f_pointer(payload,flat,[bytes/int(storage_size(0._knd)/8,c_size_t)])
     first=1
     do i=1,5
       last=first+product(int(n(:,i),c_size_t))-1

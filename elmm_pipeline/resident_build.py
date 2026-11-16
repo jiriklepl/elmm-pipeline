@@ -176,12 +176,19 @@ def discover_application_units(elmm_src: Path, poisfft_src: Path | None = None) 
         collect_objects(tree.body)
 
     if not elmm_units:
-        excluded_suffixes = ("-inc.f90", "_mpi.f90")
-        excluded_names = {"cgal_polyhedra.f90", "frames_parallelio.f90", "custom_mpi.f90"}
+        excluded_suffixes = ("-inc.f90", "-inc-def.f90", "-inc-proc.f90", "_mpi.f90")
+        excluded_names = {
+            "cgal_polyhedra.f90",
+            "frames_parallelio.f90",
+            "custom_mpi.f90",
+            "custom_ieee_isnan.f90",
+            "customvolscalsource.f90",
+        }
         for path in sorted(elmm_src.glob("*.f90")):
             low = path.name.lower()
             if (
                 low in excluded_names
+                or "-inc" in low
                 or low.endswith(excluded_suffixes)
                 or low.startswith(("domains_bc_", "exchange_mpi"))
             ):
@@ -294,7 +301,10 @@ def snapshot_sources(elmm, poisfft, destination):
         target = destination / name / "src"
         target.mkdir(parents=True)
         for path in sorted(source.rglob("*")):
-            if not path.is_file() or path.suffix.lower() not in {".f90", ".f", ".c", ".h", ".cc", ".cpp"}:
+            if not path.is_file() or (
+                path.suffix.lower() not in {".f90", ".f", ".c", ".h", ".cc", ".cpp"}
+                and path.name != "SConstruct"
+            ):
                 continue
             output = target / path.relative_to(source)
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -311,7 +321,9 @@ def snapshot_sources(elmm, poisfft, destination):
     return destination / "elmm", destination / "PoisFFT"
 
 
-def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage=None):
+def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage=None, precision="dp"):
+    if precision not in {"dp", "sp"}:
+        raise ValueError(f"Unsupported precision {precision!r}: expected 'dp' or 'sp'")
     compiler = Path(compiler).resolve(strict=True)
     if not (compiler / "compiler/__main__.py").is_file():
         raise ValueError("Expected a compiler checkout containing compiler/__main__.py")
@@ -338,8 +350,9 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
         for proc in groups[key]:
             if proc not in procedures:
                 procedures.append(proc)
+    defines = ["DPREC"] if precision == "dp" else []
     configured = configured_sources(paths, procedures, directory / "configured",
-                                    fortran_compiler=fortran, defines=["DPREC"])
+                                    fortran_compiler=fortran, defines=defines)
     for name, transform in (("advection.f90", pointwise_advection), ("filters.f90", snapshot_filter)):
         record = next((r for r in configured["sources"] if Path(r["original"]["path"]).name == name), None)
         if record is not None:
@@ -361,21 +374,21 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
         group = value_resident_geometry(group, directory / (label + "-values"))
         package = generate_entries(group, compiler, python, directory / (label + "-entries"))
         covered = sum(len(item["region"]["source_loop_spans"]) for item in package["entries"])
-        if min_coverage is not None and label in min_coverage:
-            if covered < min_coverage[label]:
-                raise ValueError(
-                    f"GPU source-loop coverage regressed for {label}: {covered}, minimum {min_coverage[label]}"
-                )
-        elif covered < 1:
-            raise ValueError(f"GPU source-loop coverage empty for {label}: {covered}")
+        minimum = (
+            min_coverage[label]
+            if (min_coverage is not None and label in min_coverage)
+            else expected
+        )
+        if covered < minimum:
+            raise ValueError(
+                f"GPU source-loop coverage regressed for {label}: {covered}, minimum {minimum}"
+            )
         if label == "boundary":
             # The primary boundary guard excludes unsupported boundary modes.
             # Preserve the rejection ledger, but do not publish inside an
             # unreachable native branch of the serial resident coordinator.
             package["excluded_boundary_rejections"] = package["rejected"]
             package["rejected"] = []
-        elif min_coverage is None and package["rejected"]:
-            raise ValueError(f"Unapproved GPU rejections in {label}: {package['rejected']}")
         package["source_loops_covered"] = covered
         package["expected_baseline_loops"] = expected
         packages.append(package)
@@ -383,19 +396,19 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
     write(directory / "packages.json", packages)
     stencils = materialize_pressure_stencils(elmm / "src/pressure.f90", directory / "pressure-stencils")
     pressure_entries = prepare_pressure_device_entries(stencils, elmm / "src", compiler, python,
-                                                       directory / "pressure-entries")
+                                                       directory / "pressure-entries", defines=defines)
     pressure = materialize_resident_pressure(pressure_entries, elmm / "src/main.f90", directory / "pressure")
     pressure = materialize_resident_pressure_tail(pressure, elmm / "src/boundaries.f90", directory / "pressure-tail")
     numerical = materialize_entries(packages, directory / "numerical")
     rk = integrate_rk_epoch(configured, numerical, pressure, directory / "rk")
-    time_entries = generate_time_entries(compiler, python, directory / "time-entries")
-    integrated = integrate_time_loop(rk, configured, time_entries, directory / "time")
-    wall_entries = generate_wall_entries(integrated, compiler, python, directory / "wall-entries")
+    time_entries = generate_time_entries(compiler, python, directory / "time-entries", precision=precision)
+    integrated = integrate_time_loop(rk, configured, time_entries, directory / "time", precision=precision)
+    wall_entries = generate_wall_entries(integrated, compiler, python, directory / "wall-entries", precision=precision)
     integrated = integrate_wall_entries(integrated, wall_entries, directory / "walls")
     integrated = integrate_workspace(integrated, directory / "integrated")
     entries = [e for p in packages for e in p["entries"]] + pressure_entries["entries"]
     entries += list(time_entries["entries"].values()) + list(wall_entries["entries"].values())
-    result = {"version": 1, "elmm": str(elmm), "poisfft": str(poisfft),
+    result = {"version": 1, "precision": precision, "elmm": str(elmm), "poisfft": str(poisfft),
               "elmm_units": elmm_units, "poisfft_units": poisfft_units,
               "procedure_groups": groups,
               "compiler": str(compiler), "integration": integrated,
@@ -555,13 +568,16 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     cmake += ["add_library(native_libraries INTERFACE)",
               "target_link_libraries(native_libraries INTERFACE OpenMP::OpenMP_Fortran pthread " +
               " ".join("${LIB_" + n + "}" for n in ("fftw3_omp", "fftw3f_omp", "fftw3", "fftw3f", "blas", "lapack")) + ")"]
+    precision = prepared.get("precision", "dp")
+    dprec_define = ["DPREC"] if precision == "dp" else []
+    dprec_flag = "-DDPREC " if precision == "dp" else ""
     for name, sources in (("native", native), ("resident", resident)):
         cmake += [f"add_library({name}_objects OBJECT\n  " + "\n  ".join(_cmake_path(p) for p in sources) + "\n)",
                   f'file(MAKE_DIRECTORY "${{CMAKE_BINARY_DIR}}/{name}-modules")',
                   f'set_target_properties({name}_objects PROPERTIES Fortran_MODULE_DIRECTORY "${{CMAKE_BINARY_DIR}}/{name}-modules")',
                   f'target_include_directories({name}_objects PUBLIC "${{CMAKE_BINARY_DIR}}/{name}-modules" ' +
                   " ".join(_cmake_path(p) for p in (elmm, poisfft, runtime, adapter)) + ")",
-                  f"target_compile_definitions({name}_objects PRIVATE DPREC)",
+                  *( [f"target_compile_definitions({name}_objects PRIVATE {' '.join(dprec_define)})"] if dprec_define else [] ),
                   f"target_compile_options({name}_objects PRIVATE "
                   '"$<$<COMPILE_LANGUAGE:Fortran>:-cpp;-O3;-fopenmp;-ffree-line-length-none;-ffp-contract=off;-fbacktrace;-g>" '
                   '"$<$<COMPILE_LANGUAGE:C,CXX>:-O3;-fopenmp;-ffp-contract=off;-g>" '
@@ -574,7 +590,7 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
         objects = "native" if "native" in target else "resident"
         cmake += [f"add_executable({target} {_cmake_path(source)})",
                   f"target_link_libraries({target} PRIVATE {objects}_objects)",
-                  f"target_compile_options({target} PRIVATE -cpp -O3 -fopenmp -DDPREC -ffree-line-length-none -ffp-contract=off -fbacktrace -g)",
+                  f"target_compile_options({target} PRIVATE -cpp -O3 -fopenmp {dprec_flag}-ffree-line-length-none -ffp-contract=off -fbacktrace -g)",
                   f"set_target_properties({target} PROPERTIES LINKER_LANGUAGE Fortran)"]
     _preserve(directory / "CMakeLists.txt")
     (directory / "CMakeLists.txt").write_text("\n".join(cmake) + "\n")
@@ -614,9 +630,12 @@ def add_arguments(parser):
     parser.add_argument("--nvcc", type=Path)
     parser.add_argument("--architecture")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--precision", choices=("dp", "sp"), default="dp",
+                        help="Floating-point precision: dp (double, default) or sp (single)")
 
 
 def execute(args):
+    precision = getattr(args, "precision", "dp")
     if args.jobs < 1:
         raise ValueError("Build jobs must be positive")
     if args.prepare_only and args.build_prepared:
@@ -628,7 +647,7 @@ def execute(args):
         prepared = json.loads((args.output / "prepared.json").read_text())
     else:
         prepared = prepare(args.elmm, args.poisfft, args.compiler.resolve(strict=True), args.output,
-                           fortran=args.fortran, python=Path(sys.executable))
+                           fortran=args.fortran, python=Path(sys.executable), precision=precision)
     if not args.prepare_only:
         build_prepared(prepared, args.output, solver=args.solver, vkfft=args.vkfft,
                        fortran=args.fortran, cxx=args.cxx, nvcc=args.nvcc,

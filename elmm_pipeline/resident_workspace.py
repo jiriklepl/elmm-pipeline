@@ -39,7 +39,7 @@ def integrate_workspace(integration, directory):
     text = sources["dynamics.f90"]
     release_block = (
         "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-        "      call resident_flow%release_real64(beta)\n      call resident_flow%release_real64(rho)\n    end block\n"
+        "      call resident_flow%release_real(beta)\n      call resident_flow%release_real(rho)\n    end block\n"
     )
     sources["dynamics.f90"] = replace_once(text, release_block, "")
 
@@ -81,16 +81,16 @@ def integrate_workspace(integration, directory):
         "    allocate(tmp(-2:ubound(U,1),-2:ubound(U,2),-2:ubound(U,3)))",
         """    managed_workspace=resident_flow%active
     if (managed_workspace) then
-      call resident_flow%acquire_work_real64_3(work_site,lbound(U),ubound(U),tmp)
+      call resident_flow%acquire_work_real_3(work_site,lbound(U),ubound(U),tmp)
     else
       allocate(tmp(-2:ubound(U,1),-2:ubound(U,2),-2:ubound(U,3)))
     endif""",
     )
     bind_pat = re.compile(
-        r"(?im)rk_handle_tmp\s*=\s*resident_flow%bind_real64\s*\(\s*tmp\s*,\s*lbound\s*\(\s*tmp\s*\)\s*,\s*\.true\.\s*,\s*&\s*\n\s*origin='filters::filter3ord::tmp'\s*\)"
+        r"(?im)rk_handle_tmp\s*=\s*resident_flow%bind_real(?:64|32)?\s*\(\s*tmp\s*,\s*lbound\s*\(\s*tmp\s*\)\s*,\s*\.true\.\s*,\s*&\s*\n\s*origin='filters::filter3ord::tmp'\s*\)"
     )
     body, count = bind_pat.subn(
-        "rk_handle_tmp=resident_flow%bind_real64(tmp,lbound(tmp),.false.,persistent=.true., &\n"
+        "rk_handle_tmp=resident_flow%bind_real(tmp,lbound(tmp),.false.,persistent=.true., &\n"
         "          origin='filters::filter3ord::tmp')",
         body,
     )
@@ -99,9 +99,9 @@ def integrate_workspace(integration, directory):
     body = replace_once(
         body,
         "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-        "      call resident_flow%release_real64(tmp)\n    end block\n",
+        "      call resident_flow%release_real(tmp)\n    end block\n",
         """    if (managed_workspace) then
-      call resident_flow%release_work_real64_3(work_site,tmp)
+      call resident_flow%release_work_real_3(work_site,tmp)
     else
       deallocate(tmp)
     endif

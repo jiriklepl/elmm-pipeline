@@ -18,22 +18,23 @@ from .ast_rewrites import (
 from .resident_rk import addressable_arrays, identity
 
 
-def generate_time_entries(compiler_root, python, directory):
+def generate_time_entries(compiler_root, python, directory, *, precision="dp"):
     from .local_adapter import transform
 
+    real_type = "real(8)" if precision == "dp" else "real(4)"
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     sources = {
-        "cfl": """module resident_cfl_source
+        "cfl": f"""module resident_cfl_source
 implicit none
 contains
 subroutine values(u,v,w,cfl,nx,ny,nz,dx,dy,dz)
-real(8), intent(in) :: u(:,:,:),v(:,:,:),w(:,:,:)
-real(8), intent(out) :: cfl(:,:,:)
+{real_type}, intent(in) :: u(:,:,:),v(:,:,:),w(:,:,:)
+{real_type}, intent(out) :: cfl(:,:,:)
 integer, value, intent(in) :: nx,ny,nz
-real(8), value, intent(in) :: dx,dy,dz
+{real_type}, value, intent(in) :: dx,dy,dz
 integer :: i,j,k
-real(8) :: p
+{real_type} :: p
 do k=1,nz
  do j=1,ny
   do i=1,nx
@@ -47,14 +48,14 @@ enddo
 end subroutine
 end module
 """,
-        "average": """module resident_average_source
+        "average": f"""module resident_average_source
 implicit none
 contains
 subroutine accumulate(source,average,nx,ny,nz,ox,oy,oz,weight)
-real(8), intent(in) :: source(:,:,:)
-real(8), intent(inout) :: average(:,:,:)
+{real_type}, intent(in) :: source(:,:,:)
+{real_type}, intent(inout) :: average(:,:,:)
 integer, value, intent(in) :: nx,ny,nz,ox,oy,oz
-real(8), value, intent(in) :: weight
+{real_type}, value, intent(in) :: weight
 integer :: i,j,k
 do k=1,nz
  do j=1,ny
@@ -83,8 +84,12 @@ end module
     return result
 
 
-def _tasks(entries):
+def _tasks(entries, *, precision="dp"):
     cfl, avg = (entries["entries"][n]["entry"] for n in ("cfl", "average"))
+    c_real = "c_double" if precision == "dp" else "c_float"
+    real_type_c = f"real({c_real})"
+    zero_literal = "0._c_double" if precision == "dp" else "0._c_float"
+    max_fn = "fort_scope_max_real64_v1" if precision == "dp" else "fort_scope_max_real32_v1"
     def invoke(entry, arguments):
         values = ["resident_flow%context", "FORT_SCOPE_GPU"] + [arguments[n] for n in entry["argument_order"][2:]]
         return "call pressure_require(" + ("cfl_run" if entry is cfl else "average_run") + "( &\n      " + ", &\n      ".join(values) + "))"
@@ -103,13 +108,13 @@ def _tasks(entries):
   implicit none
   private
   public :: ResidentCFL, ResidentAverage
-  real(c_double), allocatable, target, save :: cfl_values(:,:,:)
+  {real_type_c}, allocatable, target, save :: cfl_values(:,:,:)
 contains
   subroutine ResidentCFL(U,V,W,nx,ny,nz,dx,dy,dz,maximum,nan)
-    real(c_double), contiguous, target, intent(in) :: U(:,:,:),V(:,:,:),W(:,:,:)
+    {real_type_c}, contiguous, target, intent(in) :: U(:,:,:),V(:,:,:),W(:,:,:)
     integer, intent(in) :: nx,ny,nz
-    real(c_double), intent(in) :: dx,dy,dz
-    real(c_double), intent(out) :: maximum
+    {real_type_c}, intent(in) :: dx,dy,dz
+    {real_type_c}, intent(out) :: maximum
     logical, intent(out) :: nan
     integer(c_int64_t) :: handles(3),handle
     integer(c_int32_t) :: any_nan
@@ -119,24 +124,24 @@ contains
     if (any(shape(cfl_values)/=[nx,ny,nz])) error stop 'CFL storage epoch shape changed'
     if (any(shape(U)<[nx,ny,nz]+3) .or. any(shape(V)<[nx,ny,nz]+3) .or. &
         any(shape(W)<[nx,ny,nz]+3)) error stop 'CFL velocity geometry changed'
-    handles(1)=resident_flow%bind_real64(U,[-2,-2,-2],.true.,origin='time::cfl::u')
-    handles(2)=resident_flow%bind_real64(V,[-2,-2,-2],.true.,origin='time::cfl::v')
-    handles(3)=resident_flow%bind_real64(W,[-2,-2,-2],.true.,origin='time::cfl::w')
-    handle=resident_flow%bind_real64(cfl_values,[1,1,1],.false.,persistent=.true.,origin='time::cfl::values')
+    handles(1)=resident_flow%bind_real(U,[-2,-2,-2],.true.,origin='time::cfl::u')
+    handles(2)=resident_flow%bind_real(V,[-2,-2,-2],.true.,origin='time::cfl::v')
+    handles(3)=resident_flow%bind_real(W,[-2,-2,-2],.true.,origin='time::cfl::w')
+    handle=resident_flow%bind_real(cfl_values,[1,1,1],.false.,persistent=.true.,origin='time::cfl::values')
     {cfl_call}
-    call pressure_require(fort_scope_max_real64_v1(resident_flow%context,handle,3_c_int32_t, &
-      size(cfl_values,kind=c_size_t),0._c_double,maximum,any_nan,report))
+    call pressure_require({max_fn}(resident_flow%context,handle,3_c_int32_t, &
+      size(cfl_values,kind=c_size_t),{zero_literal},maximum,any_nan,report))
     nan=any_nan/=0
   end subroutine
   subroutine ResidentAverage(source,average,source_lower,average_lower,offset,weight)
-    real(c_double), contiguous, target, intent(in) :: source(:,:,:)
-    real(c_double), contiguous, target, intent(inout) :: average(:,:,:)
+    {real_type_c}, contiguous, target, intent(in) :: source(:,:,:)
+    {real_type_c}, contiguous, target, intent(inout) :: average(:,:,:)
     integer, intent(in) :: source_lower(3),average_lower(3),offset(3)
-    real(c_double), intent(in) :: weight
+    {real_type_c}, intent(in) :: weight
     integer(c_int64_t) :: source_handle,average_handle
     if (any(offset<0) .or. any(shape(average)+offset>shape(source))) error stop 'invalid average view'
-    source_handle=resident_flow%bind_real64(source,source_lower,.true.,origin='time::average::source')
-    average_handle=resident_flow%bind_real64(average,average_lower,.true.,origin='time::average::result')
+    source_handle=resident_flow%bind_real(source,source_lower,.true.,origin='time::average::source')
+    average_handle=resident_flow%bind_real(average,average_lower,.true.,origin='time::average::result')
     {avg_call}
   end subroutine
 end module
@@ -155,7 +160,7 @@ def finalize_before_native(text):
     return replace_once(text, anchor, finalizer, after=False, insert=True)
 
 
-def integrate_time_loop(integration, configured, entries, directory):
+def integrate_time_loop(integration, configured, entries, directory, *, precision="dp"):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}
@@ -236,11 +241,11 @@ def integrate_time_loop(integration, configured, entries, directory):
           use elmm_resident_pressure_state, only: resident_flow
           integer(c_int64_t) :: frame_reads(5)
           if (resident_flow%active) then
-            frame_reads(1)=resident_flow%bind_real64(U,lbound(U),.true.,origin='frames::u')
-            frame_reads(2)=resident_flow%bind_real64(V,lbound(V),.true.,origin='frames::v')
-            frame_reads(3)=resident_flow%bind_real64(W,lbound(W),.true.,origin='frames::w')
-            frame_reads(4)=resident_flow%bind_real64(Pr,lbound(Pr),.true.,origin='frames::pr')
-            frame_reads(5)=resident_flow%bind_real64(Viscosity,lbound(Viscosity),.true.,origin='frames::viscosity')
+            frame_reads(1)=resident_flow%bind_real(U,lbound(U),.true.,origin='frames::u')
+            frame_reads(2)=resident_flow%bind_real(V,lbound(V),.true.,origin='frames::v')
+            frame_reads(3)=resident_flow%bind_real(W,lbound(W),.true.,origin='frames::w')
+            frame_reads(4)=resident_flow%bind_real(Pr,lbound(Pr),.true.,origin='frames::pr')
+            frame_reads(5)=resident_flow%bind_real(Viscosity,lbound(Viscosity),.true.,origin='frames::viscosity')
             call resident_flow%observe(frame_reads)
           endif
         end block
@@ -256,7 +261,7 @@ def integrate_time_loop(integration, configured, entries, directory):
     from .resident_output import asynchronous_frames
     sources["frames_common.f90"], sources["vtkframes.f90"], sources["main.f90"] = asynchronous_frames(
         sources["frames_common.f90"], sources["vtkframes.f90"], sources["main.f90"])
-    sources["resident_time_tasks.f90"] = _tasks(entries)
+    sources["resident_time_tasks.f90"] = _tasks(entries, precision=precision)
     records = []
     for name, text in sources.items():
         path = directory / name

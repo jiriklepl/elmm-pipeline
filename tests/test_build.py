@@ -49,6 +49,7 @@ class BuildTests(unittest.TestCase):
 
     def test_shared_preprocessor_configuration_tracks_every_upstream_switch(self):
         self.assertEqual(preprocessing_defines([]), ["DPREC"])
+        self.assertEqual(preprocessing_defines([], precision="sp"), [])
         for option, macro in PREPROCESSOR_SWITCHES.items():
             with self.subTest(option=option):
                 self.assertEqual(preprocessing_defines([option + "=yes"]), ["DPREC", macro])

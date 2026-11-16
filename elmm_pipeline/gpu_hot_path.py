@@ -155,7 +155,8 @@ def materialize_pressure_stencils(source: str | Path, directory: str | Path):
     return record
 
 
-def prepare_pressure_device_entries(prepared, project_root, compiler_root, python, directory):
+def prepare_pressure_device_entries(prepared, project_root, compiler_root, python, directory,
+                                    *, defines=("DPREC",)):
     """Generate shared-domain entries for every pressure stencil branch.
 
     Fail on an uncovered body instead of treating partial GPU coverage as a
@@ -172,8 +173,8 @@ def prepare_pressure_device_entries(prepared, project_root, compiler_root, pytho
     directory.mkdir(parents=True, exist_ok=False)
     names = [name.split("::", 1)[1] for name in prepared["procedures"]]
     discovery = discover(source, Path(project_root), Path(python), directory / "discovery",
-                         select=names, backend="gpu", compiler_root=Path(compiler_root),
-                         compiler_python=Path(python))
+                         defines=defines, select=names, backend="gpu",
+                         compiler_root=Path(compiler_root), compiler_python=Path(python))
     if discovery["rejected"] or {r["routine"].lower() for r in discovery["regions"]} != set(names):
         raise ValueError("Incomplete pressure GPU coverage; see " + str(directory / "discovery/discovery.json"))
     entries = []
@@ -404,7 +405,7 @@ def materialize_resident_pressure(entries, main_source, directory):
     type(elmm_gpu_pressure_config_v1) :: config
     logical :: supported
     supported = .false.
-#if defined(DPREC) && !defined(PAR)
+#if !defined(PAR)
     supported = gridtype == GRID_UNIFORM .and. explicit_diffusion .and. &
                 pressure_solution%poisson_solver == POISSON_SOLVER_POISFFT .and. &
                 (discretization_order == 2 .or. discretization_order == 4) .and. &
@@ -417,9 +418,14 @@ def materialize_resident_pressure(entries, main_source, directory):
       return
     endif
     config%solver%sizes = [Prnx,Prny,Prnz]
-    config%solver%lengths = [gxmax-gxmin,gymax-gymin,gzmax-gzmin]
+    config%solver%lengths = [real(gxmax-gxmin,c_double),real(gymax-gymin,c_double),real(gzmax-gzmin,c_double)]
     config%solver%boundary_conditions = PoissonBtype
     config%solver%approximation = discretization_order
+#ifdef DPREC
+    config%solver%flags = 0
+#else
+    config%solver%flags = 1
+#endif
     config%solver%device_budget_bytes = 1073741824_c_int64_t
     call resident_pressure%start(config)
     resident_pressure%phi = resident_pressure%bind3(Phi,lbound(Phi),.true.,.true.,origin='pressure::phi')
@@ -509,7 +515,7 @@ def materialize_resident_pressure_tail(integrated, boundaries_source, directory)
   end function
 
   subroutine ResidentPressureTail(Pr)
-    use elmm_gpu_pressure_tail, only: elmm_gpu_pressure_tail_v1
+    use elmm_gpu_pressure_tail, only: elmm_gpu_pressure_tail_real32_v1, elmm_gpu_pressure_tail_v1
     use fort_scoped_memory, only: fort_scope_external_report_v1
     real(knd), contiguous, target, intent(inout) :: Pr(-1:,-1:,-1:)
     integer(c_int64_t) :: pressure_handle
@@ -521,8 +527,13 @@ def materialize_resident_pressure_tail(integrated, boundaries_source, directory)
       if (pressure_solution%reference%boundary_index == To) reference = 2
     endif
     pressure_handle = resident_pressure%bind3(Pr,lbound(Pr),.true.,origin='pressure::tail::pr')
+#ifdef DPREC
     call pressure_require(elmm_gpu_pressure_tail_v1(resident_pressure%context,pressure_handle, &
       int([Prnx,Prny,Prnz],c_int32_t),int(PoissonBtype,c_int32_t),reference,report))
+#else
+    call pressure_require(elmm_gpu_pressure_tail_real32_v1(resident_pressure%context,pressure_handle, &
+      int([Prnx,Prny,Prnz],c_int32_t),int(PoissonBtype,c_int32_t),reference,report))
+#endif
   end subroutine
 '''
     end = re.search(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", text)

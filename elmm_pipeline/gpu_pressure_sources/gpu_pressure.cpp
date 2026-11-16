@@ -19,6 +19,7 @@ struct elmm_gpu_pressure_handle_v1 {
     bool ready=false;
     std::mutex mutex;
 };
+extern "C" int elmm_gpu_pressure_launch_halo_real32_v1(float *,const int32_t *,const int32_t *,void *,int *);
 extern "C" int elmm_gpu_pressure_launch_halo_v1(double *,const int32_t *,const int32_t *,void *,int *);
 namespace {
 thread_local char diagnostic[1024]{};
@@ -50,7 +51,9 @@ template<class F> int guarded(F action) noexcept {
     catch(...) { message("unknown pressure adapter error");return FORT_SCOPE_EXECUTION; }
 }
 void config_check(const elmm_gpu_pressure_config_v1 &c) {
-    require(c.version==1 && !c.reserved && c.solver.version==1 && !c.solver.flags,"unknown pressure adapter configuration");
+    require(c.version==1 && !c.reserved && c.solver.version==1 &&
+            (c.solver.flags & ~uint32_t(POISSON_SOLVER_REAL32))==0,"unknown pressure adapter configuration");
+    const size_t elem_size=(c.solver.flags & POISSON_SOLVER_REAL32)?sizeof(float):sizeof(double);
     require(c.solver.dimensions==3 && (c.solver.approximation==2 || c.solver.approximation==4),"pressure adapter requires dimension3 FD2/FD4");
     require(c.solver.device_budget_bytes>0 && c.solver.device_budget_bytes<=SIZE_MAX,"invalid provider workspace cap");
     size_t count=1;
@@ -64,7 +67,7 @@ void config_check(const elmm_gpu_pressure_config_v1 &c) {
                 c.rhs_lower_bounds[i]<=INT64_MAX-int64_t(extent-2)+1,"pressure descriptor coordinates overflow");
         require(count<=SIZE_MAX/extent,"pressure layout overflow");count*=extent;
     }
-    require(count<=SIZE_MAX/sizeof(double),"pressure layout byte overflow");
+    require(count<=SIZE_MAX/elem_size,"pressure layout byte overflow");
 }
 int retire(elmm_gpu_pressure_handle_v1 &h) {
     // An inactive/failed preflight may never have selected or initialized CUDA.
@@ -83,9 +86,12 @@ int context_check(fort_scope_t context,const elmm_gpu_pressure_handle_v1 &h) {
     return FORT_SCOPE_OK;
 }
 void view_check(const fort_scope_external_view_v1 &v,const elmm_gpu_pressure_handle_v1 &h,bool phi) {
-    require(v.type==FORT_SCOPE_REAL64 && v.rank==3 && v.element_bytes==sizeof(double),"pressure view requires rank3 REAL64");
+    const bool is_float=(h.config.solver.flags & POISSON_SOLVER_REAL32)!=0;
+    const auto expected_type=is_float?FORT_SCOPE_REAL32:FORT_SCOPE_REAL64;
+    const size_t elem_bytes=is_float?sizeof(float):sizeof(double);
+    require(v.type==expected_type && v.rank==3 && v.element_bytes==elem_bytes,"pressure view differs from expected precision");
     require(v.extents && v.strides && v.lower_bounds && v.device,"missing pressure view geometry/storage");
-    size_t bytes=sizeof(double);const int ghosts=phi?2:1;
+    size_t bytes=elem_bytes;const int ghosts=phi?2:1;
     const auto *lower=phi?h.config.phi_lower_bounds:h.config.rhs_lower_bounds;
     for(int i=0;i<3;++i) {
         require(v.extents[i]==size_t(h.config.solver.sizes[i])+2*ghosts && v.strides[i]==bytes && v.lower_bounds[i]==lower[i],"pressure view differs from checked dense original layout");
@@ -110,6 +116,9 @@ int halo_worker(void *opaque,const fort_scope_external_view_v1 *views,size_t cou
     return guarded([&]() -> int {
         auto &h=*static_cast<elmm_gpu_pressure_handle_v1 *>(opaque);
         require(count==1 && views,"pressure halo transaction requires one Phi root");view_check(views[0],h,true);
+        if(h.config.solver.flags & POISSON_SOLVER_REAL32)
+            return elmm_gpu_pressure_launch_halo_real32_v1(static_cast<float *>(views[0].device),h.config.solver.sizes,
+                h.config.solver.boundary_conditions,stream,started);
         return elmm_gpu_pressure_launch_halo_v1(static_cast<double *>(views[0].device),h.config.solver.sizes,
             h.config.solver.boundary_conditions,stream,started);
     });
@@ -156,9 +165,12 @@ extern "C" int elmm_gpu_pressure_solve_v1(fort_scope_t context,elmm_gpu_pressure
         const int status=context_check(context,*h);if(status) return status;
         std::array<size_t,3> pl{2,2,2},pu{},rl{1,1,1},ru{};
         for(int i=0;i<3;++i) { pu[i]=size_t(h->config.solver.sizes[i])+2;ru[i]=size_t(h->config.solver.sizes[i])+1; }
+        const bool is_float=(h->config.solver.flags & POISSON_SOLVER_REAL32)!=0;
+        const auto scope_type=is_float?FORT_SCOPE_REAL32:FORT_SCOPE_REAL64;
+        const size_t elem_bytes=is_float?sizeof(float):sizeof(double);
         fort_scope_section interior{pl.data(),pu.data()},input{rl.data(),ru.data()};
         fort_scope_access write{0,0,nullptr,1,&interior,1,&interior},read{0,1,&input,0,nullptr,0,nullptr};
-        fort_scope_external_binding_v1 bindings[2]={{phi,FORT_SCOPE_REAL64,3,8,write},{rhs,FORT_SCOPE_REAL64,3,8,read}};
+        fort_scope_external_binding_v1 bindings[2]={{phi,scope_type,3,elem_bytes,write},{rhs,scope_type,3,elem_bytes,read}};
         fort_scope_external_call_v1 call{1,0,bindings,2,h->lease,h->workspace};
         return fort_scope_external_execute_v1(context,&call,solve_worker,h,report);
     });
@@ -180,8 +192,11 @@ extern "C" int elmm_gpu_pressure_halo_v1(fort_scope_t context,elmm_gpu_pressure_
             read_lo[f][axis]=(periodic!=bool(side))?upper[axis]-2:2;
             read_hi[f][axis]=read_lo[f][axis]+2;reads[f]={read_lo[f].data(),read_hi[f].data()};
         }
+        const bool is_float=(h->config.solver.flags & POISSON_SOLVER_REAL32)!=0;
+        const auto scope_type=is_float?FORT_SCOPE_REAL32:FORT_SCOPE_REAL64;
+        const size_t elem_bytes=is_float?sizeof(float):sizeof(double);
         fort_scope_access access{0,6,reads.data(),6,faces.data(),6,faces.data()};
-        fort_scope_external_binding_v1 binding{phi,FORT_SCOPE_REAL64,3,8,access};
+        fort_scope_external_binding_v1 binding{phi,scope_type,3,elem_bytes,access};
         fort_scope_external_call_v1 call{1,0,&binding,1,0,0};return fort_scope_external_execute_v1(context,&call,halo_worker,h,report);
     });
     if(report) report->status=result;return result;

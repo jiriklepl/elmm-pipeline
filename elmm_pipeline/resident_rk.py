@@ -46,6 +46,7 @@ def configured_sources(paths, procedures, directory, *, fortran_compiler, define
     directory.mkdir(parents=True, exist_ok=False)
     parser = ParserFactory().create(std="f2008")
     selected = {name.lower() for name in procedures}
+    selected_modules = {name.split("::", 1)[0] for name in selected if "::" in name}
     records = []
     for filename in paths:
         source = Path(filename).resolve(strict=True)
@@ -56,22 +57,24 @@ def configured_sources(paths, procedures, directory, *, fortran_compiler, define
         if result.returncode:
             raise RuntimeError("RK preprocessing failed: " + str(source) + "\n" + result.stderr)
         lines = result.stdout.splitlines(keepends=True)
-        tree = parser(FortranStringReader(result.stdout, ignore_comments=False))
         removed = []
-        for module in (node for node in walk(tree) if type(node).__name__ == "Module"):
-            header = next(node for node in module.content if type(node).__name__ == "Module_Stmt")
-            module_name = str(header.items[1]).lower()
-            for routine in (node for node in walk(module) if type(node).__name__ == "Subroutine_Subprogram"):
-                statement = next(node for node in routine.content if type(node).__name__ == "Subroutine_Stmt")
-                name = module_name + "::" + str(statement.items[1]).lower()
-                if name not in selected:
-                    continue
-                ending = routine.content[-1]
-                first, last = statement.item.span[0], ending.item.span[1]
-                for index in range(first - 1, last):
-                    if re.match(r"\s*!\$omp\b", lines[index], re.I):
-                        removed.append({"line": index + 1, "directive": lines[index].rstrip(), "procedure": name})
-                        lines[index] = "\n"
+        modules_in_file = {m.group(1).lower() for m in re.finditer(r"(?im)^\s*module\s+([a-z_]\w*)\b", result.stdout)}
+        if modules_in_file & selected_modules:
+            tree = parser(FortranStringReader(result.stdout, ignore_comments=False))
+            for module in (node for node in walk(tree) if type(node).__name__ == "Module"):
+                header = next(node for node in module.content if type(node).__name__ == "Module_Stmt")
+                module_name = str(header.items[1]).lower()
+                for routine in (node for node in walk(module) if type(node).__name__ == "Subroutine_Subprogram"):
+                    statement = next(node for node in routine.content if type(node).__name__ == "Subroutine_Stmt")
+                    name = module_name + "::" + str(statement.items[1]).lower()
+                    if name not in selected:
+                        continue
+                    ending = routine.content[-1]
+                    first, last = statement.item.span[0], ending.item.span[1]
+                    for index in range(first - 1, last):
+                        if re.match(r"\s*!\$omp\b", lines[index], re.I):
+                            removed.append({"line": index + 1, "directive": lines[index].rstrip(), "procedure": name})
+                            lines[index] = "\n"
         target = directory / (hashlib.sha256(str(source).encode()).hexdigest()[:12] + "_" + source.name)
         target.write_text("".join(lines))
         if identity(source) != before:
@@ -245,7 +248,7 @@ def _native_wall_correction(body):
              "          wall_first=[" + ",".join("minval(" + points + "%" + axis + ")" for axis in ("xi", "yj", "zk")) + "]-2",
              "          wall_last=[" + ",".join("maxval(" + points + "%" + axis + ")" for axis in ("xi", "yj", "zk")) + "]+2"]
     for index, field in enumerate(fields, 1):
-        lines.append(f"          wall_handles({index})=resident_flow%host_box_real64({field},lbound({field}), &")
+        lines.append(f"          wall_handles({index})=resident_flow%host_box_real({field},lbound({field}), &")
         lines.append("            wall_first,wall_last," + (".true." if index == 1 else ".false.") + ")")
     lines += ["        endif", "      endif", body.rstrip(),
               "      do wall_index=1,3", "        if (wall_handles(wall_index)/=0) call resident_flow%host_end(wall_handles(wall_index))",
@@ -277,7 +280,7 @@ def materialize_entries(packages, directory):
                 elif parameter["rank"]:
                     handle = "rk_handle_" + parameter["name"]
                     actual[parameter["name"]] = handle
-                    method = {("real", 8): "bind_real64", ("integer", 4): "bind_integer32"}.get((binding["type"], binding["kind"]))
+                    method = {("real", 8): "bind_real64", ("real", 4): "bind_real32", ("integer", 4): "bind_integer32"}.get((binding["type"], binding["kind"]))
                     if method is None:
                         raise ValueError("Unsupported resident array ABI: " + str(binding))
                     handles.append(handle)
@@ -649,7 +652,7 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     lo, hi = find_routine_span(dynamics, "Convection")
     body = dynamics[lo:hi]
     body = at_once(body, "  contains", "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-                   "      call resident_flow%release_real64(beta)\n      call resident_flow%release_real64(rho)\n    end block\n\n")
+                   "      call resident_flow%release_real(beta)\n      call resident_flow%release_real(rho)\n    end block\n\n")
     output["dynamics.f90"] = dynamics[:lo] + body + dynamics[hi:]
 
     dynamics = output["dynamics.f90"]
@@ -665,12 +668,12 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
       integer(c_int64_t) :: wall_reads(4)
       integer :: wall_count
       if (resident_flow%active .and. wallmodeltype>0) then
-        wall_reads(1)=resident_flow%bind_real64(U,lbound(U),.true.,origin='subgrid::walls::u')
-        wall_reads(2)=resident_flow%bind_real64(V,lbound(V),.true.,origin='subgrid::walls::v')
-        wall_reads(3)=resident_flow%bind_real64(W,lbound(W),.true.,origin='subgrid::walls::w')
+        wall_reads(1)=resident_flow%bind_real(U,lbound(U),.true.,origin='subgrid::walls::u')
+        wall_reads(2)=resident_flow%bind_real(V,lbound(V),.true.,origin='subgrid::walls::v')
+        wall_reads(3)=resident_flow%bind_real(W,lbound(W),.true.,origin='subgrid::walls::w')
         wall_count=3
         if (wallmodeltype==2) then
-          wall_reads(4)=resident_flow%bind_real64(Pr,lbound(Pr),.true.,origin='subgrid::walls::pr')
+          wall_reads(4)=resident_flow%bind_real(Pr,lbound(Pr),.true.,origin='subgrid::walls::pr')
           wall_count=4
         endif
         call resident_flow%observe(wall_reads(:wall_count))
@@ -691,7 +694,7 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
         wall_write=0
         if (resident_flow%active) then
           if (size(WMPoints)>0) then
-            wall_write=resident_flow%host_box_real64(Viscosity,lbound(Viscosity), &
+            wall_write=resident_flow%host_box_real(Viscosity,lbound(Viscosity), &
               [minval(WMPoints%xi),minval(WMPoints%yj),minval(WMPoints%zk)], &
               [maxval(WMPoints%xi),maxval(WMPoints%yj),maxval(WMPoints%zk)],.true.)
           endif
