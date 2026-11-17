@@ -49,7 +49,7 @@ with patch('elmm_pipeline.discovery.discover_project',side_effect=AssertionError
      patch('elmm_pipeline.gpu_toolchain.compile_gpu_sources',return_value={'public_manifest_check':True},
            side_effect=AssertionError('native fallback must not compile CUDA') if sys.argv[5]=='auto' else None):
     result=adapt_project('local',source.parent,Path(sys.executable),output,compiler_root=compiler,
-                         target='gpu',memory_model='scoped',gpu_options={'gpu_policy':sys.argv[5]},
+                         target='gpu',gpu_options={'gpu_policy':sys.argv[5]},
                          scope_options={'entry':'source_application::step','source':source.name,'capture_facts':facts})
 print(json.dumps(result))
 """
@@ -69,8 +69,6 @@ print(json.dumps(result))
     assert adapter["coverage_enabled"] is False
     assert adapter["scope_extraction"]["numerical_extraction"]["entries"] == 2
     assert "--form-scopes" in adapter["scope_transformation"]["command"]
-    command = adapter["scope_transformation"]["command"]
-    assert command[command.index("--scope-execution") + 1] == "graph"
     activity = gpu_activity("", "local", adapter["regions"], scope_manifest=adapter["scope_manifest"])
     assert native_policy_exercised(activity, adapter["regions"]) is (policy == "auto")
     assert activity["verified"] is False
@@ -97,8 +95,7 @@ def test_no_approved_scope_is_a_successful_native_application(independent_scoped
     source.write_text(PROGRAM)
     with patch("elmm_pipeline.gpu_toolchain.compile_gpu_sources", side_effect=AssertionError("no GPU sources")):
         metadata = adapt_project("local", tmp_path, Path(sys.executable), tmp_path / "output",
-                                 compiler_root=compiler, target="gpu", memory_model="scoped",
-                                 gpu_options={"gpu_policy": "sections"},
+                                 compiler_root=compiler, target="gpu", gpu_options={"gpu_policy": "sections"},
                                  scope_options={"entry": "step", "source": "application.f90",
                                                 "capture_facts": {"schema_version": 1, "participation": "serial", "captures": {}}})
     assert metadata["native_success"]
@@ -113,7 +110,7 @@ def test_invalid_scoped_options_do_not_change_source(tmp_path, change):
     source = tmp_path / "application.f90"
     source.write_text(PROGRAM)
     options = {"entry": "step", "source": "application.f90", "capture_facts": FACTS}
-    kwargs = {"target": "gpu", "memory_model": "scoped", "scope_options": options}
+    kwargs = {"target": "gpu", "scope_options": options}
     tool = "local"
     if change == "target":
         kwargs["target"] = "cpu"
@@ -143,7 +140,7 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps({**FACTS, "sources": {str(source): hashlib.sha256(source.read_bytes()).hexdigest()}}))
     args = SimpleNamespace(build_arg=[], target="gpu", tools=["baseline", "local"], gpu_toolchain={},
-                           gpu_policy="auto", memory_model="scoped", scope_entry="step", scope_source="application.f90",
+                           gpu_policy="auto", scope_entry="step", scope_source="application.f90",
                            scope_source_file=[], scope_facts=facts, scope_effect_contracts=None,
                            calibration_profile=None, source_pattern=["**/*.f90"], select=[], exclude=[],
                            marked_only=False, no_coverage=False, jobs=1, threads=4)
@@ -151,10 +148,8 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
     seen = []
 
     def adapt(_tool, project_root, _python, _output, **kwargs):
-        assert kwargs["memory_model"] == "scoped"
         assert kwargs["gpu_options"]["scope_transfers"] == getattr(args, "scope_transfers", "direct")
-        assert kwargs["gpu_options"]["scope_execution"] == "graph"
-        assert not {"scope_measurement", "scope_cost"} & kwargs["gpu_options"].keys()
+        assert not {"scope_measurement", "scope_cost", "scope_execution"} & kwargs["gpu_options"].keys()
         copied = kwargs["scope_options"]["capture_facts"]
         assert copied != facts
         body = json.loads(copied.read_text())
@@ -185,9 +180,6 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         third, worker_metadata = prepare_build("local", args, setup, {})
         args.scope_transfers = "pinned"
         fourth, _ = prepare_build("local", args, setup, {})
-        args.scope_execution = "graph"
-        explicit_graph, _ = prepare_build("local", args, setup, {})
-        assert explicit_graph == fourth and len(seen) == 4
         args.gpu_policy = "sections"
         fifth, sections_metadata = prepare_build("local", args, setup, {})
         profile = tmp_path / "hardware.json"
@@ -200,9 +192,8 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         seventh, changed_profile_metadata = prepare_build("local", args, setup, {})
     assert len(seen) == 7
     assert len({first.parent, second.parent, third.parent, fourth.parent, fifth.parent, sixth.parent, seventh.parent}) == 7
-    assert metadata["identity"]["scope"]["execution"] == "graph"
-    assert not {"measurement", "cost_sha256"} & metadata["identity"]["scope"].keys()
-    assert metadata["identity"]["memory_model"] == "scoped"
+    assert not {"measurement", "cost_sha256", "execution"} & metadata["identity"]["scope"].keys()
+    assert "memory_model" not in metadata["identity"]
     assert "scope_extraction.py" in metadata["identity"]["implementation"]
     assert metadata["identity"]["workers"] != worker_metadata["identity"]["workers"]
     assert sections_metadata["identity"]["gpu_policy"] == "sections"
@@ -211,43 +202,15 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
         "sha256": hashlib.sha256(profile.read_bytes()).hexdigest()}
 
 
-@pytest.mark.parametrize(("name", "value"), [
-    ("scope_execution", "bounded"), ("scope_execution", "reached"),
-])
-def test_retired_scope_configuration_is_rejected_before_build(tmp_path, name, value):
-    facts = tmp_path / "facts.json"
-    facts.write_text(json.dumps(FACTS))
-    args = SimpleNamespace(memory_model="scoped", scope_entry="step", scope_source="application.f90",
-                           scope_facts=facts, target="gpu", tools=["baseline", "local"], gpu_policy="sections",
-                           scope_execution="graph")
-    setattr(args, name, value)
-    with pytest.raises(ValueError, match="Retired public|require graph"):
-        scoped_configuration(args)
-    assert json.loads(facts.read_text()) == FACTS
-    assert list(tmp_path.iterdir()) == [facts]
-
-
 @pytest.mark.parametrize("transfers", ["pinned", "coalesced"])
-def test_scoped_configuration_rejects_retired_ownership_and_policy(tmp_path, transfers):
+def test_scoped_configuration_carries_transfers_and_rejects_retired_policy(tmp_path, transfers):
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps(FACTS))
-    args = SimpleNamespace(memory_model="call", scope_entry="step", scope_source="application.f90",
+    args = SimpleNamespace(scope_entry="step", scope_source="application.f90",
                            scope_facts=facts, target="gpu", tools=["baseline", "local"], gpu_policy="auto")
-    with pytest.raises(ValueError, match="removed"):
-        scoped_configuration(args)
-    args.memory_model = "scoped"
     assert scoped_configuration(args)["capture_facts"] == facts
     args.scope_transfers = transfers
     assert scoped_configuration(args)["transfers"] == transfers
-    assert scoped_configuration(args)["execution"] == "graph"
-    args.scope_execution = "graph"
-    assert scoped_configuration(args)["execution"] == "graph"
-    args.memory_model = "call"
-    args.scope_entry = args.scope_source = args.scope_facts = None
-    with pytest.raises(ValueError, match="removed"):
-        scoped_configuration(args)
-    args.memory_model = "scoped"
-    args.scope_entry, args.scope_source, args.scope_facts = "step", "application.f90", facts
     args.gpu_policy = "hybrid"
     with pytest.raises(ValueError, match="sections or auto"):
         scoped_configuration(args)
@@ -334,7 +297,7 @@ if os.environ.get('ELMM_TEST_SCOPED_PROFILE'):
     options['calibration_profile']=os.environ['ELMM_TEST_SCOPED_PROFILE']
 source=root/'application/src'
 adapter=adapt_project('local',source,Path(sys.executable),root/'generated',compiler_root=compiler,
-                      target='gpu',memory_model='scoped',defines=['DPREC'],gpu_options=options,
+                      target='gpu',defines=['DPREC'],gpu_options=options,
                       scope_options={'entry':'source_application::step','source':'application.f90',
                                      'capture_facts':facts})
 binary=build(root/'application',root/'PoisFFT',root/'build',scons,root/'lib',1,4,[],

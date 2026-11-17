@@ -73,7 +73,7 @@ end module
         entry = "resident_cfl_source::values" if name == "cfl" else "resident_average_source::accumulate"
         target = directory / (name + "-entry")
         transformed = transform(source, Path(compiler_root), Path(python), target, entry=entry,
-                                gpu_options={"gpu_policy": "sections", "memory_model": "scoped",
+                                gpu_options={"gpu_policy": "sections",
                                              "scope_transfers": "direct", "host_threads": 4})
         shared = transformed["shared_entry"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):

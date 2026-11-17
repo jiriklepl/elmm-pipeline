@@ -258,15 +258,15 @@ Validation reports native, GPU, mixed, hybrid, and chunked decisions separately
 from successful CUDA launches. An intentional all-native policy run remains a
 valid numerically checked result and makes no GPU execution claim.
 
-### Opt-in shared source scopes
+### Shared source scopes
 
-`--memory-model call` remains the default. The local CUDA backend additionally
-accepts `--memory-model scoped` with `sections` or `auto`. Supply an entry, the
-original entry source, its available source closure, and explicit capture facts:
+The local CUDA backend integrates checked source scopes with caller-owned
+storage under the `sections` or `auto` policy. Supply an entry, the original
+entry source, its available source closure, and explicit capture facts:
 
 ```sh
 python3 pipeline.py run --tools local --target gpu --gpu-policy sections \
-  --memory-model scoped --scope-entry module_name::advance \
+  --scope-entry module_name::advance \
   --scope-source advance.f90 --scope-source-file numerical.f90 \
   --scope-source-file shared_arrays.f90 --scope-facts /path/to/captures.json \
   --config /path/to/case --threads 4 --repeats 3 --warmups 1
@@ -287,9 +287,7 @@ imports needed for capture and effect analysis. Call-region selection filters
 (`--select`, `--exclude`, `--marked-only`) do not apply to this mode. The entry
 names and source paths identify available input; they supply no grouping recipe.
 
-Source scopes use graph execution by default. `--scope-execution graph` makes
-that choice explicit; the former `bounded` and `reached` values are rejected.
-The compiler decides which original child regions and native operations may
+Source scopes always use graph execution. The compiler decides which original child regions and native operations may
 share a context, retaining their control and effect dependencies. Consult the
 manifest and runtime traces for actual ownership boundaries and GPU execution.
 

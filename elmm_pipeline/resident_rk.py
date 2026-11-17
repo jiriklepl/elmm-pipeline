@@ -99,7 +99,7 @@ def generate_entries(extracted, compiler_root, python, directory):
         try:
             result = transform(Path(region["input_path"]), Path(compiler_root), Path(python), target,
                                entry=region["entry"],
-                               gpu_options={"gpu_policy": "sections", "memory_model": "scoped",
+                               gpu_options={"gpu_policy": "sections",
                                             "scope_transfers": "direct", "host_threads": 4})
         except RuntimeError as error:
             rejected.append({"procedure": region["procedure"], "first_line": region["first_line"],

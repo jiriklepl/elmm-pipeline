@@ -30,7 +30,7 @@ def test_public_adapter_rejects_retired_options_before_creating_artifacts(tmp_pa
     assert not output.exists()
 
 
-@pytest.mark.parametrize("extra", [["--scope-execution", "bounded"], ["--scope-execution", "reached"],
+@pytest.mark.parametrize("extra", [["--scope-execution", "graph"], ["--memory-model", "scoped"],
                                    ["--scope-cost", "absent.json"], ["--scope-measurement", "native"]])
 def test_public_cli_rejects_retired_arguments_before_run(monkeypatch, extra):
     monkeypatch.setattr(sys, "argv", ["pipeline", "run", *extra])
@@ -40,24 +40,18 @@ def test_public_cli_rejects_retired_arguments_before_run(monkeypatch, extra):
     assert error.value.code == 2
 
 
-def test_public_cli_accepts_graph_and_defaults_to_shared_ownership(monkeypatch):
-    for extra, expected in [([], None), (["--scope-execution", "graph"], "graph")]:
-        monkeypatch.setattr(sys, "argv", ["pipeline", "run", *extra])
-        with patch.object(cli, "run") as run:
-            cli.main()
-        assert run.call_args.args[0].scope_execution == expected
-        assert run.call_args.args[0].memory_model == "scoped"
-        assert run.call_args.args[0].gpu_policy == "sections"
-        assert run.call_args.args[0].tools == ["baseline"]
+def test_public_cli_defaults_to_sections_and_the_baseline(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["pipeline", "run"])
+    with patch.object(cli, "run") as run:
+        cli.main()
+    assert run.call_args.args[0].gpu_policy == "sections"
+    assert run.call_args.args[0].tools == ["baseline"]
 
 
-def test_scoped_configuration_derives_graph_without_retired_fields(tmp_path):
+def test_scoped_configuration_has_no_retired_fields(tmp_path):
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps(FACTS))
-    args = SimpleNamespace(memory_model="scoped", target="gpu", tools=["baseline", "local"],
+    args = SimpleNamespace(target="gpu", tools=["baseline", "local"],
                            gpu_policy="auto", scope_entry="step", scope_source="application.f90",
                            scope_facts=facts)
-    assert cli.scoped_configuration(args)["execution"] == "graph"
-    assert not {"measurement", "cost"} & cli.scoped_configuration(args).keys()
-    with pytest.raises(ValueError, match="removed"):
-        cli.scoped_configuration(SimpleNamespace(memory_model="call"))
+    assert not {"measurement", "cost", "execution"} & cli.scoped_configuration(args).keys()

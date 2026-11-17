@@ -280,8 +280,6 @@ def transform(source_path: Path, compiler_root: Path, python: Path,
     source_path = Path(source_path).resolve(strict=True)
     output_dir = Path(output_dir).resolve()
     options = gpu_options or {}
-    if options.get("memory_model", "scoped") != "scoped":
-        raise LocalAdapterError("Ordinary-call generation was removed; use the resident or source-graph adapter")
     policy = options.get("gpu_policy", "sections")
     if policy not in {"sections", "auto"}:
         raise LocalAdapterError("Ordinary GPU policies were removed; use sections or auto")
@@ -289,7 +287,7 @@ def transform(source_path: Path, compiler_root: Path, python: Path,
         raise LocalAdapterError("Pipelined slab batching was removed; use shared graph execution")
     arguments = ["--kernel", entry, "--output-dir", str(output_dir), "--common-header", "runtime.hpp",
                  "--gpu-policy", policy, "--host-threads", str(options.get("host_threads", 4)),
-                 "--memory-model", "scoped", "--scope-transfers", options.get("scope_transfers", "direct")]
+                 "--scope-transfers", options.get("scope_transfers", "direct")]
     if options.get("calibration_profile"):
         arguments += ["--calibration-profile", str(Path(options["calibration_profile"]).resolve())]
     if (context or {}).get("gpu_dispatch") == "collective_single":
@@ -396,11 +394,10 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
     facts_path=output_dir/"scope-captures.json"
     facts_path.write_text(json.dumps(facts,indent=2)+"\n")
     arguments=["--kernel",entry,"--output-dir",str(output_dir),"--form-scopes",
-               "--scope-facts",str(facts_path),"--memory-model","scoped","--gpu-policy",policy,
+               "--scope-facts",str(facts_path),"--gpu-policy",policy,
                "--host-threads",str(options.get("host_threads",4))]
     if options.get("scope_transfers", "direct") != "direct":
         arguments += ["--scope-transfers", options["scope_transfers"]]
-    arguments += ["--scope-execution", "graph"]
     if collective is not None:
         arguments += ["--gpu-collective"]
     for source in source_files:

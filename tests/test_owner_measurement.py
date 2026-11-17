@@ -35,7 +35,6 @@ def test_public_compiler_rejects_removed_measurement_options_before_source_edits
         with patch("elmm_pipeline.gpu_toolchain.compile_gpu_sources", side_effect=AssertionError("removed producer cannot build")), \
                 pytest.raises(LocalAdapterError, match="Retired public source options: scope_measurement"):
             adapt_project("local", application, Path(sys.executable), tmp_path / (variant + "-adaptation"),
-                compiler_root=Path(__file__).resolve().parents[2], target="gpu", memory_model="scoped",
-                gpu_options=options, scope_options={"entry": "measurement_application::step",
+                compiler_root=Path(__file__).resolve().parents[2], target="gpu", gpu_options=options, scope_options={"entry": "measurement_application::step",
                                                   "source": source.name, "capture_facts": facts})
         assert source.read_bytes() == original

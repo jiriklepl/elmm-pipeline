@@ -142,7 +142,7 @@ class LocalCompilerProtocolTests(unittest.TestCase):
         with patch("elmm_pipeline.local_adapter.subprocess.run", side_effect=run_compiler):
             metadata = transform(self.source, self.snapshot, self.python, self.output, entry="advance",
                                  context={"nested_parallel": True},
-                                 gpu_options={"memory_model": "scoped", "gpu_policy": "sections"})
+                                 gpu_options={"gpu_policy": "sections"})
         self.assertEqual(metadata["target"], "scoped")
         self.assertEqual({Path(n).name for n in metadata["extra_sources"]},
                          {"shared_interface.f90", "fort_scoped_memory.f90"})
@@ -157,7 +157,7 @@ class LocalCompilerProtocolTests(unittest.TestCase):
             with self.subTest(change=change), patch("elmm_pipeline.local_adapter.subprocess.run",
                     return_value=self.completed({**report, **change})), self.assertRaisesRegex(LocalAdapterError, reason):
                 transform(self.source, self.snapshot, self.python, self.output, entry="advance",
-                          gpu_options={"memory_model": "scoped", "gpu_policy": "sections"})
+                          gpu_options={"gpu_policy": "sections"})
 
     def test_native_baseline_needs_no_scope_facts(self):
         from types import SimpleNamespace

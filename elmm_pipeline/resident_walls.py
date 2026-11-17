@@ -280,7 +280,7 @@ end module
         path.write_text(source)
         target = directory / (name + "-entry")
         transformed = transform(path, Path(compiler_root), Path(python), target, entry=entry,
-                                gpu_options={"gpu_policy": "sections", "memory_model": "scoped",
+                                gpu_options={"gpu_policy": "sections",
                                              "scope_transfers": "direct", "host_threads": 4})
         shared = transformed["shared_entry"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):

@@ -22,7 +22,7 @@ def original(tmp_path_factory, request):
              "sources": {str(path): sha256(path.read_bytes()).hexdigest()},
              "captures": {"native_graph::" + name: dict(fact) for name in ("a", "b", "c")}}
     builder = ScopeBuilder([path], "native_graph::advance", facts=facts, options=CompilerOptions(),
-        config=OffloadConfig(policy="sections", scope_execution="graph"),
+        config=OffloadConfig(policy="sections"),
         contracts={"native_graph::advance": {"native_ancestor": {
             "version": 1, "device_roots": ["native_graph::child"]}}})
     _outputs, report = builder.run()

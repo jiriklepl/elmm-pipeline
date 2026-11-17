@@ -120,7 +120,7 @@ native=mode.get('native',False)
 if native:artifacts={}
 hashes={name:digest(text) for name,text in artifacts.items()}
 runtime_hashes={'scoped_runtime.cu':hashes['scoped_runtime.cu']} if not native else {}
-manifest={'schema_version':1,'scope_execution':value('--scope-execution'),'scope_count':0 if native else 1,
+manifest={'schema_version':1,'scope_execution':'graph','scope_count':0 if native else 1,
  'scopes':[] if native else [{'owner':'qualified_companion','path':str(source),'first_line':1,'last_line':1,'gpu_leaves':['compiler_decision']}],
  'source_inputs':facts['sources'],'analysis_sources':analysis,
  'numerical_sources':sorted([{key:item[key] for key in ('procedure','path','entry','sha256')} for item in normalized['entries']],key=lambda item:item['procedure']),
@@ -369,7 +369,7 @@ from elmm_pipeline.adaptation import adapt_project
 source,compiler,facts,output=map(Path,sys.argv[1:])
 with patch('elmm_pipeline.gpu_toolchain.compile_gpu_sources',return_value={'public_build_inputs_only':True}):
  result=adapt_project('local',source.parent,Path(sys.executable),output,compiler_root=compiler,
-                     target='gpu',memory_model='scoped',gpu_options={'gpu_policy':'sections','host_threads':4},
+                     target='gpu',gpu_options={'gpu_policy':'sections','host_threads':4},
                      scope_options={'entry':'application::step','source':source.name,'capture_facts':facts})
 print(json.dumps(result))
 """
@@ -407,7 +407,7 @@ def test_build_cache_copy_remaps_collective_caller_and_native_assertions(tmp_pat
     facts_path = tmp_path / "build-facts.json"
     facts_path.write_text(json.dumps(facts))
     args = SimpleNamespace(build_arg=[], target="gpu", tools=["baseline", "local"], gpu_toolchain={},
-                           gpu_policy="sections", memory_model="scoped", scope_entry="application::step",
+                           gpu_policy="sections", scope_entry="application::step",
                            scope_source="application.f90", scope_source_file=[], scope_facts=facts_path,
                            scope_effect_contracts=None, calibration_profile=None, source_pattern=["**/*.f90"],
                            select=[], exclude=[], marked_only=False, no_coverage=False, jobs=1, threads=4)
@@ -462,7 +462,7 @@ from elmm_pipeline.adaptation import adapt_project
 source,compiler,facts,output=map(Path,sys.argv[1:])
 with patch('elmm_pipeline.gpu_toolchain.compile_gpu_sources',return_value={'native_build_deferred':True}):
  result=adapt_project('local',source.parent,Path(sys.executable),output,compiler_root=compiler,
-                     target='gpu',memory_model='scoped',defines=['REAL64'],
+                     target='gpu',defines=['REAL64'],
                      gpu_options={'gpu_policy':'sections','host_threads':4},
                      scope_options={'entry':'application::step','source':source.name,'capture_facts':facts})
 print(json.dumps(result))

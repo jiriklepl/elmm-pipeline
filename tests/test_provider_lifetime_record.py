@@ -126,7 +126,7 @@ def public_preparation(tmp_path, monkeypatch, *, request=REQUEST, source=PARENT,
     facts = json.loads(Path(result["capture_facts"]["path"]).read_text())
     contracts = json.loads(Path(result["effect_contracts"]["path"]).read_text())["procedures"]
     builder = ScopeBuilder(paths, result["entry"], facts=facts, contracts=contracts, analysis_sources=document,
-        options=CompilerOptions(), config=OffloadConfig(policy="sections", scope_execution="graph"))
+        options=CompilerOptions(), config=OffloadConfig(policy="sections"))
     return result, facts, builder
 
 

@@ -57,23 +57,17 @@ def compiler_identity():
 
 def scoped_configuration(args):
     """Validate explicit scope configuration without inferring capture facts."""
-    model = getattr(args, "memory_model", "scoped")
     transfers = getattr(args, "scope_transfers", "direct")
-    execution = getattr(args, "scope_execution", None)
     if transfers == "pipelined":
         raise ValueError("Pipelined slab batching was removed; use shared graph execution")
     if transfers not in {"direct", "pinned", "auto", "coalesced"}:
         raise ValueError("Unknown scope transfer mode")
-    if execution not in {None, "graph"}:
-        raise ValueError("Public source scopes require graph execution")
     values = {"entry": getattr(args, "scope_entry", None), "source": getattr(args, "scope_source", None),
               "source_files": getattr(args, "scope_source_file", None) or [],
               "capture_facts": getattr(args, "scope_facts", None),
               "effect_contracts": getattr(args, "scope_effect_contracts", None)}
-    if model != "scoped":
-        raise ValueError("Ordinary-call integration was removed; use resident-build or checked source scopes")
     if "local" not in args.tools:
-        if transfers != "direct" or execution is not None or any(values.values()):
+        if transfers != "direct" or any(values.values()):
             raise ValueError("Scope options require --target gpu and --tools local")
         return None
     if args.target != "gpu" or "local" not in args.tools or any(tool not in {"baseline", "local"} for tool in args.tools):
@@ -86,7 +80,6 @@ def scoped_configuration(args):
         if values[key]:
             values[key] = Path(values[key]).resolve(strict=True)
     values["transfers"] = transfers
-    values["execution"] = "graph"
     return values
 
 
@@ -113,9 +106,8 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
     paths.append(ROOT / "elmm_pipeline" / "gpu_toolchain.py")
     if tool == "local":
         key_data["local_compiler"] = digest_tree(repositories / "local-compiler" / "compiler")
-        key_data["memory_model"] = getattr(args, "memory_model", "scoped")
     scope_options = None
-    if tool == "local" and getattr(args, "memory_model", "scoped") == "scoped":
+    if tool == "local":
         scope_options = scoped_configuration(args)
         from .scoped_adaptation import scope_inputs
         base_src = (
@@ -129,7 +121,6 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
         key_data["scope"] = {"entry": scope_options["entry"], "source": scope_options["source"],
                              "source_files": scope_options["source_files"],
                              "transfers": scope_options["transfers"],
-                             "execution": scope_options["execution"],
                              "capture_facts_sha256": hashlib.sha256(scope_options["capture_facts"].read_bytes()).hexdigest(),
                              "effect_contracts_sha256": (hashlib.sha256(scope_options["effect_contracts"].read_bytes()).hexdigest()
                                                           if scope_options["effect_contracts"] else None)}
@@ -175,7 +166,6 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
         gpu_options.update(gpu_policy=getattr(args, "gpu_policy", "sections"), host_threads=args.threads)
         if scope_options:
             gpu_options["scope_transfers"] = scope_options["transfers"]
-            gpu_options["scope_execution"] = scope_options["execution"]
         profile_path = getattr(args, "calibration_profile", None)
         if profile_path:
             copied_profile = directory / "calibration.json"
@@ -218,8 +208,7 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
                                 source_patterns=args.source_pattern, include=args.select,
                                 exclude=args.exclude, marked_only=args.marked_only,
                                 defines=defines, coverage=not args.no_coverage,
-                                target=args.target, gpu_options=gpu_options,
-                                memory_model=getattr(args, "memory_model", "scoped"), scope_options=scope_options)
+                                target=args.target, gpu_options=gpu_options, scope_options=scope_options)
         if not adapter["regions"] and not adapter.get("native_success"):
             return None, {"identity": key_data, "adapter": adapter,
                           "reason": "No eligible regions accepted by this backend; native code preserved."}
@@ -340,7 +329,6 @@ def run(args):
               "settings": {"threads": args.threads, "repeats": args.repeats, "warmups": args.warmups,
                            "target": args.target, "gpu_profile": args.gpu_profile,
                            "gpu_policy": args.gpu_policy,
-                           "memory_model": getattr(args, "memory_model", "scoped"),
                            "scope": ({key: str(value) if isinstance(value, Path) else value
                                       for key, value in scope_options.items()} if scope_options else None),
                            "calibration_profile": ({"source": str(args.calibration_profile),
@@ -565,12 +553,8 @@ def main():
     measure.add_argument("--gpu-arch", help="NVIDIA compute capability, e.g. 86; default queries GPU")
     measure.add_argument("--gpu-policy", choices=("sections", "auto"), default="sections",
                          help="Shared graph placement; execution modes remain explicit runtime diagnostics")
-    measure.add_argument("--memory-model", choices=("scoped",), default="scoped",
-                         help="Caller-owned storage with checked source-graph integration")
     measure.add_argument("--scope-transfers", choices=("direct", "pinned", "auto", "coalesced"), default="direct",
                          help="Pass the scoped transfer mode to the compiler; independent of GPU placement")
-    measure.add_argument("--scope-execution", choices=("graph",),
-                         help="Source scope execution; graph is implicit with scoped memory")
     measure.add_argument("--scope-entry", help="Explicit procedure or module::procedure for scoped execution")
     measure.add_argument("--scope-source", help="Entry source path relative to the application src/ tree")
     measure.add_argument("--scope-source-file", action="append", default=[],

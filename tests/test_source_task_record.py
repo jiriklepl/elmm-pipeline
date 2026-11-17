@@ -65,7 +65,7 @@ def _issued(tmp_path, *, envelopes=False, source=SOURCE, facts=None, storage_tra
         proof = source_device_task(analysis, routine, nodes[first:last + 1], storage_transport=storage_transport)
     else:
         builder = ScopeBuilder([path], routine.qualified, facts=facts, options=CompilerOptions(),
-                               config=OffloadConfig(policy="sections", scope_execution="graph"))
+                               config=OffloadConfig(policy="sections"))
         analysis, routine = builder.analysis, builder.entry
         nodes = tuple(_children(routine.execution))
         proof = source_device_task(analysis, routine, nodes[first:last + 1], builder=builder, storage_transport=storage_transport)
@@ -253,7 +253,7 @@ def test_actual_generated_source_task_round_trips_whole_checked_plan(tmp_path):
     path.write_text(SOURCE)
     fact = {"storage": "stable", "initialized": "whole", "allocation_changes": False, "escapes": False}
     builder = ScopeBuilder([path], "stencil::advance", options=CompilerOptions(),
-        config=OffloadConfig(policy="sections", scope_execution="graph"),
+        config=OffloadConfig(policy="sections"),
         facts={"schema_version": 1, "participation": "serial",
                "sources": {str(path): sha256(path.read_bytes()).hexdigest()},
                "captures": {"argument::a": dict(fact), "argument::b": dict(fact)}})
@@ -279,7 +279,7 @@ def scalar_manifest(tmp_path):
              "sources": {str(path): sha256(path.read_bytes()).hexdigest()},
              "captures": {"argument::" + name: dict(fact) for name in ("a", "b", "alpha")}}
     builder = ScopeBuilder([path], "stencil::advance", options=CompilerOptions(),
-        config=OffloadConfig(policy="sections", scope_execution="graph"), facts=facts)
+        config=OffloadConfig(policy="sections"), facts=facts)
     _outputs, manifest = builder.run()
     return manifest, facts
 

@@ -242,8 +242,7 @@ def test_independent_adapter_transports_reached_execution_without_choosing_segme
     assert not (tmp_path/'retired-reached').exists()
     metadata = transform_scopes(source,compiler,Path(sys.executable),tmp_path/'reached',entry='step',
                                 capture_facts=FACTS,gpu_options={'scope_execution':'graph'})
-    argv = metadata['command']
-    assert argv[argv.index('--scope-execution')+1] == 'graph'
+    assert '--scope-execution' not in metadata['command']
     manifest = metadata['scope_manifest']
     assert manifest['scope_execution'] == 'graph'
     assert manifest['scope_count'] == 1

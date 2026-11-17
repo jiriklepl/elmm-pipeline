@@ -36,7 +36,7 @@ end module
              "captures": {"argument::a": {"storage": "stable", "initialized": "whole",
                                            "escapes": False, "allocation_changes": False}}}
     ordinary = ScopeBuilder(paths, "other_work::increment", facts=facts, options=CompilerOptions(),
-                            config=OffloadConfig(policy="sections", scope_execution="graph"))
+                            config=OffloadConfig(policy="sections"))
     components = [provider.run(), ordinary.run()]
     for _, report in components:
         validate_checked_execution_plans(report)
@@ -161,7 +161,7 @@ end module
              "captures": {"argument::a": {"storage": "stable", "initialized": "whole",
                                            "escapes": False, "allocation_changes": False}}}
     builder = ScopeBuilder([source], "configured::increment", facts=facts, options=CompilerOptions(),
-                           config=OffloadConfig(policy="sections", scope_execution="graph"), analysis_sources=analysis)
+                           config=OffloadConfig(policy="sections"), analysis_sources=analysis)
     outputs, _report = compose_graph_scopes([*composed[4], builder.run()])
     root = directory / "artifacts"
     for name, content in outputs.items():

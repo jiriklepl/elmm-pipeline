@@ -55,7 +55,7 @@ class GPUPolicyProtocolTests(unittest.TestCase):
             self.assertEqual(argv[argv.index("--calibration-profile")+1], str(profile))
             self.assertEqual(argv[argv.index("--host-threads")+1], "4")
             self.assertIn("--gpu-collective", argv)
-            self.assertEqual(argv[argv.index("--memory-model")+1], "scoped")
+            self.assertNotIn("--memory-model", argv)
             self.assertEqual(result["compiler_report"]["scoped"], report["scoped"])
             self.assertNotIn("offload", result["compiler_report"])
 
@@ -98,7 +98,7 @@ class GPUPolicyProtocolTests(unittest.TestCase):
             args = SimpleNamespace(build_arg=[], target="gpu", gpu_toolchain={}, gpu_policy="auto",
                                    calibration_profile=profile, source_pattern=["**/*.f90"], select=[], exclude=[],
                                    marked_only=False, no_coverage=True, jobs=1, threads=4,
-                                   tools=["local"], memory_model="scoped", scope_execution="graph",
+                                   tools=["local"],
                                    scope_entry="step", scope_source="source.f90", scope_facts=facts)
             setup = {"pins": {}, "packages": {"local": []}, "native": {}}
             seen = []

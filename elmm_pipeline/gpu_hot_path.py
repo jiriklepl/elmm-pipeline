@@ -182,7 +182,7 @@ def prepare_pressure_device_entries(prepared, project_root, compiler_root, pytho
         output = directory / "entries" / region["id"]
         generated = transform(Path(region["input_path"]), Path(compiler_root), Path(python), output,
                               entry=region["entry"], context=region["context"],
-                              gpu_options={"gpu_policy": "sections", "memory_model": "scoped",
+                              gpu_options={"gpu_policy": "sections",
                                            "scope_transfers": "direct", "host_threads": 4})
         entries.append({"region": region, "directory": str(output), "entry": generated["shared_entry"],
                         "compiler_report": str(output / "compiler-report.json")})
