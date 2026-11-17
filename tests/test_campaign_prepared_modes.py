@@ -42,22 +42,3 @@ def test_adapter_rejects_wrong_root_missing_and_recursive_reference(tmp_path):
     manifest.unlink()
     with pytest.raises(FileNotFoundError):
         load_adapter(adapter)
-
-
-def prepared(tmp_path, label):
-    profile = tmp_path / (label + "-profile.json")
-    write(profile, {"runtime": label})
-    builds, diagnostics = {}, {}
-    for mode in ("native", "committed", "reworked"):
-        binary, receipt = (tmp_path / (label + "-" + mode + suffix) for suffix in (".bin", ".json"))
-        binary.write_bytes((label + mode).encode())
-        write(receipt, {"binary": str(binary)})
-        builds[mode] = {"binary": str(binary), "sha256": digest(binary), "build_receipt": str(receipt),
-                        "build_receipt_sha256": digest(receipt)}
-        diagnostics[mode] = {"binary": str(binary), "sha256": digest(binary)}
-    return {"schema_version": 1, "original_application": {"revision": "approved-common-basis"},
-            "contract_sha256": "common-contract", "field_policy": {"dtype": "<f8", "field_count": 20},
-            "threads": 4, "build_args": [], "builds": builds, "diagnostic_builds": diagnostics,
-            "compilers": {"committed": {"base_commit": "be58"}, "reworked": {"tree": label}},
-            "calibration_profile": {"path": str(profile), "sha256": digest(profile)},
-            "generation": {"committed": {"regions": []}, "reworked": {"regions": []}}}

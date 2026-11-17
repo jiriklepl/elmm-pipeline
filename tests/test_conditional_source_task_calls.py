@@ -1,7 +1,6 @@
 """A conditional owner preserves distinct source-CALL local namespaces."""
 from copy import deepcopy
 import json
-from pathlib import Path
 
 import pytest
 

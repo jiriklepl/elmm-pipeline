@@ -42,12 +42,6 @@ def dependency(args):
     return prefix, row, row["authority"]
 
 
-def seal(args):
-    prefix, _row, _authority = dependency(args)
-    prefix["identity"] = _digest({k: v for k, v in prefix.items() if k != "identity"})
-    reseal(args)
-
-
 def test_original_positional_keyword_parameter_calls_keep_unchanged_readability(authentic):
     report, facts = authentic
     before = deepcopy(report)

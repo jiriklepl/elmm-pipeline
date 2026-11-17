@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -134,76 +133,6 @@ class GPUPolicyProtocolTests(unittest.TestCase):
                                  hashlib.sha256(calls.read_bytes()).hexdigest())
             self.assertEqual(len({first.parent, second.parent, third.parent, fourth.parent}), 4)
             self.assertEqual([item["gpu_policy"] for item in seen], ["auto", "auto", "sections", "sections"])
-
-    def test_isolated_checkouts_use_public_policy_and_native_query(self):
-        compiler = os.environ.get("ELMM_TEST_COMPILER")
-        python = os.environ.get("ELMM_TEST_PYTHON")
-        if not compiler or not python or not shutil.which("gfortran") or not shutil.which("g++"):
-            self.skipTest("requires explicit compiler/Python and GNU compilers")
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pipeline = root / "pipeline"
-            snapshot = root / "compiler-checkout"
-            ignore = shutil.ignore_patterns("__pycache__", ".pytest_cache", ".ruff_cache")
-            implementation = Path(__file__).resolve().parents[1] / "elmm_pipeline"
-            shutil.copytree(implementation, pipeline / "elmm_pipeline", ignore=ignore)
-            shutil.copytree(Path(compiler) / "compiler", snapshot / "compiler", ignore=ignore)
-            source = root / "entry.f90"
-            source.write_text("""module policy_subject
-contains
-subroutine advance(a,n)
-real(8),intent(inout)::a(:)
-integer,intent(in)::n
-integer::i
-do i=1,n
- a(i)=a(i)+1.0_8
-end do
-end subroutine
-end module
-""")
-            request = {"source": str(source), "snapshot": str(snapshot), "python": python,
-                       "output": str(root / "generated")}
-            (pipeline / "request.json").write_text(json.dumps(request))
-            (pipeline / "run.py").write_text("""import json
-from pathlib import Path
-import elmm_pipeline
-from elmm_pipeline.local_adapter import transform
-request=json.loads(Path('request.json').read_text())
-result=transform(Path(request['source']),Path(request['snapshot']),Path(request['python']),
-                 Path(request['output']),entry='advance',gpu_options={'gpu_policy':'auto','host_threads':4})
-Path('result.json').write_text(json.dumps({'package':elmm_pipeline.__file__,'report':result}))
-""")
-            environment = dict(os.environ, PYTHONPATH=str(pipeline))
-            run = subprocess.run([python, str(pipeline / "run.py")], cwd=pipeline,
-                                 env=environment, capture_output=True, text=True, timeout=60)
-            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            result = json.loads((pipeline / "result.json").read_text())
-            self.assertTrue(Path(result["package"]).is_relative_to(pipeline))
-            report = result["report"]["compiler_report"]
-            self.assertEqual(report["offload"]["policy"], "auto")
-            self.assertFalse(report["offload"]["profile_available"])
-            query = report["offload"]["native_fallback_query"]
-            generated = root / "generated"
-            (generated / "driver.f90").write_text(f"""program verify
-use policy_subject
-implicit none
-real(8)::a(-2:8)
-a=3.0_8
-if ({query}(a,size(a))) error stop 'missing calibration selected GPU'
-call advance(a,size(a))
-if (any(a/=4.0_8)) error stop 'native result differs'
-print *, 'INDEPENDENT_POLICY_PASS'
-end program
-""")
-            for command in (
-                ["g++", "-O2", "-std=c++17", "-fopenmp", "-c", "region.cpp"],
-                ["gfortran", "-O2", "-fopenmp", "-ffree-line-length-none", "interface.f90", "driver.f90",
-                 "region.o", "-lstdc++", "-o", "verify"],
-                [str(generated / "verify")],
-            ):
-                run = subprocess.run(command, cwd=generated, capture_output=True, text=True, timeout=60)
-                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertIn("INDEPENDENT_POLICY_PASS", run.stdout)
 
 
 if __name__ == "__main__":

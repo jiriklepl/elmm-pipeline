@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from elmm_pipeline.campaigns.guard import memory_headroom
 

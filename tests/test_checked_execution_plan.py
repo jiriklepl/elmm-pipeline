@@ -63,22 +63,6 @@ def with_plan(metadata, *, facts=None, analysis=None):
     return plan
 
 
-def with_measured_applicability(metadata, selection="native"):
-    record = with_applicability(metadata)
-    scope = metadata["scope_manifest"]["scopes"][0]
-    contract = {"protocol": "checked-interval-process-v4"}
-    exact = {"available": True, "selection": selection, "reason": "verified complete-process decision",
-             "capture": False, "contract": contract, "contract_sha256": digest(contract),
-             "evidence_sha256": "e" * 64}
-    scope["exact_window"] = exact
-    record["requirements"][0].update(status="covered_by_checked_interval_attachment",
-                                      attachment=exact["contract_sha256"])
-    record["existing_exact_window"] = {key: value for key, value in exact.items() if key != "contract"}
-    seal(record)
-    save(metadata)
-    return record, exact
-
-
 def test_checked_plan_preserved_in_composition_without_placement_decisions(tmp_path, sources):
     first = package(tmp_path, sources, "first")
     second = package(tmp_path, sources, "second", source="consumer.f90")
