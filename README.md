@@ -697,6 +697,9 @@ their licenses.
 python3 -m pytest -q tests
 ```
 
+`tests/conftest.py` puts this checkout and a compiler checkout on the import
+path: the explicit `ELMM_COMPILER_ROOT` when set, otherwise the enclosing
+repository when this directory is its `elmm-pipeline` submodule.
 Parser tests require fparser in the test interpreter. Backend integration tests
 use explicit `ELMM_LOCAL_PYTHON` and `ELMM_COMPILER_ROOT` paths. End-to-end generic
 adaptation tests use `ELMM_TEST_COMPILER` and `ELMM_TEST_PYTHON`.
