@@ -177,34 +177,6 @@ def _tokenize_line(line: str, *, preserve_comments: bool) -> list[tuple[str, str
     return tokens
 
 
-def normalize_fortran_ws(text: str, *, preserve_comments: bool = False) -> str:
-    """Return a whitespace- and continuation-normalized Fortran representation."""
-    out_lines: list[str] = []
-    for line in _logical_lines(text):
-        tokens = _tokenize_line(line, preserve_comments=preserve_comments)
-        if not tokens:
-            continue
-        parts: list[str] = []
-        prev_kind = None
-        for kind, value in tokens:
-            rendered = value if kind in {"string", "comment"} else value.lower()
-            if kind == "omp":
-                rendered = "!$omp " + " ".join(value[5:].split()).lower()
-            elif kind == "compound":
-                prefix, suffix = rendered.split(":", 1)
-                rendered = f"{prefix} {suffix}"
-            if parts:
-                need_space = prev_kind in {"word", "number", "compound", "dotop"} and kind in {
-                    "word", "number", "compound", "dotop"
-                }
-                if need_space:
-                    parts.append(" ")
-            parts.append(rendered)
-            prev_kind = kind
-        out_lines.append("".join(parts))
-    return "\n".join(out_lines)
-
-
 def _token_to_regex(kind: str, value: str) -> str:
     if kind == "compound":
         prefix, suffix = value.split(":", 1)

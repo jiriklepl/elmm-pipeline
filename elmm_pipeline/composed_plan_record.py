@@ -17,7 +17,6 @@ _POLICY = {
 
 
 def validate_composed_plans(manifest, *, capture_facts):
-    from .application_build import selection_builds
     from .checked_execution_plan import validate_checked_execution_plans
     from .original_worksharing_record import (
         validate_original_worksharing_package_constraints,
@@ -52,12 +51,6 @@ def validate_composed_plans(manifest, *, capture_facts):
                  "composition component identity differs")
         _require(component.get("runtime") == manifest["runtime"] and bool(manifest["runtime"]),
                  "composition runtime differs")
-        _require("scope_measurement" not in component,
-                 "composition cannot erase a diagnostic measurement variant")
-        _require("exact_window_build_contract" not in component,
-                 "composition cannot erase an unsupported exact-window build contract")
-        _require(not selection_builds(component),
-                 "priced selection requires one original package and its complete build attestation")
         validate_checked_execution_plans(component)
         entries.append(component["entry"])
         for key in ("source_inputs", "sources", "artifacts_sha256", "runtime_provenance"):

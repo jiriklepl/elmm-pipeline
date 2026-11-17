@@ -16,7 +16,6 @@ from .ast_rewrites import (
     find_all_calls,
     find_call_span,
     find_routine_span,
-    find_unique_span,
     inline_tile_scratch_nests,
     parse_fortran,
     promote_line_snapshots,
@@ -534,7 +533,6 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     retain their native path. Physical allocations survive the proved three
     MOVE_ALLOC exchanges; the RK caller return publishes before unmanaged work.
     """
-    from .gpu_hot_path import _once, _routine
 
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)

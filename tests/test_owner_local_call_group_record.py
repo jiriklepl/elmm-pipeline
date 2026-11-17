@@ -61,10 +61,6 @@ def seal(report, *, preserve_scope_copy=False):
         "procedures": [{"procedure": p["procedure"], "emission_identity": p["emission_identity"]}
                        for p in plan["procedures"]], "storage_epoch_identity": epoch["identity"]})
     plan["identity"] = _digest({k: v for k, v in plan.items() if k != "identity"})
-    if "interval_applicability" in scope:
-        applicability = scope["interval_applicability"]
-        applicability.update(plan_identity=plan["identity"], execution_identity=plan["execution_identity"])
-        applicability["identity"] = _digest({k: v for k, v in applicability.items() if k != "identity"})
 
 
 def test_real_compiler_local_plan4_keeps_exact_span_exit_and_no_definition_grant(original):

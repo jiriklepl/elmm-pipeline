@@ -11,18 +11,10 @@ from pathlib import Path
 from .checked_execution_plan import validate_checked_execution_plans
 from .common import COMPILER_PHASE_TIMEOUT_SECONDS, python_environment
 from .gpu_toolchain import validate_numerical_contract
-from .owner_measurement import validate_owner_measurements
 
 
 class LocalAdapterError(RuntimeError):
     pass
-
-
-def _owner_measurements(manifest):
-    try:
-        return validate_owner_measurements(manifest)
-    except ValueError as error:
-        raise LocalAdapterError(str(error)) from error
 
 
 def _checked_execution_plans(manifest, *, capture_facts=None):
@@ -44,9 +36,6 @@ def _pressure_backend(manifest):
 def _numerical_build_fields(item):
     if not isinstance(item, dict):
         raise LocalAdapterError("Compiler numerical build metadata requires a source descriptor")
-    if "exact_window_build_contract" in item:
-        raise LocalAdapterError("Exact-window build contracts are unsupported by the application consumer; "
-                                "use the independently authenticated fixture producer")
     if "numerical_contract" not in item:
         return {}
     if item.get("language") not in {"cuda", "c++"}:
@@ -57,40 +46,8 @@ def _numerical_build_fields(item):
         raise LocalAdapterError(str(error)) from error
 
 
-def cuda_build_fields(report, path):
-    """Transport one ordinary compiler-approved CUDA build descriptor."""
-    if "build_sources" not in report:
-        return {}  # Historical compiler response; the build records legacy status.
-    units = report["build_sources"]
-    if not isinstance(units, list) or any(not isinstance(item, dict) for item in units):
-        raise LocalAdapterError("Compiler build sources require public source descriptors")
-    for item in units:
-        _numerical_build_fields(item)
-    selected = [item for item in units if item.get("path") == path and item.get("language") == "cuda"]
-    if len(selected) != 1:
-        raise LocalAdapterError("Compiler build sources must identify the requested CUDA artifact exactly once")
-    return _numerical_build_fields(selected[0])
-
-
-def _require_supported_scope_build(manifest):
-    """Do not drop cost applicability contracts the consumer cannot enforce."""
-    scopes = manifest.get("scopes", [])
-    if not isinstance(scopes, list):
-        raise LocalAdapterError("Compiler scope metadata requires a list of source scopes")
-    from .application_build import selection_builds
-
-    if "exact_window_build_contract" in manifest:
-        raise LocalAdapterError("Exact-window cost evidence requires complete CUDA and Fortran build attestation; "
-                                "the application consumer does not support this contract")
-    try:
-        selection_builds(manifest)
-    except (KeyError, TypeError, ValueError) as error:
-        raise LocalAdapterError(str(error)) from error
-
-
 def _scope_numerical_contracts(manifest):
     """Required runtime metadata must match the actual common build source."""
-    _require_supported_scope_build(manifest)
     units = manifest.get("build_sources", [])
     if not isinstance(units, list):
         raise LocalAdapterError("Compiler build sources require public source descriptors")
@@ -409,7 +366,11 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
                      numerical_sources: Path | None = None,
                      analysis_sources: Path | None = None,
                      summary_cache: Path | None = None) -> dict:
-    """Consume the current graph source protocol; historical transport is private."""
+    """Request approved source scopes; consume only versioned public artifacts.
+
+    Capture facts belong to extraction/capture safety. This adapter does not
+    choose grouping, effects, GPU leaves, transfers, or placement.
+    """
     options = dict(gpu_options or {})
     retired = {"scope_cost", "scope_measurement"} & options.keys()
     if retired:
@@ -418,39 +379,12 @@ def transform_scopes(source_path: Path, compiler_root: Path, python: Path, outpu
         raise LocalAdapterError("Public source scopes require graph execution")
     if options.get("scope_transfers") == "pipelined":
         raise LocalAdapterError("Pipelined slab batching was removed; use shared graph execution")
-    options["scope_execution"] = "graph"
-    return _transform_scopes_protocol(
-        source_path, compiler_root, python, output_dir, entry=entry,
-        source_files=source_files, capture_facts=capture_facts, gpu_options=options,
-        effect_contracts=effect_contracts, numerical_sources=numerical_sources,
-        analysis_sources=analysis_sources, summary_cache=summary_cache,
-        legacy_protocol=False)
-
-
-def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: Path, output_dir: Path, *,
-                              entry: str, source_files=(), capture_facts: dict, gpu_options=None,
-                              effect_contracts: Path | None = None,
-                              numerical_sources: Path | None = None,
-                              analysis_sources: Path | None = None,
-                              summary_cache: Path | None = None,
-                              legacy_protocol: bool) -> dict:
-    """Request approved source scopes; consume only versioned public artifacts.
-
-    Capture facts belong to extraction/capture safety. This adapter does not
-    choose grouping, effects, GPU leaves, transfers, or placement.
-    """
     source_path=Path(source_path).resolve(strict=True)
     output_dir=Path(output_dir).resolve()
     source_files=[Path(p).resolve(strict=True) for p in source_files]
-    options=gpu_options or {}
     policy=options.get("gpu_policy","sections")
     if policy not in {"sections","auto"}:
         raise LocalAdapterError("Scoped source execution requires sections or auto")
-    measurement = options.get("scope_measurement")
-    if measurement not in (None, "native", "resident"):
-        raise LocalAdapterError("Unknown scope measurement variant")
-    if measurement is not None and (policy != "sections" or options.get("scope_execution") != "reached"):
-        raise LocalAdapterError("Scope measurement requires sections policy and reached execution")
     facts=dict(capture_facts)
     sources=list(dict.fromkeys([source_path,*source_files]))
     hashes={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
@@ -458,8 +392,6 @@ def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: P
         raise LocalAdapterError("Scope capture facts belong to different source contents")
     facts["sources"]=hashes
     collective = _collective_scope_contract(facts, entry, options.get("host_threads", 4), hashes)
-    if measurement is not None and collective is not None:
-        raise LocalAdapterError("Scope measurement requires a noncollective original caller")
     output_dir.mkdir(parents=True,exist_ok=True)
     facts_path=output_dir/"scope-captures.json"
     facts_path.write_text(json.dumps(facts,indent=2)+"\n")
@@ -468,18 +400,7 @@ def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: P
                "--host-threads",str(options.get("host_threads",4))]
     if options.get("scope_transfers", "direct") != "direct":
         arguments += ["--scope-transfers", options["scope_transfers"]]
-    if options.get("scope_execution", "bounded") != "bounded":
-        arguments += ["--scope-execution", options["scope_execution"]]
-    if measurement is not None:
-        arguments += ["--scope-measurement", measurement]
-    cost_path = options.get("scope_cost")
-    cost_identity = None
-    if cost_path is not None:
-        cost_path = Path(cost_path).resolve(strict=True)
-        cost_identity = hashlib.sha256(cost_path.read_bytes()).hexdigest()
-        if collective is not None or measurement is not None:
-            raise LocalAdapterError("Scope cost requires a noncollective selection without diagnostic call measurement")
-        arguments += ["--scope-cost", str(cost_path)]
+    arguments += ["--scope-execution", "graph"]
     if collective is not None:
         arguments += ["--gpu-collective"]
     for source in source_files:
@@ -508,8 +429,6 @@ def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: P
             raise LocalAdapterError("Invalid numerical source package") from error
         arguments+=["--numerical-sources",str(numerical_sources)]
     report,command=_invoke(source_path,compiler_root,python,output_dir,entry,arguments,"scope-compiler.log")
-    if cost_path is not None and hashlib.sha256(cost_path.read_bytes()).hexdigest() != cost_identity:
-        raise LocalAdapterError("Scope cost request changed during compilation")
     manifest=report.get("scopes") if isinstance(report,dict) else None
     if (not isinstance(manifest,dict) or report.get("supported") is not True
             or manifest.get("schema_version") != 1 or type(manifest.get("scope_count")) is not int
@@ -523,17 +442,13 @@ def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: P
             or not isinstance(report.get("outputs"),list)):
         raise LocalAdapterError("Compiler source-scope report is missing versioned scope/capture/artifact facts")
     _checked_execution_plans(manifest, capture_facts=facts)
-    if not legacy_protocol and manifest.get("scope_execution") != "graph":
+    if manifest.get("scope_execution") != "graph":
         raise LocalAdapterError("Compiler returned a non-graph source protocol")
-    if legacy_protocol and manifest.get("scope_execution") != options.get("scope_execution", "bounded"):
-        raise LocalAdapterError("Historical compiler source protocol differs from its explicit request")
-    if _owner_measurements(manifest) != measurement:
-        raise LocalAdapterError("Compiler scope measurement variant differs from its request")
     _check_descriptor_expectation_contract(manifest, facts)
     if collective is not None:
         _check_collective_scope_report(manifest, collective)
     _scope_numerical_contracts(manifest)
-    if manifest["scope_count"] and measurement != "native":
+    if manifest["scope_count"]:
         runtime=manifest.get("runtime")
         if (not isinstance(runtime,dict) or runtime.get("abi_version") != 1
                 or runtime.get("link_once") is not True or not isinstance(runtime.get("runtime_id"),str)
@@ -578,17 +493,6 @@ def _transform_scopes_protocol(source_path: Path, compiler_root: Path, python: P
     pressure = _pressure_backend(manifest)
     if pressure is not None:
         metadata["pressure_backend"] = pressure
-    if cost_path is not None:
-        metadata["scope_cost"] = {"path": str(cost_path), "sha256": cost_identity}
-    from .application_build import selection_builds
-
-    if selection_builds(manifest):
-        metadata["application_build"] = {"compiler_root": str(Path(compiler_root).resolve()),
-                                         "python": str(Path(python).absolute()), "artifact_root": str(output_dir),
-                                         "manifest": str(output_dir / "scope-manifest.json"),
-                                         "manifest_sha256": hashlib.sha256((output_dir / "scope-manifest.json").read_bytes()).hexdigest()}
-    if measurement is not None:
-        metadata.update(measurement_only=True, scope_measurement=measurement)
     # The existing application build already scans GNU Fortran dependencies
     # and compiles separate CUDA objects. Supply its inputs from public roles.
     units=manifest.get("build_sources",[])
@@ -618,7 +522,6 @@ def _prepare_scope_sources(metadata, destinations):
     """Validate replacements without changing any application source."""
     manifest=metadata["scope_manifest"]
     _scope_numerical_contracts(manifest)
-    _owner_measurements(manifest)
     root=Path(metadata["artifact_root"]).resolve(strict=True)
     prepared=[]
     for component in manifest.get("component_manifests", [manifest]):
@@ -657,15 +560,6 @@ def apply_scope_sources(metadata: dict, destinations: dict[str, Path]) -> list[P
     prepared = _prepare_scope_sources(metadata, destinations)
     for destination, content in prepared:
         destination.write_bytes(content)
-    if "application_build" in metadata:
-        from .application_build import selection_builds
-
-        records = selection_builds(metadata["scope_manifest"])
-        originals = records[0]["contract"]["build_contract"]["original_inputs"]
-        # An omitted destination means the unchanged exact original path; no
-        # implicit basename/root relocation is performed.
-        metadata["application_build"]["destinations"] = {
-            source: str(Path(destinations.get(source, source)).resolve()) for source in originals}
     return [destination for destination, _ in prepared]
 
 
@@ -674,11 +568,9 @@ def _scope_package_build(metadata):
     if not isinstance(metadata, dict) or not isinstance(metadata.get("scope_manifest"), dict):
         raise LocalAdapterError("Scope composition requires compiler package metadata")
     manifest = metadata["scope_manifest"]
-    _require_supported_scope_build(manifest)
     _checked_execution_plans(manifest)
     if metadata.get("pressure_backend") != _pressure_backend(manifest):
         raise LocalAdapterError("Scope pressure backend differs from its checked epoch")
-    measurement = _owner_measurements(manifest)
     try:
         root = Path(metadata["artifact_root"]).resolve(strict=True)
     except (KeyError, TypeError, OSError) as error:
@@ -704,7 +596,7 @@ def _scope_package_build(metadata):
     if not isinstance(units, list):
         raise LocalAdapterError("Scope composition requires public build roles")
     runtime = manifest.get("runtime")
-    if manifest.get("scope_count", 0) and measurement != "native":
+    if manifest.get("scope_count", 0):
         if (not isinstance(runtime, dict) or runtime.get("schema_version") != 1
                 or runtime.get("abi_version") != 1 or runtime.get("link_once") is not True
                 or not isinstance(runtime.get("source_sha256"), dict) or not runtime["source_sha256"]
@@ -770,12 +662,6 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
     separate in the receipt; this function makes no compiler decisions.
     """
     packages = list(packages)
-    from .application_build import selection_builds
-
-    for package in packages:
-        _require_supported_scope_build(package.get("scope_manifest", {}))
-    if any(selection_builds(package.get("scope_manifest", {})) for package in packages):
-        raise LocalAdapterError("Priced selection bundles require one compiler-issued package and its complete build attestation")
     replacements, artifacts, artifact_hashes, runtime = {}, {}, {}, None
     pressure_requests = []
     for index, metadata in enumerate(packages):
@@ -822,7 +708,6 @@ def compose_scope_packages(packages, destinations: dict[str, Path]) -> dict:
         destination.write_bytes(content)
     return {"schema_version": 1, "tool": "local", "memory_model": "scoped",
             **({"pressure_backend": pressure} if pressure is not None else {}),
-            **({"measurement_only": True} if any(p["scope_manifest"].get("scope_measurement") for p in packages) else {}),
             "scope_packages": packages, "runtime": runtime, "build_artifacts": list(artifacts.values()),
             "patched_sources": [str(path) for path in replacements],
             "extra_sources": [item["source"] for item in artifacts.values() if item["language"] == "fortran"],

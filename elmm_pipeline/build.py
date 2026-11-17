@@ -192,7 +192,6 @@ def build(
     patched_sources: list[Path] | None = None,
     gpu_sources: list[GPUSource] | list[dict] | None = None,
     gpu_options: dict | None = None,
-    application_build: dict | None = None,
     pressure_backend: dict | None = None,
     precision: str = "dp",
 ) -> Path:
@@ -231,8 +230,6 @@ def build(
             raise ValueError(f"Missing or unsupported generated source: {path}")
     pressure = None
     if pressure_backend is not None:
-        if application_build is not None:
-            raise ValueError("Exact-window application verification does not support external pressure objects")
         from .gpu_pressure_build import require_pressure_backend
         selected_fortran = shutil.which(os.environ.get("FC", "gfortran"))
         if selected_fortran is None:
@@ -283,15 +280,7 @@ def build(
     receipt_directory = Path(tempfile.mkdtemp(prefix="host-command-receipts-", dir=build_dir))
     recorder_module = build_dir / "build_receipts.py"
     shutil.copyfile(Path(__file__).with_name("build_receipts.py"), recorder_module)
-    application_token = None
-    application_macros = None
-    if application_build is not None:
-        from .application_build import preflight
-
-        application_token = preflight(application_build, build_dir)
-        application_macros = application_token["macros"]
-    gpu_build = (compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines, jobs=jobs,
-                                    **({"application_macros": application_macros} if application_macros else {}))
+    gpu_build = (compile_gpu_sources(gpu_units, build_dir, gpu_options, defines=defines, jobs=jobs)
                  if gpu_units else None)
     injection = [
         "# Additional sources supplied by elmm-pipeline.",
@@ -462,10 +451,6 @@ def build(
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     build_manifest["build_receipts"] = {"path": str(receipt_path), "status": receipt["status"],
                                        "identity": receipt.get("identity")}
-    if application_token is not None:
-        from .application_build import attest
-
-        build_manifest["application_build"] = attest(application_build, application_token, receipt_path, build_dir)
     (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
     return binary
 
@@ -482,7 +467,6 @@ def build_generic_project(
     gpu_sources: list[GPUSource] | list[dict] | None = None,
     gpu_options: dict | None = None,
     defines: list[str] | None = None,
-    application_build: dict | None = None,
 ) -> Path:
     """Build a generic Fortran project configured by a declarative ``ProjectProfile``."""
     if jobs < 1 or threads < 1:
@@ -502,14 +486,6 @@ def build_generic_project(
     }
     input_hashes = snapshot_inputs(input_roots, exclude=[build_dir])
 
-    application_token = None
-    application_macros = None
-    if application_build is not None:
-        from .application_build import attest, preflight
-
-        application_token = preflight(application_build, build_dir)
-        application_macros = application_token["macros"]
-
     gpu_build = (
         compile_gpu_sources(
             gpu_units,
@@ -517,7 +493,6 @@ def build_generic_project(
             gpu_options,
             defines=active_defines,
             jobs=jobs,
-            **({"application_macros": application_macros} if application_macros else {}),
         )
         if gpu_units
         else None
@@ -613,9 +588,5 @@ def build_generic_project(
     }
     receipt_path = build_dir / "build-receipts.json"
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-    if application_token is not None:
-        from .application_build import attest
-
-        build_manifest["application_build"] = attest(application_build, application_token, receipt_path, build_dir)
     (build_dir / "build-command.json").write_text(json.dumps(build_manifest, indent=2) + "\n", encoding="utf-8")
     return binary

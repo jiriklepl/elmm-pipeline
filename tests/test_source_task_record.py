@@ -289,11 +289,6 @@ def bind_request_identity(manifest, facts):
     plan = scope["checked_execution_plan"]
     plan["capture_facts_identity"] = _digest(facts)
     seal_epoch_plan(plan)
-    applicability = scope["interval_applicability"]
-    applicability["plan_identity"] = plan["identity"]
-    applicability["execution_identity"] = plan["execution_identity"]
-    applicability["capture_facts_identity"] = plan["capture_facts_identity"]
-    applicability["identity"] = _digest({k: v for k, v in applicability.items() if k != "identity"})
 
 
 def test_explicit_scalar_fact_matches_request_with_default_lifetime(tmp_path):

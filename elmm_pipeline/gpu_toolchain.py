@@ -202,9 +202,6 @@ def validate_gpu_sources(sources: list[GPUSource] | list[dict]) -> list[dict]:
     for entry in sources:
         if not isinstance(entry, dict) or "source" not in entry or "language" not in entry:
             raise ValueError("GPU sources must be descriptors containing source and language")
-        if "exact_window_build_contract" in entry:
-            raise ValueError("Exact-window build contracts require complete CUDA and Fortran build attestation; "
-                             "this application build consumer does not support them")
         source = Path(entry["source"]).resolve()
         language = entry["language"]
         suffixes = {"cuda": {".cu"}}
@@ -232,7 +229,6 @@ def compile_gpu_sources(
     defines: list[str] | None = None,
     toolchain: dict | None = None,
     jobs: int = 1,
-    application_macros: dict[str, str] | None = None,
 ) -> dict:
     """Compile self-contained GPU objects and return GNU linker inputs.
 
@@ -274,11 +270,6 @@ def compile_gpu_sources(
                    "-ccbin", config["cuda_host_cxx"], "-Xcompiler=-fPIC,-fopenmp", *macros,
                    *numerical_options, *["-Xcompiler=" + option for option in host_options],
                    "-c", str(source), "-o", str(target)]
-        if str(source) in (application_macros or {}):
-            macro = application_macros[str(source)]
-            if not re.fullmatch(r"FORT_EXACT_WINDOW_BUILD_[0-9a-f]{64}=1", macro):
-                raise ValueError("Invalid verified application selection build macro")
-            command.insert(-4, "-D" + macro)
         unit["resolved_numerical_options"] = {"cuda": numerical_options, "host": host_options}
         unit["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
         unit["build_log"] = str(unit_log)

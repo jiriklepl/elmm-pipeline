@@ -24,8 +24,9 @@ after capture, serialization waits for DMA, and finalization joins the writer
 before domain retirement or field deallocation. Device snapshots count against
 the resident workspace budget; pinned snapshots have a 256 MiB cap. Unsupported
 frame types and active thermodynamic/scalar output retain coherent native access
-after waiting for queued frames. See the [qualified output milestone](../benchmarks/reports/gpu-async-output-20261110/README.md)
-for correctness, measured overlap and the primary performance comparison.
+after waiting for queued frames. The untracked `benchmarks/reports/gpu-async-output-20261110` report of the
+parent repository records correctness, measured overlap and the primary
+performance comparison.
 
 Adjacent numerical nests share a compiler entry within each original control
 branch. Coverage checks count original source nests rather than entry calls, so
@@ -292,12 +293,6 @@ The compiler decides which original child regions and native operations may
 share a context, retaining their control and effect dependencies. Consult the
 manifest and runtime traces for actual ownership boundaries and GPU execution.
 
-`--scope-measurement` and `--scope-cost` are retired public options. Historical
-owner-timing records and private compiler reference fixtures remain available
-for inspecting earlier experiments; they do not configure current production
-execution. Use complete-process application measurements and separate profiles
-to qualify the current graph or resident application path.
-
 Lexical scopes may include a compiler-issued `checked_execution_plan` schema 1
 inside the existing scope-manifest schema 1. The adapter validates its canonical
 JSON identity, source and configuration-input linkage, original procedure and
@@ -311,22 +306,7 @@ procedure also carries an opaque emission identity binding the compiler's
 admitted control and effect state. Operation trees, definitions,
 native interruptions, policy, and unavailable-cost reasons remain compiler facts.
 This explanatory record grants no additional placement or build authority.
-Earlier packages without the optional record remain supported. Exact-window
-build contracts remain rejected until the application consumer can enforce their
-full applicability contract.
-
-The optional scope-level `interval_applicability` schema 1 accompanies that
-checked plan. It records compiler-owned workload-key candidates and missing
-measurement/build/outcome evidence. Before source edits, the adapter checks its
-content digest, exact plan/source/configuration/resource linkage and lack of
-execution or placement authority. Composition preserves it unchanged. Its
-compact existing-exact-window projection must match the authoritative attachment;
-it cannot add calibration or bypass the application build-contract requirement.
-The same schema also transports `covered_by_checked_interval_attachment` when
-the compiler has verified complete-process evidence. Each covered requirement
-must reference the exact available, non-capture interval contract and its
-evidence identity. This includes measured native decisions; coverage does not
-mean residency was selected. These diagnostics never authorize build edits.
+Earlier packages without the optional record remain supported.
 
 Capture facts use the compiler's versioned public JSON contract. They declare
 participation and canonical resource roots with storage lifetime, escape,
@@ -424,180 +404,6 @@ Unknown contracts, conflicting requirements and hidden `NVCC_PREPEND_FLAGS` or
 the contract retain their existing flags and are recorded as `legacy_unspecified`;
 they do not acquire a strict numerical guarantee. Compiler metadata is consumed
 through public JSON, without importing its implementation or inspecting kernels.
-
-Complete-window measurements have a stronger build requirement: their costs
-depend on the exact CUDA and Fortran performance options as well as the numerical
-contract. The legacy fixture protocols, including `complete-original-window-cold-v4`
-and `exact_window_build_contract` descriptors, remain unsupported by the
-application consumer and are rejected before source replacement or compilation.
-
-The `checked-interval-process-v4` protocol supports compiler-checked original
-intervals and numerical groups through `--scope-cost FILE`. The pipeline
-transports this source-bound request unchanged; it does not choose intervals or
-derive costs. Its `executed-application-build-v1` contract uses successful native
-and resident origin receipts, explicit original-source mappings, per-unit
-ordered compiler arguments, compiler identities, generated-language recipes,
-and a declared final link policy. Original Fortran flags can differ between
-units and are preserved. Only declared build paths and exact source/object
-operands are normalized. Current compiler workers and runtime identities are
-bound separately from the old controls' approved generated sources.
-The request may explicitly select
-`"acceptance": {"criterion": "paired_non_regression"}`; the compiler then
-requires every resident timing to be no slower than its corresponding native
-timing, including both holdouts. Omitting it retains the compiler's default 5%
-advantage requirement. The pipeline preserves this criterion without changing
-the numerical validation or evaluating performance itself.
-
-The request requires a numerical validation policy bound before capture. The
-compiler verifies full-float64 diagnostic fields, storage bounds and required
-ordinary outputs against actual payloads at those fixed tolerances. Required
-output fields are a minimum inventory; all fields present in the matched native
-and resident outputs are compared. Diagnostic
-build evidence identifies one reviewed driver replacement and preserves all
-other numerical objects and recorded build arguments. This source is a trusted
-validation input; its hash alone does not prove instrumentation correctness.
-The pipeline transports these facts and leaves their acceptance to the compiler.
-Versions 1 through 3 of the process contract are rejected, including static-native
-diagnostic records. Their captures require regeneration and rebuilding before
-they can supply version 4 interval evidence. The compiler verifies successful
-interval completion, zero guarded fallback transitions and actual GPU work;
-planned native interruptions are measured parts of the alternative. Changing a
-protocol label cannot reuse older evidence.
-
-`python -m elmm_pipeline.selection_request --request REQUEST --output NEW_DIRECTORY`
-assembles native/resident capture requests from existing executed build origins.
-It writes a hashed `session.json` and two `capture-*.json` scope-cost requests;
-these files grant no placement authority. Its request has `schema_version: 1`
-and the following explicit inputs:
-
-- `compiler: {"compiler_root": "/selected/checkout", "python": "/venv/bin/python"}`;
-- `analysis` with hashed `source`, optional `source_files`, `capture_facts`, an
-  `entry`, and optional hashed `analysis_sources`, `numerical_sources` and
-  `effect_contracts` packages;
-- `origins.native` and `origins.resident`, each with a hashed `receipt`, its
-  absolute `build_root`, and `source_mapping` from copied original files to the
-  immutable analysis/original files. The resident origin also requires its
-  hashed compiler-issued `manifest`;
-- `workloads`, each naming an absolute `configuration_directory`, contained
-  relative input `files`, expected `argv`, `environment` and `completion`;
-- a hashed `validation_policy` and reviewed `diagnostic_source`, whose digest
-  must match the policy's driver replacement;
-- explicit `acceptance`, such as `{"criterion": "paired_non_regression"}`, and
-  optional shared `gpu_options` (`host_threads`, `scope_transfers`,
-  `calibration_profile`).
-
-Every hashed reference is `{"path": "/absolute/file", "sha256": "..."}`.
-Both origins must contain actual successful compiler/link command receipts and
-current binaries. An existing resident origin supplies generated-language build
-recipes; it does not establish the numerical authority of a new window. The
-compiler verifies whether those recipes, source mappings and manifests are
-compatible when consuming the requests.
-
-Use the returned session with the existing public generation interface:
-
-```python
-from pathlib import Path
-from elmm_pipeline.selection_request import assemble, generation_inputs
-from elmm_pipeline.local_adapter import transform_scopes
-
-prepared = assemble(request, Path("/new/request-session"))
-capture = transform_scopes(output_dir=Path("/new/native-capture"),
-                          **generation_inputs(prepared["session"], "native"))
-# Repeat with "resident", apply each compiler manifest to explicit build copies,
-# build and attest them, then collect the workload evidence below.
-production = transform_scopes(
-    output_dir=Path("/new/production"),
-    **generation_inputs(prepared["session"], "production",
-                        production_scope_cost={"path": "/campaign/scope-cost.json",
-                                               "sha256": "..."}))
-```
-
-Capture and production reuse identical original paths. Before each generation,
-the assembler rechecks all recorded source, configured dependency, workload,
-origin and policy hashes. Production requires matching collector evidence,
-acceptance and workload identities. The compiler still authenticates that
-evidence and chooses placement. Public compiler generation and evidence
-verification have independent 240-second phase limits and retain partial logs
-on timeout. Virtualenv Python launcher paths are preserved.
-
-`python -m elmm_pipeline.selection_campaign --request REQUEST --output DIRECTORY`
-collects one compiler-issued workload from already built native/resident capture
-variants and approved full-field diagnostic relinks. The request contains:
-
-- `schema_version: 1`, a hashed `contract` reference (`path`, `sha256`), and the
-  exact `workload_identity` from that contract;
-- `compiler` with the explicitly selected `compiler_root` and `python`, plus
-  `configuration_directory` containing the unchanged workload files;
-- `builds.native` and `builds.resident`, the application observations returned
-  by build attestation, and corresponding `diagnostics` with hashed `plan`,
-  `build` and two executed `commands` references;
-- the existing `application_timeout_seconds`, which is required explicitly;
-- `completion: {"kind": "elmm-log"}` for natural ELMM completion with
-  `completed_steps` and `natural_end` workload fields, or
-  `completion: {"kind": "json-stdout"}` for a generic program that prints one
-  `FORT_APPLICATION_COMPLETION ` line followed by its observed completion JSON.
-
-The collector calls the selected compiler's public `selection_cost builds`
-verifier before running any executable. It then records one excluded warmup per
-mode, one separate full-float64 diagnostic pair, and seven rotated timing pairs
-plus two holdouts. All ordinary final/average outputs remain required in every
-timed pair. Real subprocess elapsed times include startup, output and teardown;
-no tracing or runtime forcing enters these samples. A declined resident warmup
-stops the campaign before further application runs. Run directories are never
-reused, and failed processes retain their measured receipts.
-
-The compiler's `selection_cost evaluate` command verifies the build/relink
-receipts, original observation logs, full fields including bounds and halos,
-ordinary outputs, and timing criterion. The collector emits `evidence.json` and
-a reusable `scope-cost.json` only after successful verification. A verified
-native decision remains native. The two compiler verifier calls each have a
-240-second limit; application processes keep the separately supplied runtime
-limit. This is calibration evidence, not final application qualification or a
-placement proof. Both primary cases still require fresh production AUTO runs
-and the separate native/SGS-direct/automatic-resident qualification campaign.
-
-Each collection covers one workload. Unmeasured workloads retain native
-execution. When both cases share an identical compiler contract, combine their
-completed packages with `--combine --request COMBINE.json --output DIRECTORY`.
-The combination request has `schema_version: 1`, the same explicit `compiler`
-transport, and `scope_costs`, a list of hashed references to the collected
-`scope-cost.json` files. Combination requires distinct campaigns covering every
-workload in the contract and rechecks all evidence through the compiler; one
-unprofitable workload cannot borrow another's advantage. Different source/plan
-contracts require separate calibration packages.
-
-For a package that emits a runtime selector, `transform_scopes` returns
-`metadata["application_build"]`. After `apply_scope_sources(metadata, destinations)`
-records the explicit application-copy mapping, pass that transport object to
-`build(..., application_build=metadata["application_build"])`. The build helper
-calls the explicitly selected compiler snapshot's public verifier:
-`python -m compiler.offload.application_build preflight|attest`.
-Preflight binds the finalized manifest, all admitted bundle groups, approved
-source destinations, and exact selector macros. The pipeline adds each returned
-`FORT_EXACT_WINDOW_BUILD_<selection-contract-sha256>=1` macro only to its selector.
-After linking, the verifier checks actual executed receipts and binds the final
-objects, manifest and binary in `application-build/attest.json`. A failed final
-verification blocks binary delivery. The preflight token alone grants no
-completed-build authority. Priced packages cannot be independently composed;
-their complete selection bundle must come from one compiler request.
-
-Native calibration has its own emitted original numerical execution and CPU
-observer. It may retain the common CUDA link envelope, whose startup is included
-in process measurements; it is not a claim of a CUDA-free binary. Its contract
-retains the resident workers' identities even when those unused artifacts are
-removed. Native capture has no GPU selector macro, but still requires the full
-source and executed-build attestation for its observer. A static automatic-native
-decision with no emitted selector requires no selector macro or application-cost
-build attestation. Legacy scoped AUTO
-calibrations retain their existing behavior.
-
-Calibration and production must analyze the same immutable original source
-paths. Separate mutable build copies use explicit destination mappings. The
-low-level `transform_scopes`/`apply_scope_sources`/`build` interfaces support this
-workflow. The high-level `prepare_build` cache currently copies sources into a
-request-specific directory; automatic reuse of its calibration across those
-different original paths is not qualified. `--scope-cost` is transported and
-hashed there, but cannot silently make incompatible source identities reusable.
 
 Each fresh application build also writes `build-receipts.json`. A shell-free
 SCons execution hook records the actual compiler and linker argument vectors,
@@ -1107,8 +913,8 @@ compilation or GPU work: all kernel-cache loading and population stays inside
 the application clock. Verification and profiles can populate the same cache.
 For rotated timings, prepare a fresh campaign cache before the excluded warmups,
 record its initial state, and report cold/warm startup separately; do not silently
-remove a populated cache during a campaign. See the
-[kernel-cache qualification](../benchmarks/reports/gpu-kernel-cache-20261031/README.md).
+remove a populated cache during a campaign. See the untracked
+`benchmarks/reports/gpu-kernel-cache-20261031` report of the parent repository.
 
 Unmeasured construction has separate resource controls. `pipeline.py run --jobs`
 limits independent CUDA compilations and the subsequent SCons build. Those
@@ -1182,30 +988,3 @@ nonzero exit codes are preserved; a sampler failure makes an otherwise successfu
 run fail. Use the campaign memory guard and a command timeout for heavy scripts,
 including bounds on filesystem waits during shutdown. These samples are
 diagnostics, not application timing measurements.
-
-For a complete-field diagnostic driver, select its unchanged original source
-from the compiler-attested application's structured executed build receipts:
-
-```python
-from elmm_pipeline.campaigns.driver_link import build_driver_link
-
-diagnostic = build_driver_link(
-    application_build, original_source=original_driver, source=diagnostic_driver,
-    object_path=new_object, output=new_executable,
-    directory=new_evidence_directory, module_inputs=current_fortran_modules,
-)
-```
-
-The helper executes the recorded compile and link commands with a 240-second
-limit per compiler command, retaining logs and actual command receipts. It
-preserves numerical flags, module paths, generated objects and library order;
-only the selected source, its object and the executable output change. The
-supplied or current environment must match the recorded build environment.
-Pass the current `.mod`/`.smod` dependencies explicitly. New outputs and the
-evidence directory must not exist. Failures preserve evidence and do not return
-an executable observation. Application runtime limits are unaffected.
-
-The returned `plan`, `build` and two `commands` references fit
-`selection_campaign`'s `diagnostics` entries. The compiler independently verifies
-them against the build contract and reviewed driver hash. The helper grants no
-numerical or placement authority and does not run the application.

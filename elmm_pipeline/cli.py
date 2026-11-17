@@ -60,8 +60,6 @@ def scoped_configuration(args):
     model = getattr(args, "memory_model", "scoped")
     transfers = getattr(args, "scope_transfers", "direct")
     execution = getattr(args, "scope_execution", None)
-    if getattr(args, "scope_measurement", None) is not None or getattr(args, "scope_cost", None) is not None:
-        raise ValueError("Retired public scope measurement/cost options")
     if transfers == "pipelined":
         raise ValueError("Pipelined slab batching was removed; use shared graph execution")
     if transfers not in {"direct", "pinned", "auto", "coalesced"}:
@@ -138,10 +136,9 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
     if tool != "baseline":
         key_data["target"] = args.target
         paths += [ROOT / "elmm_pipeline" / name for name in (
-            "adaptation.py", "discovery.py", "structural.py", "local_adapter.py",
-            "instrumentation.py", "common.py", "owner_measurement.py", "application_build.py")]
+            "adaptation.py", "discovery.py", "structural.py", "local_adapter.py", "common.py")]
         if args.target == "gpu":
-            paths += [ROOT / "elmm_pipeline" / name for name in ("gpu_discovery.py", "gpu_calls.py", "gpu_backend.py")]
+            paths += [ROOT / "elmm_pipeline" / name for name in ("gpu_discovery.py", "gpu_calls.py")]
             if scope_options:
                 paths += [ROOT / "elmm_pipeline" / name for name in ("scoped_adaptation.py", "scope_extraction.py")]
             key_data["gpu_toolchain"] = args.gpu_toolchain
@@ -238,7 +235,6 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
             gpu_sources=adapter.get("gpu_sources", []),
             gpu_options=args.gpu_toolchain,
             defines=defines,
-            application_build=adapter.get("application_build"),
         )
     else:
         binary = build(directory / "elmm", directory / "PoisFFT", directory / "bin",
@@ -248,8 +244,7 @@ def prepare_build(tool, args, setup_state, compilers, *, profile: ProjectProfile
                        patched_sources=[source_root / p for p in adapter.get("changed_files", [])],
                        gpu_sources=adapter.get("gpu_sources", []), gpu_options=args.gpu_toolchain,
                        precision=precision,
-                       **({"pressure_backend": adapter["pressure_backend"]} if "pressure_backend" in adapter else {}),
-                       **({"application_build": adapter["application_build"]} if "application_build" in adapter else {}))
+                       **({"pressure_backend": adapter["pressure_backend"]} if "pressure_backend" in adapter else {}))
     data = {"identity": key_data, "adapter": adapter,
             "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
             "changed_source_sha256": {name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()

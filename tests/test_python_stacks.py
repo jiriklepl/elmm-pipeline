@@ -44,7 +44,7 @@ assert __main__.__dict__ is globals()
 ordinary_annotation: int = 1
 with Path("visits").open("a") as stream:
     stream.write("once\\n")
-Path("seen.json").write_text(json.dumps({"argv":sys.argv,"name":__name__,"value":sibling.VALUE,"path0":sys.path[0],"file":__file__,"package":__package__,"spec":__spec__,"loader":__loader__,"cached":__cached__,"annotations_original":__annotations__["ordinary_annotation"] is int}))
+Path("seen.json").write_text(json.dumps({"argv":sys.argv,"name":__name__,"value":sibling.VALUE,"path0":sys.path[0],"file":__file__,"package":__package__,"spec":__spec__,"loader":__loader__,"cached":__cached__,"annotations_original":__main__.__annotations__["ordinary_annotation"] is int}))
 ''', arguments=("argument with spaces", "--original-option", "last"), interval="60")
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "visits").read_text() == "once\n"

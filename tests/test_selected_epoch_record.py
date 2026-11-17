@@ -32,11 +32,6 @@ def reseal(manifest):
     scope, plan, _epoch, selected = parts(manifest)
     selected["identity"] = _digest({k: v for k, v in selected.items() if k != "identity"})
     seal_epoch_plan(plan)
-    if "interval_applicability" in scope:
-        record = scope["interval_applicability"]
-        record["plan_identity"] = plan["identity"]
-        record["execution_identity"] = plan["execution_identity"]
-        record["identity"] = _digest({k: v for k, v in record.items() if k != "identity"})
 
 
 def test_actual_issued_selected_lifetime_carries_no_entry_or_execution_authority(issued):

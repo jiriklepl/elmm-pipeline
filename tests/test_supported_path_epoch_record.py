@@ -32,9 +32,6 @@ def seal(report, *, duplicate=True):
         "procedures": [{"procedure": row["procedure"], "emission_identity": row["emission_identity"]}
                        for row in plan["procedures"]], "storage_epoch_identity": epoch["identity"]})
     plan["identity"] = _digest({key: value for key, value in plan.items() if key != "identity"})
-    applicability = scope["interval_applicability"]
-    applicability.update(plan_identity=plan["identity"], execution_identity=plan["execution_identity"])
-    applicability["identity"] = _digest({key: value for key, value in applicability.items() if key != "identity"})
 
 
 @pytest.fixture(scope="module")

@@ -14,11 +14,9 @@ import unittest
 from unittest.mock import patch
 
 import test_local_adapter as local_fixture
-
-from elmm_pipeline.adaptation import patch_regions
 from elmm_pipeline.cli import prepare_build
 from elmm_pipeline.gpu_validation import gpu_activity, native_policy_exercised, offload_decisions
-from elmm_pipeline.instrumentation import execution_coverage, region_call
+from elmm_pipeline.instrumentation import execution_coverage
 from elmm_pipeline.local_adapter import transform
 
 
@@ -206,117 +204,6 @@ end program
                 run = subprocess.run(command, cwd=generated, capture_output=True, text=True, timeout=60)
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertIn("INDEPENDENT_POLICY_PASS", run.stdout)
-
-
-@unittest.skipUnless(shutil.which("gfortran"), "requires GNU Fortran")
-class NativePolicyDispatchTests(unittest.TestCase):
-    def test_public_patch_collective_query_barrier_and_native_fallback(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            original = "!$omp do\ndo i=1,n\na(i)=a(i)+1.0_8\nend do\n!$omp end do\n"
-            source = """module subject
-use policy_module, only: ready_signal
-implicit none
-real(8), allocatable :: a(:)
-contains
-subroutine advance(n)
-integer, intent(in) :: n
-integer :: i,lane
-ready_signal=0
-!$omp parallel num_threads(4) private(i,lane)
-!$omp do schedule(static,1)
-do lane=1,4
-if(lane==4) call delayed_ready()
-end do
-!$omp end do nowait
-"""+original+"""!$omp end parallel
-end subroutine
-subroutine delayed_ready()
-integer :: first,now,rate
-call system_clock(first,rate)
-do
- call system_clock(now)
- if(real(now-first)/rate>0.05) exit
-end do
-ready_signal=7
-end subroutine
-end module
-"""
-            path = root/"subject.f90"
-            path.write_text(source)
-            first = source[:source.index(original)].count("\n")+1
-            region = {"id": "policy", "source": "subject.f90", "entry": "offload", "generated_module": "policy_module",
-                      "start_line": first, "end_line": first+original.count("\n")-1,
-                      "insertion_line": source.splitlines().index("subroutine advance(n)")+2,
-                      "original_text": original, "call": "call offload(a,n,lbound(a,1),size(a))",
-                      "actual_args": ["a", "n", "lbound(a,1)", "size(a)"],
-                      "gpu_scope": {"dispatch": "collective_single", "expected_omp_level": 1,
-                                    "allocated_arrays": ["a"], "guard": "size(a)>=n"},
-                      "transformation": {"compiler_report": {"offload": contract()}}}
-            patch_regions(root, [region], coverage=False)
-            patched = path.read_text()
-            self.assertIn("only: offload, policy_query", patched)
-            self.assertNotIn("!$omp single", region_call(region, coverage=False))
-            (root/"policy.f90").write_text("""module policy_module
-use omp_lib
-implicit none
-integer :: ready_signal=0,queries=0,calls=0
-logical :: want_gpu=.false.
-contains
-logical function policy_query(field,n,lower,extent)
-real(8), intent(in) :: field(:)
-integer, intent(in) :: n,lower,extent
-if(ready_signal/=7) error stop 'query ran before native producer finished'
-if(extent/=size(field)) error stop 'descriptor changed'
-!$omp atomic update
-queries=queries+1
-policy_query=want_gpu
-end function
-subroutine offload(field,n,lower,extent)
-real(8), intent(inout) :: field(:)
-integer, intent(in) :: n,lower,extent
-integer :: index
-if(omp_get_num_threads()/=4) error stop 'existing team not reused'
-!$omp atomic update
-calls=calls+1
-!$omp do
-do index=1,n
- field(index-lower+1)=field(index-lower+1)+1.0_8
-end do
-!$omp end do
-end subroutine
-end module
-""")
-            (root/"driver.f90").write_text("""program verify
-use subject
-use policy_module
-use omp_lib
-implicit none
-call omp_set_dynamic(.false.)
-call advance(0)
-if(queries/=0.or.calls/=0) error stop 'unallocated query evaluated'
-allocate(a(-2:8)); a=-1.0_8
-want_gpu=.false.
-call advance(4)
-if(queries/=4.or.calls/=0.or.any(a(1:4)/=0.0_8)) error stop 'native fallback'
-want_gpu=.true.
-call advance(4)
-if(queries/=8.or.calls/=4.or.any(a(1:4)/=1.0_8)) error stop 'collective entry'
-if(any(a(-2:0)/=-1.0_8).or.any(a(5:8)/=-1.0_8)) error stop 'halo changed'
-!$omp parallel if(.false.)
-call advance(4)
-!$omp end parallel
-if(queries/=8.or.calls/=4.or.any(a(1:4)/=2.0_8)) error stop 'nested caller fallback'
-print *, 'POLICY_PASS'
-end program
-""")
-            build = subprocess.run(["gfortran", "-O0", "-fopenmp", "-fcheck=all", "-ffree-line-length-none",
-                                    "policy.f90", "subject.f90", "driver.f90", "-o", "verify"],
-                                   cwd=root, capture_output=True, text=True)
-            self.assertEqual(build.returncode, 0, build.stdout+build.stderr)
-            run = subprocess.run([str(root/"verify")], cwd=root, capture_output=True, text=True, timeout=15)
-            self.assertEqual(run.returncode, 0, run.stdout+run.stderr)
-            self.assertIn("POLICY_PASS", run.stdout)
 
 
 if __name__ == "__main__":

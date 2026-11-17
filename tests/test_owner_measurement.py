@@ -4,13 +4,10 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-from elmm_pipeline.owner_measurement import validate_owner_measurements
 
 
 def digest(value):
@@ -47,94 +44,6 @@ def fixture(tmp_path, variant="native"):
             "sources": {str(source): {"sha256": sha, "replacement": "sources/caller.f90"}},
             "build_sources": [{"path": "sources/caller.f90", "language": "fortran", "role": "original_source"}],
             "runtime": runtime if variant == "resident" else None}
-
-
-@pytest.mark.parametrize("variant", ["native", "resident"])
-def test_authenticated_diagnostic_record_has_no_placement_authority(tmp_path, variant):
-    manifest = fixture(tmp_path, variant)
-    assert validate_owner_measurements(manifest) == variant
-    changed = deepcopy(manifest)
-    changed["scope_measurement"] = changed["scopes"][0]["owner_measurement"]["variant"] = (
-        "resident" if variant == "native" else "native")
-    assert changed["scopes"][0]["owner_measurement"]["identity"] == manifest["scopes"][0]["owner_measurement"]["identity"]
-
-
-def test_ordinary_package_requires_no_measurement_contract():
-    assert validate_owner_measurements({"scopes": []}) is None
-
-
-@pytest.mark.parametrize("field,value", [
-    ("schema_version", True), ("protocol", "unknown"), ("variant", "resident"),
-    ("placement_authority", True), ("calibration_evidence", True),
-    ("automatic_estimate_available", True), ("execution_identity", "a" * 64),
-    ("source_inputs_identity", "a" * 64), ("configuration_identity", "a" * 64),
-    ("capture_facts_identity", "a" * 64), ("compiler_identity", "invalid"),
-    ("clock", "cpu_time"), ("observation_prefix", "ordinary timing"), ("limitations", []),
-    ("call_sites", []), ("extra", 1),
-])
-def test_measurement_contract_mismatch_rejects_even_after_rehash(tmp_path, field, value):
-    manifest = fixture(tmp_path)
-    record = manifest["scopes"][0]["owner_measurement"]
-    record[field] = value
-    seal(record)
-    with pytest.raises(ValueError, match="Compiler owner measurement"):
-        validate_owner_measurements(manifest)
-
-
-@pytest.mark.parametrize("mutation", ["identity", "top_variant", "scope_count", "missing_record", "automatic",
-                                       "native_runtime", "native_cuda", "native_helper", "native_extra_source"])
-def test_native_exception_cannot_relax_ordinary_runtime_requirements(tmp_path, mutation):
-    manifest = fixture(tmp_path)
-    if mutation == "identity":
-        manifest["scopes"][0]["owner_measurement"]["identity"] = "a" * 64
-    elif mutation == "top_variant":
-        del manifest["scope_measurement"]
-    elif mutation == "scope_count":
-        manifest["scope_count"] = 0
-    elif mutation == "missing_record":
-        del manifest["scopes"][0]["owner_measurement"]
-    elif mutation == "automatic":
-        manifest["automatic_estimate_available"] = True
-    elif mutation == "native_runtime":
-        manifest["runtime"] = {"runtime": "resident"}
-    elif mutation == "native_cuda":
-        manifest["build_sources"][0]["language"] = "cuda"
-    elif mutation == "native_helper":
-        manifest["build_sources"][0]["role"] = "common_runtime"
-    else:
-        manifest["sources"][str(tmp_path / "unrelated.f90")] = {"replacement": "sources/unrelated.f90"}
-    with pytest.raises(ValueError, match="Compiler owner measurement"):
-        validate_owner_measurements(manifest)
-
-
-@pytest.mark.parametrize("mutation", ["caller_source", "source_digest", "call_digest", "line", "duplicate", "file_changed"])
-def test_call_sites_are_bound_to_exact_original_source(tmp_path, mutation):
-    manifest = fixture(tmp_path)
-    record = manifest["scopes"][0]["owner_measurement"]
-    call = record["call_sites"][0]
-    if mutation == "caller_source":
-        call["source"] = str(tmp_path / "different.f90")
-    elif mutation == "source_digest":
-        call["source_sha256"] = "a" * 64
-    elif mutation == "call_digest":
-        call["call_sha256"] = "a" * 64
-    elif mutation == "line":
-        call["first_line"] = call["last_line"] = 1
-    elif mutation == "duplicate":
-        record["call_sites"].append(deepcopy(call))
-    else:
-        Path(call["source"]).write_text("subroutine caller\ncall other()\nend subroutine\n")
-    call["identity"] = digest({key: value for key, value in call.items() if key != "identity"})
-    seal(record)
-    with pytest.raises(ValueError, match="Compiler owner measurement"):
-        validate_owner_measurements(manifest)
-
-
-def test_resident_runtime_identity_is_authenticated(tmp_path):
-    manifest = fixture(tmp_path, "resident")
-    manifest["runtime"]["runtime_id"] = "changed"
-    with pytest.raises(ValueError, match="runtime identity"):
-        validate_owner_measurements(manifest)
 
 
 def test_public_compiler_rejects_removed_measurement_options_before_source_edits(tmp_path):

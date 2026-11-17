@@ -7,7 +7,6 @@ Primary VTK output uses bounded immutable snapshots and joins before teardown.
 """
 from pathlib import Path
 import json
-import re
 
 from .ast_rewrites import (
     find_call_span,

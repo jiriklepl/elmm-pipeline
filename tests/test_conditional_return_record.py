@@ -35,10 +35,6 @@ def seal(report):
         "procedures": [{"procedure": p["procedure"], "emission_identity": p["emission_identity"]} for p in plan["procedures"]],
         "storage_epoch_identity": epoch["identity"]})
     plan["identity"] = _digest({k: v for k, v in plan.items() if k != "identity"})
-    if "interval_applicability" in scope:
-        record = scope["interval_applicability"]
-        record.update(plan_identity=plan["identity"], execution_identity=plan["execution_identity"])
-        record["identity"] = _digest({k: v for k, v in record.items() if k != "identity"})
 
 
 def test_real_compiler_conditional_plan3_preserves_exact_old_execution_identity_recipe(issued):

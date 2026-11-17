@@ -1,8 +1,6 @@
 """Current graph transport and explicit frozen-control compatibility."""
 
-import hashlib
 import json
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,9 +8,8 @@ from unittest.mock import patch
 
 import pytest
 from elmm_pipeline import cli, local_adapter
-from elmm_pipeline._legacy_scopes import transform_scopes as historical_scopes
 from elmm_pipeline.common import COMPILER_PHASE_TIMEOUT_SECONDS
-from test_local_scopes import FACTS, PROGRAM
+from test_local_scopes import FACTS
 
 
 def test_compiler_phase_cap_is_240_seconds():
@@ -64,49 +61,3 @@ def test_scoped_configuration_derives_graph_without_retired_fields(tmp_path):
     assert not {"measurement", "cost"} & cli.scoped_configuration(args).keys()
     with pytest.raises(ValueError, match="removed"):
         cli.scoped_configuration(SimpleNamespace(memory_model="call"))
-
-
-@pytest.mark.parametrize(("historical", "response_execution", "error"), [
-    (False, "bounded", "non-graph"), (True, "graph", "Historical compiler source protocol"),
-])
-def test_source_transport_cannot_accept_the_other_compiler_protocol(tmp_path, historical, response_execution, error):
-    source = tmp_path / "application.f90"
-    source.write_text(PROGRAM)
-    hashes = {str(source): hashlib.sha256(source.read_bytes()).hexdigest()}
-    facts = {**FACTS, "sources": hashes}
-    manifest = {"schema_version": 1, "scope_execution": response_execution, "scope_count": 0,
-                "scopes": [], "source_inputs": hashes, "analysis_sources": None,
-                "capture_facts_sha256": hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest(),
-                "artifacts_sha256": {}}
-    response = {"supported": True, "scopes": manifest, "outputs": []}
-    adapter = historical_scopes if historical else local_adapter.transform_scopes
-    with (patch.object(local_adapter, "_invoke", return_value=(response, [])),
-          pytest.raises(local_adapter.LocalAdapterError, match=error)):
-        adapter(source, tmp_path, Path(sys.executable), tmp_path / "output", entry="step", capture_facts=FACTS)
-    assert source.read_text() == PROGRAM
-
-
-@pytest.mark.parametrize(("historical", "policy"), [(False, "auto"), (True, "auto"),
-                                                  (False, "sections"), (True, "sections")])
-def test_current_graph_and_frozen_be58_use_explicit_distinct_transports(tmp_path, historical, policy):
-    key = "ELMM_HISTORICAL_COMPILER_ROOT" if historical else "ELMM_TEST_COMPILER_ROOT"
-    compiler = os.environ.get(key)
-    if not compiler:
-        pytest.skip("Set " + key + " for the actual compiler protocol test")
-    source = tmp_path / "application.f90"
-    source.write_text(PROGRAM)
-    adapter = historical_scopes if historical else local_adapter.transform_scopes
-    metadata = adapter(source, Path(compiler), Path(sys.executable), tmp_path / "output",
-                       entry="step", capture_facts=FACTS, gpu_options={"gpu_policy": policy})
-    assert metadata["scope_manifest"]["scope_execution"] == ("bounded" if historical else "graph")
-    if policy == "auto":
-        assert metadata["scope_manifest"]["scope_count"] == 0
-        assert metadata["gpu_sources"] == metadata["extra_sources"] == []
-    else:
-        assert metadata["scope_manifest"]["scope_count"] > 0
-        assert metadata["gpu_sources"] and metadata["extra_sources"]
-    assert source.read_text() == PROGRAM
-    if historical:
-        assert "--scope-execution" not in metadata["command"]
-    else:
-        assert metadata["command"][metadata["command"].index("--scope-execution") + 1] == "graph"

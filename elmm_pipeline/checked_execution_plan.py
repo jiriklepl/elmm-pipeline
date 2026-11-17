@@ -11,7 +11,6 @@ import json
 import re
 from pathlib import Path
 
-from .application_build import PROTOCOL
 
 _PLAN_FIELDS = {
     "schema_version", "identity", "execution_identity", "entry", "sources", "source_inputs_identity",
@@ -47,13 +46,6 @@ _PROCEDURE_FIELDS = {
 }
 _UNIT_FIELDS = {
     "ordinal", "selected_node_ids", "first_line", "last_line", "resources", "ordered_definitions", "operations",
-}
-_APPLICABILITY_FIELDS = {
-    "schema_version", "kind", "identity", "plan_identity", "execution_identity",
-    "entry", "sources", "source_inputs_identity", "configuration_identity", "capture_facts_identity",
-    "canonical_resources", "key_candidates", "unclassified_dependencies", "original_control_trees",
-    "native_operations", "numerical_operations", "requirements", "existing_exact_window",
-    "placement_authorized", "execution_authorized", "existing_placement_unchanged", "identity_policy", "coverage",
 }
 
 
@@ -114,8 +106,6 @@ def validate_checked_execution_plans(manifest, *, capture_facts=None):
     for scope in scopes:
         if not isinstance(scope, dict):
             continue
-        _require("interval_applicability" not in scope or "checked_execution_plan" in scope,
-                 "interval applicability requires its checked plan")
         _require("external_device_tasks" not in scope or "checked_execution_plan" in scope,
                  "external device tasks require their checked plan")
         _require("source_device_tasks" not in scope or "checked_execution_plan" in scope,
@@ -149,8 +139,6 @@ def validate_checked_execution_plans(manifest, *, capture_facts=None):
                        for task in member.get("source_device_tasks", [])]
             _require(bool(records) and _digest(scope["source_device_tasks"]) == _digest(records),
                      "source device tasks differ from their checked epoch")
-        if "interval_applicability" in scope:
-            _validate_applicability(scope["interval_applicability"], scope["checked_execution_plan"], scope)
 
     from .original_worksharing_record import validate_original_worksharing_constraints
 
@@ -503,70 +491,3 @@ def _validate_storage_transfer(record, member, inputs):
     temporary = moves[0][1]
     _require(temporary not in formals and moves == [(formals[0], temporary), (formals[1], formals[0]), (temporary, formals[1])],
              "storage transfer original MOVE_ALLOC order differs")
-
-
-def _validate_applicability(record, plan, scope):
-    """Transport explanatory key candidates, never accept them as calibration."""
-    _require(isinstance(record, dict) and set(record) == _APPLICABILITY_FIELDS,
-             "interval applicability requires the complete v1 schema")
-    _require(type(record["schema_version"]) is int and record["schema_version"] == 1
-             and record["kind"] == "checked-interval-cost-applicability",
-             "interval applicability has an unsupported schema version or kind")
-    _require(_sha256(record["identity"])
-             and record["identity"] == _digest({key: value for key, value in record.items() if key != "identity"}),
-             "interval applicability identity differs from its contents")
-    _require(record["plan_identity"] == plan["identity"], "interval applicability plan identity differs")
-    for key in ("execution_identity", "entry", "sources", "source_inputs_identity", "configuration_identity",
-                "capture_facts_identity"):
-        _require(record[key] == plan[key], "interval applicability " + key + " differs")
-    _require(record["canonical_resources"] == plan["resources"],
-             "interval applicability canonical resources differ")
-    _require(record["placement_authorized"] is False and record["execution_authorized"] is False
-             and record["existing_placement_unchanged"] is True,
-             "interval applicability cannot authorize execution or placement")
-    exact = scope.get("exact_window")
-    _require(exact is None or isinstance(exact, dict), "requires a structured exact-window attachment")
-    projection = None if exact is None else {key: exact[key] for key in (
-        "available", "selection", "reason", "contract_sha256", "evidence_sha256", "capture") if key in exact}
-    _require(record["existing_exact_window"] == projection,
-             "interval applicability cannot add or replace an exact-window attachment")
-    _require(all(_text(record[key]) for key in ("identity_policy", "coverage")),
-             "interval applicability requires its evidence limitations")
-    for key in ("key_candidates", "unclassified_dependencies", "original_control_trees", "native_operations",
-                "numerical_operations", "requirements"):
-        _require(isinstance(record[key], list) and all(isinstance(item, dict) for item in record[key]),
-                 "interval applicability requires structured " + key)
-    for candidate in record["key_candidates"]:
-        _require(_text(candidate.get("resource")) and _text(candidate.get("kind"))
-                 and candidate.get("safe_evaluation_authorized") is False
-                 and isinstance(candidate.get("properties"), list)
-                 and isinstance(candidate.get("missing_proofs"), list),
-                 "interval applicability candidates cannot authorize runtime evaluation")
-    for requirement in record["requirements"]:
-        _require(_text(requirement.get("kind")) and _text(requirement.get("reason")),
-                 "interval applicability requires explanatory requirements")
-        if requirement.get("status") == "covered_by_checked_interval_attachment":
-            # This is the existing v1 producer's measured-coverage state, for
-            # both native and resident decisions. It conveys no new authority;
-            # source edits and build attestation retain their separate checks.
-            _require(exact is not None and exact.get("available") is True
-                     and exact.get("capture") is False
-                     and _text(exact.get("selection"))
-                     and exact.get("selection") in {"native", "resident"}
-                     and isinstance(exact.get("contract"), dict)
-                     and exact["contract"].get("protocol") == PROTOCOL
-                     and _sha256(exact.get("contract_sha256"))
-                     and exact["contract_sha256"] == _digest(exact["contract"])
-                     and _sha256(exact.get("evidence_sha256"))
-                     and requirement.get("attachment") == exact["contract_sha256"],
-                     "interval applicability covered requirement differs from its measured attachment")
-        else:
-            _require(requirement.get("status") == "not_established" and "attachment" not in requirement,
-                     "interval applicability requires unresolved explanatory requirements")
-    procedures = {item["procedure"]: item for item in plan["procedures"]}
-    for key in ("original_control_trees", "native_operations", "numerical_operations"):
-        for item in record[key]:
-            procedure, ordinal = item.get("procedure"), item.get("unit")
-            _require(_text(procedure) and procedure in procedures and type(ordinal) is int
-                     and 0 <= ordinal < len(procedures[procedure]["units"]),
-                     "interval applicability operation is outside its checked interval")

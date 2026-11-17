@@ -10,8 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-from elmm_pipeline.gpu_backend import transform as gpu_transform
 from elmm_pipeline.local_adapter import LocalAdapterError, check, transform
 
 
@@ -160,26 +158,6 @@ class LocalCompilerProtocolTests(unittest.TestCase):
                     return_value=self.completed({**report, **change})), self.assertRaisesRegex(LocalAdapterError, reason):
                 transform(self.source, self.snapshot, self.python, self.output, entry="advance",
                           gpu_options={"memory_model": "scoped", "gpu_policy": "sections"})
-
-    def test_removed_call_adapter_rejects_before_compilation_or_writes(self):
-        from elmm_pipeline.adaptation import adapt_project
-        with patch("elmm_pipeline.local_adapter.subprocess.run") as run:
-            for operation in (
-                lambda: gpu_transform("local", self.source, self.python, self.output,
-                                      compiler_root=self.snapshot, entry="advance"),
-                lambda: transform(self.source, self.snapshot, self.python, self.output,
-                                  entry="advance", gpu_options={"memory_model": "call"}),
-                lambda: adapt_project("local", self.root, self.python, self.output,
-                                      memory_model="call"),
-            ):
-                with self.subTest(operation=operation), self.assertRaisesRegex((ValueError, LocalAdapterError), "removed"):
-                    operation()
-            for policy in ("always", "chunked", "hybrid"):
-                with self.subTest(policy=policy), self.assertRaisesRegex(LocalAdapterError, "removed"):
-                    transform(self.source, self.snapshot, self.python, self.output,
-                              entry="advance", gpu_options={"gpu_policy": policy})
-            run.assert_not_called()
-        self.assertFalse(self.output.exists())
 
     def test_native_baseline_needs_no_scope_facts(self):
         from types import SimpleNamespace

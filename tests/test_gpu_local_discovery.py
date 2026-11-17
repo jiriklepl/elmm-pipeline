@@ -5,12 +5,9 @@ import importlib.util
 import os
 from pathlib import Path
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
-
-from elmm_pipeline.adaptation import patch_regions
 
 AVAILABLE = all(importlib.util.find_spec(name) is not None for name in ("fparser", "islpy"))
 if AVAILABLE:
@@ -189,76 +186,6 @@ end module
         result = self.discover(invalid)
         self.assertFalse(result["regions"])
         self.assertTrue(any("ALLOCATED inquiry requires" in item["reason"] for item in result["rejected"]))
-
-    def test_compiled_allocatables_bounds_and_imperfect_conditionals(self):
-        source = """module subject
-implicit none
-real(8), allocatable :: field(:,:),output(:,:)
-contains
-subroutine advance(last,enabled)
-integer, intent(in) :: last
-logical, intent(in) :: enabled
-integer :: row,column
-real(8) :: weight
-logical :: keep
-!$omp parallel private(row,column,weight,keep)
-!$omp do
-do row=-1,last
- weight=real(row,kind=8)+0.25_8
- keep=enabled
- do column=lbound(field,dim=1)+1,ubound(array=field,dim=1)-1
-  if (keep) then
-   output(column,row)=field(column,row)+weight
-  else
-   output(column,row)=field(column,row)-weight
-  end if
- end do
-end do
-!$omp end do
-!$omp end parallel
-end subroutine
-end module
-"""
-        result = self.discover(source)
-        self.assertEqual(len(result["regions"]), 1, result["rejected"])
-        region = result["regions"][0]
-        self.assertEqual(region["gpu_scope"]["allocated_arrays"], ["field", "output"])
-        self.assertTrue(all("UBOUND" not in value.upper() and "SIZE" not in value.upper() for value in region["actual_args"]))
-        (self.root/"reference.f90").write_text(source.replace("module subject", "module reference"))
-        patch_regions(self.root, [region], coverage=False)
-        driver = self.root/"driver.f90"
-        driver.write_text("""program verify
-use subject, only: candidate=>advance,cf=>field,co=>output
-use reference, only: original=>advance,rf=>field,ro=>output
-implicit none
-integer :: shape,iteration
-call original(-2,.true.)
-call candidate(-2,.true.)
-do shape=1,2
- allocate(cf(-3:5+shape,-2:3),co(-3:5+shape,-2:3))
- allocate(rf(-3:5+shape,-2:3),ro(-3:5+shape,-2:3))
- do iteration=1,2
-  cf=real(iteration,8)*2.5_8
-  rf=cf
-  co=-30
-  ro=co
-  call original(2,iteration==1)
-  call candidate(2,iteration==1)
-  if (any(cf/=rf).or.any(co/=ro)) stop 1
- end do
- deallocate(cf,co)
- deallocate(rf,ro)
-end do
-end program
-""")
-        binary = self.root/"verify"
-        built = subprocess.run(["gfortran", "-O0", "-fopenmp", "-fcheck=all", "-ffree-line-length-none",
-                                region["input_path"], str(self.root/"reference.f90"), str(self.source), str(driver), "-o", str(binary)],
-                               cwd=self.root, capture_output=True, text=True)
-        self.assertEqual(built.returncode, 0, built.stdout+built.stderr)
-        run = subprocess.run([str(binary)], cwd=self.root, capture_output=True, text=True, timeout=20,
-                             env={**os.environ, "OMP_NUM_THREADS": "4"})
-        self.assertEqual(run.returncode, 0, run.stdout+run.stderr)
 
 
 if __name__ == "__main__":

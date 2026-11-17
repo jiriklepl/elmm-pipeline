@@ -1,5 +1,4 @@
 """Region publication and complete generic backend integration."""
-import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -7,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 
-from elmm_pipeline.adaptation import adapt_project, patch_regions, selected
+from elmm_pipeline.adaptation import adapt_project
 
 
 SOURCE = """module field_steps
@@ -51,46 +50,6 @@ if(maxval(abs(state-expected))>1d-12) stop 1
 print *, 'GENERIC_REGION_MATCH'
 end program
 """
-
-
-class PublicationTests(unittest.TestCase):
-    def test_selection_hints_are_optional_and_name_independent(self):
-        region = {"module": "Fluid", "routine": "Update", "source": "physics.f90"}
-        self.assertTrue(selected(region))
-        self.assertTrue(selected(region, include=["fluid::*"]))
-        self.assertFalse(selected(region, exclude=["*::update"]))
-        self.assertFalse(selected(region, marked_only=True))
-        self.assertTrue(selected({**region, "annotated": True}, marked_only=True))
-
-    def test_source_span_mismatch_does_not_publish_partial_edits(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "first.f90").write_text("subroutine first\ninteger::i\ni=1\nend\n")
-            (root / "second.f90").write_text("subroutine second\ninteger::i\ni=2\nend\n")
-            before = {p: p.read_bytes() for p in root.iterdir()}
-            regions = []
-            for name, value in (("first", "i=1\n"), ("second", "i=WRONG\n")):
-                regions.append({"id": name, "source": name + ".f90", "start_line": 3,
-                                "end_line": 3, "insertion_line": 2, "original_text": value,
-                                "generated_module": "generated_" + name, "entry": "kernel_" + name,
-                                "call": f"call kernel_{name}(i)"})
-            with self.assertRaisesRegex(ValueError, "changed"):
-                patch_regions(root, regions)
-            self.assertEqual(before, {p: p.read_bytes() for p in root.iterdir()})
-
-    def test_unmarked_patch_preserves_native_context(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = "subroutine native\ninteger::i\ni=1\nend\n"
-            (root / "custom.f90").write_text(source)
-            region = {"id": "unique", "source": "custom.f90", "start_line": 3, "end_line": 3,
-                      "insertion_line": 2, "original_sha256": hashlib.sha256(b"i=1\n").hexdigest(),
-                      "generated_module": "outlined", "entry": "run_region", "call": "call run_region(i)"}
-            self.assertEqual(patch_regions(root, [region], coverage=False), ["custom.f90"])
-            text = (root / "custom.f90").read_text()
-            self.assertIn("use outlined, only: run_region", text)
-            self.assertNotIn("ELMM_PIPELINE", text)
-            self.assertTrue(text.endswith("end\n"))
 
 
 class NativeGenericIntegrationTests(unittest.TestCase):

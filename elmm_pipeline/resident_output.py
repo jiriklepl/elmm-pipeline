@@ -9,7 +9,6 @@ from .ast_rewrites import (
     find_call_span,
     find_once,
     find_routine_span,
-    find_unique_span,
     replace_once,
 )
 

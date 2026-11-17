@@ -77,7 +77,7 @@ def _reseal(report):
 
 @pytest.mark.parametrize("fault", ["component_hash", "component_entry", "plan", "scope_union", "edit_union",
     "sources", "build", "runtime", "helper", "provider", "missing_components", "missing_marker",
-    "policy_bool", "count_bool", "non_graph", "nested", "measurement", "exact_build", "extra_artifact"])
+    "policy_bool", "count_bool", "non_graph", "nested", "extra_artifact"])
 def test_composed_record_rejects_changed_component_or_aggregate(composed, fault):
     _, _, original, _, _ = composed
     report = copy.deepcopy(original)
@@ -119,12 +119,6 @@ def test_composed_record_rejects_changed_component_or_aggregate(composed, fault)
         _reseal(report)
     elif fault == "nested":
         component["component_manifests"] = []
-        _reseal(report)
-    elif fault == "measurement":
-        component["scope_measurement"] = "resident"
-        _reseal(report)
-    elif fault == "exact_build":
-        component["exact_window_build_contract"] = {"schema_version": 1}
         _reseal(report)
     else:
         report["artifacts_sha256"]["unbound.f90"] = "0" * 64
@@ -210,21 +204,6 @@ def test_stale_component_dependency_rejects_before_any_source_write(configured_c
         assert all(path.read_bytes() == content for path, content in original.items())
     finally:
         include.write_bytes(saved)
-
-
-def test_composition_cannot_drop_component_build_requirement_before_application(composed, tmp_path):
-    paths, _, original, _, _ = composed
-    report = copy.deepcopy(original)
-    report["component_manifests"][0]["exact_window_build_contract"] = {"schema_version": 1}
-    _reseal(report)
-    destinations = {}
-    for path in paths:
-        destination = tmp_path / path.name
-        destination.write_bytes(path.read_bytes())
-        destinations[str(path)] = destination
-    with pytest.raises(RuntimeError, match="unsupported exact-window build contract"):
-        apply_scope_sources({"scope_manifest": report, "artifact_root": str(tmp_path / "absent")}, destinations)
-    assert all(destination.read_bytes() == Path(source).read_bytes() for source, destination in destinations.items())
 
 
 def test_composition_does_not_accept_one_capture_fact_set_for_distinct_roots(composed):

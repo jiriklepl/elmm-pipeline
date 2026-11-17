@@ -213,8 +213,6 @@ def test_scoped_build_cache_copies_facts_and_keeps_all_native_builds(tmp_path):
 
 @pytest.mark.parametrize(("name", "value"), [
     ("scope_execution", "bounded"), ("scope_execution", "reached"),
-    ("scope_measurement", "native"), ("scope_measurement", "resident"),
-    ("scope_cost", "absent-cost.json"),
 ])
 def test_retired_scope_configuration_is_rejected_before_build(tmp_path, name, value):
     facts = tmp_path / "facts.json"

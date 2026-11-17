@@ -237,7 +237,8 @@ def test_summary_rejects_edited_flags_without_file_changes(built_receipts, tmp_p
 
 def test_real_scons_preserves_per_source_flags_and_builds_with_spaces(tmp_path):
     python = Path(os.environ.get("ELMM_SCONS_PYTHON", str(Path(__file__).resolve().parents[1] / ".cache/envs/build/bin/python")))
-    if not python.is_file() or not shutil.which("gfortran"):
+    if (not python.is_file() or not shutil.which("gfortran")
+            or subprocess.run([str(python), "-c", "import SCons"], capture_output=True, check=False).returncode):
         pytest.skip("Requires the pipeline SCons environment and GNU Fortran")
     directory = tmp_path / "source tree"
     directory.mkdir()

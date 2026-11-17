@@ -2,15 +2,11 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import tempfile
 import unittest
-
-from elmm_pipeline.adaptation import patch_regions
 
 HAS_FPARSER = importlib.util.find_spec("fparser") is not None
 if HAS_FPARSER:
@@ -143,102 +139,6 @@ end do
         # The old singleton scan rejected the first loop because fparser
         # treats the later PRIVATE list as a possible iterator-value read.
         self.assertEqual([r["loop_nests"] for r in result["regions"]], [2], result["rejected"])
-
-    def test_later_bound_observes_native_final_tile_iterator(self):
-        source = """module subject
-implicit none
-contains
-subroutine advance(a,b)
-real(kind=8), intent(inout) :: a(:),b(:)
-integer :: t,i
-t=2
-do t=1,4,2
- do i=t,min(t+2-1,4)
-  a(i)=a(i)+1
- end do
-end do
-do i=1,t-1
- b(i)=b(i)+1
-end do
-end subroutine
-end module
-"""
-        result = self.discover(source)
-        self.assertEqual(len(result["regions"]), 1, result["rejected"])
-        region = result["regions"][0]
-        self.assertEqual(region["loop_nests"], 1)
-        self.assertEqual(region["gpu_scope"]["kind"], "rectangular")
-        self.assertTrue(any("tile iterator remains live" in item["reason"] for item in result["rejected"]))
-        (self.root / "reference.f90").write_text(source.replace("module subject", "module reference"))
-        patch_regions(self.root, [region], coverage=False)
-        self.assertIn("do t=1,4,2", self.path.read_text())
-        driver = self.root / "driver.f90"
-        driver.write_text("""program verify
-use subject, only: candidate=>advance
-use reference, only: original=>advance
-implicit none
-real(kind=8) :: a(4),b(4),reference_a(4),reference_b(4)
-a=0
-b=0
-reference_a=0
-reference_b=0
-call original(reference_a,reference_b)
-call candidate(a,b)
-if (any(a/=reference_a) .or. any(b/=reference_b)) stop 1
-if (any(b/=1)) stop 2
-end program
-""")
-        executable = self.root / "verify"
-        compile_ = subprocess.run(["gfortran", "-O0", "-fopenmp", "-fcheck=all", "-ffree-line-length-none",
-            region["input_path"], str(self.root/"reference.f90"), str(self.path), str(driver), "-o", str(executable)],
-            cwd=self.root, capture_output=True, text=True)
-        self.assertEqual(compile_.returncode, 0, compile_.stdout + compile_.stderr)
-        run = subprocess.run([str(executable)], cwd=self.root, capture_output=True, text=True, timeout=15)
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-
-    def test_compiled_group_preserves_halos_empty_domains_and_full_fallback(self):
-        for parallel in ("serial", "collective"):
-            with self.subTest(parallel=parallel):
-                source = adjacent(2, parallel=parallel, tiled=(False, True))
-                result = self.discover(source)
-                self.assertEqual(len(result["regions"]), 1, result["rejected"])
-                region = result["regions"][0]
-                self.assertEqual(region["loop_nests"], 2)
-                (self.root / "reference.f90").write_text(source.replace("module subject", "module reference"))
-                patch_regions(self.root, [region], coverage=False)
-                driver = self.root / "driver.f90"
-                driver.write_text("""program verify
-use subject, only: candidate=>advance
-use reference, only: original=>advance
-implicit none
-real(kind=8) :: a(-3:9,-3:9),b(-3:9,-3:9),reference_a(-3:9,-3:9),reference_b(-3:9,-3:9),data(-3:9,-3:9)
-integer :: test,stride,low,high
-low=-2
-high=7
-do test=1,4
- stride=3
- if (test==2) stride=20
- if (test==3) stride=-2
- if (test==4) high=-3
- a=-31.0_8
- b=-47.0_8
- reference_a=a
- reference_b=b
- data=0.5_8*test
- call original(reference_a,reference_b,data,low,high,stride)
- call candidate(a,b,data,low,high,stride)
- if (any(a/=reference_a) .or. any(b/=reference_b)) stop 1
-end do
-end program
-""")
-                executable = self.root / "verify"
-                compile_ = subprocess.run(["gfortran", "-O0", "-fopenmp", "-fcheck=all", "-ffree-line-length-none",
-                    region["input_path"], str(self.root/"reference.f90"), str(self.path), str(driver), "-o", str(executable)],
-                    cwd=self.root, capture_output=True, text=True)
-                self.assertEqual(compile_.returncode, 0, compile_.stdout + compile_.stderr)
-                run = subprocess.run([str(executable)], cwd=self.root, capture_output=True, text=True,
-                                     env={**os.environ, "OMP_NUM_THREADS": "3"}, timeout=15)
-                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
 
 if __name__ == "__main__":
