@@ -7,14 +7,12 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from test_campaign_cpu_placement import CPUS
-from test_campaign_cpu_placement import inputs as campaign_inputs
 from test_campaign_profile import fixture as profiler_fixture
 
 from elmm_pipeline.campaigns import __main__ as commands
 from elmm_pipeline.campaigns import halos
 from elmm_pipeline.campaigns import profile as profiling
-from elmm_pipeline.campaigns.identity import read, write
+from elmm_pipeline.campaigns.identity import digest, read, write
 from elmm_pipeline.campaigns.launch_environment import (
     apply_launch_environment,
     freeze_launch_environment,
@@ -25,43 +23,36 @@ from elmm_pipeline.campaigns.run import environment, run_one
 VALUES = {"OMP_WAIT_POLICY": "PASSIVE", "GOMP_SPINCOUNT": None}
 
 
-inputs = campaign_inputs
+@pytest.fixture
+def inputs(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    (repo / "code.py").write_text("fixture\n")
+    monkeypatch.setattr("elmm_pipeline.campaigns.prepare.repository", lambda root, paths: {
+        "root": str(root), "commit": "a" * 40, "paths": paths,
+        "sha256": {"code.py": digest(root / "code.py")}})
+    config_dir = tmp_path / "configuration"
+    config_dir.mkdir()
+    (config_dir / "options.nml").write_text("&inputs /\n")
+    reference, binary, profile = (tmp_path / name for name in ("reference.vtk", "program", "profile.json"))
+    reference.write_text("fields\n")
+    binary.write_text("binary\n")
+    write(profile, {"cpu_threads": 4, "precision_bits": 64, "scoped": {"runtime_id": "runtime"},
+                    "hardware": {"gpu_uuid": "GPU-fixture"}})
+    config = {"schema_version": 1, "threads": 4, "runtime_id": "runtime", "profile": str(profile),
+              "cases": [{"name": "case", "config": str(config_dir), "reference": str(reference)}],
+              "modes": [{"name": "native", "binary": str(binary), "sha256": digest(binary)}],
+              "baseline_modes": ["native"], "repositories": {
+                  name: {"path": str(repo), "paths": ["code.py"]} for name in ("compiler", "pipeline")},
+              "tools": {"time": [sys.executable, "--version"]}}
+    source, output = tmp_path / "config.json", tmp_path / "campaign"
+    write(source, config)
+    return source, output, profile
 
 
 @pytest.fixture(autouse=True)
 def unset_inherited_thread_limit(monkeypatch):
     monkeypatch.delenv("OMP_THREAD_LIMIT", raising=False)
-
-
-def section(profile, values=None):
-    values = VALUES if values is None else values
-    return {"schema_version": 1, "status": "rejected", "execution_identity": {
-        "cpu_threads": profile["cpu_threads"], "precision_bits": profile["precision_bits"],
-        "cpu_affinity": CPUS, "omp_wait_policy": values["OMP_WAIT_POLICY"],
-        "gomp_spincount": values["GOMP_SPINCOUNT"]}}
-
-
-@pytest.mark.parametrize("sections", [["cpu_execution_protocol"], ["cpu_dependency"],
-                                     ["cpu_dependency", "cpu_execution_protocol"]])
-def test_prepare_transports_profile_launch_identity_even_when_costs_reject(inputs, sections, monkeypatch):
-    source, output, path = inputs
-    profile = read(path)
-    for name in sections:
-        profile[name] = section(profile)
-    write(path, profile)
-    monkeypatch.setenv("OMP_WAIT_POLICY", "ACTIVE")
-    monkeypatch.setenv("GOMP_SPINCOUNT", "900")
-    prepare(source, output)
-    state = check(output)
-    contract = state["openmp_launch_environment"]
-    assert contract["values"] == VALUES
-    assert set(contract["profile_sections"]) == set(sections)
-    assert set(contract["provenance"].values()) == {"profile"}
-    for traced in (False, True):
-        observed = environment(4, traced=traced, cpu_placement=state["cpu_placement"],
-                               openmp_launch_environment=contract)
-        assert observed["OMP_WAIT_POLICY"] == "PASSIVE" and "GOMP_SPINCOUNT" not in observed
-    assert os.environ["OMP_WAIT_POLICY"] == "ACTIVE" and os.environ["GOMP_SPINCOUNT"] == "900"
 
 
 def test_preparation_freezes_current_values_and_explicit_unset(inputs, monkeypatch):
@@ -85,58 +76,18 @@ def test_preparation_freezes_current_values_and_explicit_unset(inputs, monkeypat
         check(output)
 
 
-@pytest.mark.parametrize("mutation", ["profile_conflict", "configured_conflict", "precision", "threads",
-                                     "affinity", "boolean_cpu", "schema", "missing_value", "malformed"])
-def test_preparation_rejects_incompatible_or_conflicting_profile_identity(inputs, mutation):
-    source, output, path = inputs
-    profile = read(path)
-    profile["cpu_execution_protocol"] = section(profile)
-    identity = profile["cpu_execution_protocol"]["execution_identity"]
-    if mutation == "profile_conflict":
-        profile["cpu_dependency"] = section(profile, {**VALUES, "GOMP_SPINCOUNT": "1"})
-    elif mutation == "configured_conflict":
-        config = read(source)
-        config["openmp_launch_environment"] = {"OMP_WAIT_POLICY": "ACTIVE"}
-        write(source, config)
-    elif mutation == "precision":
-        identity["precision_bits"] = 32
-    elif mutation == "threads":
-        identity["cpu_threads"] = 2
-    elif mutation == "affinity":
-        identity["cpu_affinity"] = [6, 7, 8, 9]
-    elif mutation == "boolean_cpu":
-        profile["numerical"]["identity"]["cpu_affinity"] = [0, 1, 2, 3]
-        profile["numerical"]["protocol"]["cpu_affinity"] = [0, 1, 2, 3]
-        identity["cpu_affinity"] = [False, 1, 2, 3]
-    elif mutation == "schema":
-        profile["cpu_execution_protocol"]["schema_version"] = True
-    elif mutation == "missing_value":
-        identity.pop("omp_wait_policy")
-    else:
-        profile["cpu_execution_protocol"] = None
-    write(path, profile)
-    if mutation == "boolean_cpu":
-        # Direct transport test avoids the unrelated actual affinity guard.
-        with pytest.raises(ValueError, match="OpenMP launch"):
-            freeze_launch_environment(profile)
-    else:
-        with pytest.raises(ValueError, match="OpenMP launch"):
-            prepare(source, output)
-        assert not (output / "identity.json").exists()
-
-
 @pytest.mark.parametrize("values", [{"OTHER": "1"}, {"OMP_WAIT_POLICY": True},
                                     {"GOMP_SPINCOUNT": 1}, {"GOMP_SPINCOUNT": "x" * 129},
                                     {"OMP_WAIT_POLICY": "PASSIVE\n"}, {"OMP_WAIT_POLICY": "é"}])
 def test_unbounded_or_unrelated_configured_launch_values_reject(values):
     with pytest.raises(ValueError, match="OpenMP launch"):
-        freeze_launch_environment({}, values)
+        freeze_launch_environment(values)
 
 
 def test_fresh_subprocess_receives_exact_values_without_mutating_parent(monkeypatch):
     monkeypatch.setenv("OMP_WAIT_POLICY", "ACTIVE")
     monkeypatch.setenv("GOMP_SPINCOUNT", "900")
-    contract = freeze_launch_environment({}, VALUES)
+    contract = freeze_launch_environment(VALUES)
     observed = subprocess.check_output([sys.executable, "-c", ("import json,os;print(json.dumps("
         "{key:os.getenv(key) for key in ('OMP_WAIT_POLICY','GOMP_SPINCOUNT')}))")],
         env=environment(4, traced=False, openmp_launch_environment=contract), text=True)
@@ -164,7 +115,7 @@ def test_application_receipt_records_launch_values_for_every_mode(tmp_path, monk
 
     monkeypatch.setattr("elmm_pipeline.campaigns.run.subprocess.run", execute)
     state = {"threads": 4, "selected_gpu_uuid": "GPU-fixture", "tools": {"time": {"path": "/fixture/time"}},
-             "openmp_launch_environment": freeze_launch_environment({}, VALUES)}
+             "openmp_launch_environment": freeze_launch_environment(VALUES)}
     case = {"name": "case", "config": "config", "reference": "reference.vtk", "completed_steps": 1,
             "configuration": {"runtime_arguments": [], "expected_max_steps": 1}}
     record = run_one(tmp_path, state, case, {"name": mode, "binary": mode}, tmp_path / "run", traced=False)
@@ -181,7 +132,7 @@ def test_external_phase_transports_frozen_values_or_rejects_conflict(tmp_path, m
         explicit = {"GOMP_SPINCOUNT": "0"}
     state = {"threads": 4, "selected_gpu_uuid": "GPU-fixture", "commands": {
         "fixture": {"argv": ["fixture"], "environment": explicit}},
-        "openmp_launch_environment": freeze_launch_environment({}, VALUES)}
+        "openmp_launch_environment": freeze_launch_environment(VALUES)}
     monkeypatch.setattr(commands, "check", lambda root: state)
     invoked = []
     monkeypatch.setattr(commands.subprocess, "run", lambda *args, **kwargs: invoked.append(kwargs["env"]))
@@ -199,7 +150,7 @@ def test_external_phase_transports_frozen_values_or_rejects_conflict(tmp_path, m
 def test_profiler_target_inherits_frozen_settings_and_records_them(tmp_path, monkeypatch):
     root, output, profiler, _ = profiler_fixture(tmp_path, monkeypatch)
     state = profiling.check(root)
-    state["openmp_launch_environment"] = freeze_launch_environment({}, VALUES)
+    state["openmp_launch_environment"] = freeze_launch_environment(VALUES)
     application = root / "application"
     application.write_text(application.read_text().replace("import sys\n", "import sys\nimport json,os\n"
         "Path('launch-settings.json').write_text(json.dumps({key:os.getenv(key) for key in "
@@ -214,7 +165,7 @@ def test_profiler_target_inherits_frozen_settings_and_records_them(tmp_path, mon
 
 def test_generic_halo_driver_receives_frozen_launch_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("OMP_THREAD_LIMIT", "16")
-    contract = freeze_launch_environment({}, VALUES)
+    contract = freeze_launch_environment(VALUES)
     driver = {"name": "fixture", "coverage": "complete", "sources": {"native": "driver.f90"},
               "link": {"native": {"include_dirs": [], "objects": [], "flags": []}},
               "flags": [], "success_marker": "COMPLETE", "dtype": "float64", "field_count": 1,
@@ -255,7 +206,7 @@ def test_new_campaign_rejects_malformed_thread_limit_without_changing_environmen
     observed = {"OMP_THREAD_LIMIT": raw, "OMP_WAIT_POLICY": "ACTIVE"}
     before = deepcopy(observed)
     with pytest.raises(ValueError, match="OMP_THREAD_LIMIT.*positive decimal"):
-        apply_launch_environment(observed, freeze_launch_environment({}, VALUES))
+        apply_launch_environment(observed, freeze_launch_environment(VALUES))
     assert observed == before
 
 
@@ -263,7 +214,7 @@ def test_new_campaign_rejects_malformed_thread_limit_without_changing_environmen
 def test_new_campaign_rejects_insufficient_thread_limit_but_legacy_is_unchanged(raw):
     observed = {"OMP_THREAD_LIMIT": raw, "OMP_WAIT_POLICY": "ACTIVE"}
     with pytest.raises(ValueError, match="four-thread campaign budget"):
-        apply_launch_environment(observed, freeze_launch_environment({}, VALUES))
+        apply_launch_environment(observed, freeze_launch_environment(VALUES))
     apply_launch_environment(observed, None)
     assert observed == {"OMP_THREAD_LIMIT": raw, "OMP_WAIT_POLICY": "ACTIVE"}
 
@@ -271,7 +222,7 @@ def test_new_campaign_rejects_insufficient_thread_limit_but_legacy_is_unchanged(
 @pytest.mark.parametrize("raw", ["4", "8", "  +0004\t", str((1 << 31) - 1)])
 def test_new_campaign_retains_valid_raw_thread_limit(raw):
     observed = {"OMP_THREAD_LIMIT": raw}
-    apply_launch_environment(observed, freeze_launch_environment({}, VALUES))
+    apply_launch_environment(observed, freeze_launch_environment(VALUES))
     assert observed == {"OMP_THREAD_LIMIT": raw, "OMP_WAIT_POLICY": "PASSIVE"}
 
 
@@ -279,7 +230,7 @@ def test_application_rejects_insufficient_thread_limit_before_launch(tmp_path, m
     monkeypatch.setenv("OMP_THREAD_LIMIT", "1")
     monkeypatch.setattr("elmm_pipeline.campaigns.run.available", lambda: 4 * 2**30)
     monkeypatch.setattr("elmm_pipeline.campaigns.run.subprocess.run", lambda *args, **kwargs: pytest.fail("launched"))
-    state = {"threads": 4, "openmp_launch_environment": freeze_launch_environment({}, VALUES)}
+    state = {"threads": 4, "openmp_launch_environment": freeze_launch_environment(VALUES)}
     with pytest.raises(ValueError, match="four-thread campaign budget"):
         run_one(tmp_path, state, {}, {"name": "native"}, tmp_path / "run", traced=False)
     assert not (tmp_path / "run").exists()
@@ -289,7 +240,7 @@ def test_halo_rejects_insufficient_thread_limit_before_build_or_launch(tmp_path,
     monkeypatch.setenv("OMP_THREAD_LIMIT", "1")
     state = {"threads": 4, "halo_drivers": [{"name": "fixture", "coverage": "complete",
              "sources": {"native": "driver.f90"}}],
-             "openmp_launch_environment": freeze_launch_environment({}, VALUES)}
+             "openmp_launch_environment": freeze_launch_environment(VALUES)}
     monkeypatch.setattr(halos, "check", lambda root: state)
     monkeypatch.setattr(halos.subprocess, "run", lambda *args, **kwargs: pytest.fail("launched"))
     with pytest.raises(ValueError, match="four-thread campaign budget"):
@@ -299,7 +250,7 @@ def test_halo_rejects_insufficient_thread_limit_before_build_or_launch(tmp_path,
 
 def test_profiler_rejects_insufficient_thread_limit_before_launch(tmp_path, monkeypatch):
     root, output, profiler, _ = profiler_fixture(tmp_path, monkeypatch)
-    profiling.check(root)["openmp_launch_environment"] = freeze_launch_environment({}, VALUES)
+    profiling.check(root)["openmp_launch_environment"] = freeze_launch_environment(VALUES)
     monkeypatch.setenv("OMP_THREAD_LIMIT", "1")
     monkeypatch.setattr(profiling.subprocess, "run", lambda *args, **kwargs: pytest.fail("launched"))
     with pytest.raises(ValueError, match="four-thread campaign budget"):
@@ -310,7 +261,7 @@ def test_profiler_rejects_insufficient_thread_limit_before_launch(tmp_path, monk
 def test_external_phase_rejects_insufficient_or_malformed_thread_override(tmp_path, monkeypatch, raw):
     state = {"threads": 4, "selected_gpu_uuid": "GPU-fixture", "commands": {
         "fixture": {"argv": ["fixture"], "environment": {"OMP_THREAD_LIMIT": raw}}},
-        "openmp_launch_environment": freeze_launch_environment({}, VALUES)}
+        "openmp_launch_environment": freeze_launch_environment(VALUES)}
     monkeypatch.setattr(commands, "check", lambda root: state)
     monkeypatch.setattr(commands.subprocess, "run", lambda *args, **kwargs: pytest.fail("launched"))
     with pytest.raises(ValueError, match="OMP_THREAD_LIMIT"):

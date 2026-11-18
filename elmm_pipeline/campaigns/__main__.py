@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .identity import write
 from .launch_environment import apply_launch_environment, launch_environment_values
-from .prepare import check, prepare, validate_cpu_placement
+from .prepare import check, prepare
 
 
 def external(root, phase):
@@ -20,25 +20,12 @@ def external(root, phase):
     argv = [expand(value) for value in spec["argv"]]
     overrides = {key: expand(value) for key, value in spec.get("environment", {}).items()}
     env = {**os.environ, **overrides}
-    placement = state.get("cpu_placement")
-    validate_cpu_placement(placement)
-    placement_environment = {}
-    if placement is not None:
-        placement_environment = {"OMP_NUM_THREADS": str(state["threads"]),
-                                 "OMP_DYNAMIC": "FALSE", **placement["environment"]}
-        if (any(key in overrides for key in ("OMP_PLACES", "GOMP_CPU_AFFINITY"))
-                or any(key in overrides and overrides[key].lower() != value.lower()
-                       for key, value in placement_environment.items())):
-            raise ValueError("external phase environment conflicts with calibrated CPU placement")
-        env.pop("OMP_PLACES", None)
-        env.pop("GOMP_CPU_AFFINITY", None)
-        env.update(placement_environment)
     apply_launch_environment(env, state.get("openmp_launch_environment"), overrides=overrides)
     env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     write(root / (phase + "-command.json"), {"argv": argv, "cwd": expand(spec.get("cwd", "{campaign}")),
           "explicit_environment": spec.get("environment", {}),
           "openmp_launch_environment": launch_environment_values(env),
-          "placement_environment": placement_environment, "timings_reused": False})
+          "timings_reused": False})
     subprocess.run(argv, cwd=expand(spec.get("cwd", "{campaign}")), env=env, check=True)
     check(root)
 

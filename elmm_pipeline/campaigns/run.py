@@ -17,7 +17,7 @@ from .batches import batch_summary
 from .guard import available
 from .identity import digest, read, write
 from .launch_environment import apply_launch_environment, launch_environment_values
-from .prepare import check, validate_cpu_placement
+from .prepare import check
 from .prepared_modes import load_adapter
 from .pressure_cache import apply_pressure_cache
 from .targets import evaluate_target, target_seconds
@@ -39,16 +39,11 @@ def planning_diagnostics(log):
     return {"phases": totals, "timing_sample": False, "trace_overhead_present": True}
 
 
-def environment(threads, *, traced, cpu_placement=None, openmp_launch_environment=None):
-    validate_cpu_placement(cpu_placement)
+def environment(threads, *, traced, openmp_launch_environment=None):
     env = trace_environment(clean_environment(threads), "local", enabled=traced)
     for name in list(env):
         if name.startswith("FORT_") and name not in {"FORT_RUNTIME_TRACE", "FORT_OFFLOAD_TRACE"}:
             env.pop(name)
-    if cpu_placement is not None:
-        env.pop("OMP_PLACES", None)
-        env.pop("GOMP_CPU_AFFINITY", None)
-        env.update(cpu_placement["environment"])
     apply_launch_environment(env, openmp_launch_environment)
     return env
 
@@ -57,7 +52,6 @@ def run_one(root, state, case, mode, directory, *, traced):
     if available() < 3 * 2**30:
         raise RuntimeError("less than 3 GiB available; no workload started")
     env = environment(state["threads"], traced=traced and mode["name"] != "native",
-                      cpu_placement=state.get("cpu_placement"),
                       openmp_launch_environment=state.get("openmp_launch_environment"))
     cache = apply_pressure_cache(root, state, mode, env)
     if directory.exists():

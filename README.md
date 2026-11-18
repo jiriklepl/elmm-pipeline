@@ -838,25 +838,10 @@ from complete evidence. Existing schema-1 campaigns without targets retain their
 better-baseline/30% gates and rendering; immutable SGS snapshots keep their
 original interpretation.
 
-Numerical calibration schema 2 also freezes a derived `cpu_placement` contract:
-the profile's four sorted CPU numbers and `OMP_PROC_BIND=false`. Launch preparation
-and every campaign phase externally under that exact process mask, for example
-with `taskset -c 0-3` when those CPUs match the profile. The runner checks the mask,
-sets the calibrated binding value, and removes inherited `OMP_PLACES` and
-`GOMP_CPU_AFFINITY` overrides for all modes and diagnostics. It does not change
-process affinity or silently continue with different placement. Older profiles
-retain their existing environment behavior and have no derived contract.
-Configured external phases enforce the same placement and four-thread budget;
-explicit conflicting environment overrides are rejected before execution.
-
 New campaigns also freeze `OMP_WAIT_POLICY` and `GOMP_SPINCOUNT` at preparation.
-Compatible optional CPU calibration identities supply their exact launch values,
-including unset values, independently of whether their cost families passed.
-The two identities must agree when both are present. Without those identities,
-the configuration may supply `openmp_launch_environment`, for example
+The configuration may supply `openmp_launch_environment`, for example
 `{"OMP_WAIT_POLICY": "PASSIVE", "GOMP_SPINCOUNT": null}`; unspecified values come
-from the preparation environment. Conflicting overrides or incompatible profile
-identities reject preparation. Every application, field driver, profiler target
+from the preparation environment. Every application, field driver, profiler target
 and external phase receives the frozen settings in its fresh process environment,
 and its receipt records them together with the raw `OMP_THREAD_LIMIT` value.
 New campaigns reject malformed thread caps and caps below four before launch.

@@ -107,7 +107,6 @@ def _run_driver(root, state, output, driver, report):
         raise ValueError("each validation driver requires an original native reference")
     for mode in modes:
         env = environment(state["threads"], traced=mode != "native",
-                          cpu_placement=state.get("cpu_placement"),
                           openmp_launch_environment=state.get("openmp_launch_environment"))
         env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
         directory = output / driver["name"] / mode

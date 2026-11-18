@@ -93,7 +93,7 @@ def profile(root, output, *, case, mode, profiler, seconds=2):
                         *selected_case["configuration"]["runtime_arguments"]]
     argv = command(executable, prefix, sys.executable,
                    [str(target), str(completion), str(application_log), token, *application_argv], seconds)
-    env = environment(state["threads"], traced=False, cpu_placement=state.get("cpu_placement"),
+    env = environment(state["threads"], traced=False,
                       openmp_launch_environment=state.get("openmp_launch_environment"))
     env["CUDA_VISIBLE_DEVICES"] = state["selected_gpu_uuid"]
     cache = apply_pressure_cache(root, state, selected_mode, env)
