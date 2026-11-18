@@ -520,6 +520,11 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
             raise ValueError("Hidden compiler options are not supported: " + key)
     directory = Path(directory).resolve()
     compiler = Path(prepared["compiler"])
+    if str(compiler) not in sys.path:
+        sys.path.insert(0, str(compiler))
+    # The compiler owns its build contract and the list of runtime sources.
+    from compiler.numerical_contract import CUDA_OPTIONS, HOST_OPTIONS
+    from compiler.runtime import RESIDENT_SOURCES
     from .poisson_source import snapshot_solver
     vkfft = _check_vkfft(vkfft)
     provider = directory / "provider-source"
@@ -540,8 +545,7 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     native = [elmm / (n + ".f90") for n in elmm_units if n != "main"] + common
     resident = [overrides.get(n + ".f90", elmm / (n + ".f90")) for n in elmm_units if n != "main"] + common
     resident += [overrides["resident_time_tasks.f90"]]
-    resident += [runtime / n for n in ("scoped_memory.f90", "resident_domain.f90", "reductions.f90",
-                                      "scoped_runtime.cu", "reductions.cu", "snapshots.f90", "snapshots.cu")]
+    resident += [runtime / n for n in RESIDENT_SOURCES]
     resident += [adapter / n for n in ("gpu_pressure.f90", "resident_pressure_state.f90", "gpu_pressure_tail.f90",
                                       "gpu_pressure.cpp", "gpu_pressure_halo.cu", "gpu_pressure_tail.cu")]
     for entry in prepared["entry_directories"]:
@@ -568,6 +572,7 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     cmake += ["add_library(native_libraries INTERFACE)",
               "target_link_libraries(native_libraries INTERFACE OpenMP::OpenMP_Fortran pthread " +
               " ".join("${LIB_" + n + "}" for n in ("fftw3_omp", "fftw3f_omp", "fftw3", "fftw3f", "blas", "lapack")) + ")"]
+    host_options, cuda_options = ";".join(HOST_OPTIONS), ";".join(CUDA_OPTIONS)
     precision = prepared.get("precision", "dp")
     dprec_define = ["DPREC"] if precision == "dp" else []
     dprec_flag = "-DDPREC " if precision == "dp" else ""
@@ -579,9 +584,9 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
                   " ".join(_cmake_path(p) for p in (elmm, poisfft, runtime, adapter)) + ")",
                   *( [f"target_compile_definitions({name}_objects PRIVATE {' '.join(dprec_define)})"] if dprec_define else [] ),
                   f"target_compile_options({name}_objects PRIVATE "
-                  '"$<$<COMPILE_LANGUAGE:Fortran>:-cpp;-O3;-fopenmp;-ffree-line-length-none;-ffp-contract=off;-fbacktrace;-g>" '
-                  '"$<$<COMPILE_LANGUAGE:C,CXX>:-O3;-fopenmp;-ffp-contract=off;-g>" '
-                  '"$<$<COMPILE_LANGUAGE:CUDA>:-O3;-std=c++17;--fmad=false;--ftz=false;--prec-div=true;--prec-sqrt=true;-Xcompiler=-fPIC,-fopenmp,-ffp-contract=off>" )',
+                  f'"$<$<COMPILE_LANGUAGE:Fortran>:-cpp;-O3;-fopenmp;-ffree-line-length-none;{host_options};-fbacktrace;-g>" '
+                  f'"$<$<COMPILE_LANGUAGE:C,CXX>:-O3;-fopenmp;{host_options};-g>" '
+                  f'"$<$<COMPILE_LANGUAGE:CUDA>:-O3;-std=c++17;{cuda_options};-Xcompiler=-fPIC,-fopenmp,{",".join(HOST_OPTIONS)}>" )',
                   f"target_link_libraries({name}_objects PUBLIC native_libraries)"]
         if name == "resident":
             cmake += ["target_link_libraries(resident_objects PUBLIC poisson-solver CUDA::cudart)"]
@@ -590,7 +595,8 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
         objects = "native" if "native" in target else "resident"
         cmake += [f"add_executable({target} {_cmake_path(source)})",
                   f"target_link_libraries({target} PRIVATE {objects}_objects)",
-                  f"target_compile_options({target} PRIVATE -cpp -O3 -fopenmp {dprec_flag}-ffree-line-length-none -ffp-contract=off -fbacktrace -g)",
+                  f"target_compile_options({target} PRIVATE -cpp -O3 -fopenmp {dprec_flag}-ffree-line-length-none "
+                  f"{' '.join(HOST_OPTIONS)} -fbacktrace -g)",
                   f"set_target_properties({target} PROPERTIES LINKER_LANGUAGE Fortran)"]
     _preserve(directory / "CMakeLists.txt")
     (directory / "CMakeLists.txt").write_text("\n".join(cmake) + "\n")
