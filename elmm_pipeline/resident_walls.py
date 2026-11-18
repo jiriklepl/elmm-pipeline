@@ -228,8 +228,8 @@ def _corrections(integration):
     return groups
 
 
-def generate_wall_entries(integration, compiler_root, python, directory, *, precision="dp"):
-    from .local_adapter import transform
+def generate_wall_entries(integration, directory, *, precision="dp"):
+    from compiler.scopes.resident_entries import compile_resident_entry
 
     real_type = "real(8)" if precision == "dp" else "real(4)"
     kind_suffix = "_8" if precision == "dp" else "_4"
@@ -279,10 +279,7 @@ end module
         path = directory / (name + ".f90")
         path.write_text(source)
         target = directory / (name + "-entry")
-        transformed = transform(path, Path(compiler_root), Path(python), target, entry=entry,
-                                gpu_options={"gpu_policy": "sections",
-                                             "scope_transfers": "direct", "host_threads": 4})
-        shared = transformed["shared_entry"]
+        shared = compile_resident_entry(path, entry, target)["scoped"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):
             raise ValueError("Wall numerical entry lacks GPU execution: " + name)
         result["entries"][name] = {"source": identity(path), "directory": str(target), "entry": shared}

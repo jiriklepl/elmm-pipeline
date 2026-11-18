@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import sys
@@ -10,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from elmm_pipeline.local_adapter import LocalAdapterError, check, transform
+from elmm_pipeline.local_adapter import LocalAdapterError, check
 
 
 class LocalCompilerProtocolTests(unittest.TestCase):
@@ -81,83 +80,6 @@ class LocalCompilerProtocolTests(unittest.TestCase):
         with patch("elmm_pipeline.local_adapter.subprocess.run", return_value=self.completed([other, self.candidate()])):
             report = check(self.source, self.snapshot, self.python, "UNRELATED::ADVANCE", self.output)
         self.assertEqual(report["qualified_name"], "unrelated::advance")
-
-    def test_generation_retains_authoritative_report_and_compiler_artifacts(self):
-        report = self.shared_report()
-        outputs = report["outputs"]
-
-        def run_compiler(command, **kwargs):
-            for name in outputs:
-                (self.output / name).write_text("cpp_advance_start_hot cpp_advance_finish_hot\n")
-            return self.completed(report)
-
-        with patch("elmm_pipeline.local_adapter.subprocess.run", side_effect=run_compiler):
-            metadata = transform(self.source, self.snapshot, self.python, self.output, entry="advance")
-        self.assertEqual(metadata["compiler_report"], report)
-        self.assertEqual(json.loads((self.output / "compiler-report.json").read_text()), report)
-        self.assertIn("--json", metadata["command"])
-        self.assertNotIn("--verbose", metadata["command"])
-        for name in outputs:
-            self.assertEqual((self.output / name).read_text(),
-                             "cpp_advance_start_hot cpp_advance_finish_hot\n")
-
-    def test_generation_reports_rejection_and_incompatible_snapshot(self):
-        rejection = self.completed({"kernel": "advance", "supported": False, "reason": "unsafe RAW", "outputs": []}, 1)
-        legacy = subprocess.CompletedProcess([], 0, "Generated files in outputs/\n", "")
-        for response, reason in ((rejection, "unsafe RAW"), (legacy, "refresh the explicit compiler snapshot")):
-            with self.subTest(reason=reason), patch("elmm_pipeline.local_adapter.subprocess.run", return_value=response), \
-                    self.assertRaisesRegex(LocalAdapterError, reason):
-                transform(self.source, self.snapshot, self.python, self.output, entry="advance")
-
-    def shared_report(self):
-        contract = {"schema_version": 1, "id": "separate-arithmetic-v1",
-                    "required_cuda_options": ["--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true"],
-                    "required_host_options": ["-ffp-contract=off"]}
-        contract["identity"] = hashlib.sha256(json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        outputs = ["shared_entry.cu", "shared_interface.f90", "runtime.hpp", "scoped_runtime.cu",
-                   "fort_scoped_memory.f90"]
-        units = [{"path": name, "language": "cuda" if name.endswith(".cu") else "fortran",
-                  "role": "shared_entry" if name.startswith("shared_") else "common_runtime",
-                  **({"numerical_contract": contract} if name.endswith(".cu") else {})}
-                 for name in outputs if name != "runtime.hpp"]
-        report = {"artifact_schema_version": 2, "memory_model": "scoped", "supported": True,
-                  "kernel": "advance", "parallel_regions": 2, "outputs": outputs, "build_sources": units,
-                  "numerical_contract": contract,
-                  "scoped": {"cuda_source": "shared_entry.cu", "fortran_source": "shared_interface.f90"}}
-
-        return report
-
-    def test_scoped_generation_consumes_only_the_versioned_shared_abi(self):
-        report = self.shared_report()
-        outputs, units = report["outputs"], report["build_sources"]
-
-        def run_compiler(command, **kwargs):
-            self.assertNotIn("--cuda-output", command)
-            self.assertNotIn("--cpp-output", command)
-            self.assertNotIn("--fortran-output", command)
-            for name in outputs:
-                (self.output / name).write_text("shared artifact\n")
-            return self.completed(report)
-
-        with patch("elmm_pipeline.local_adapter.subprocess.run", side_effect=run_compiler):
-            metadata = transform(self.source, self.snapshot, self.python, self.output, entry="advance",
-                                 context={"nested_parallel": True},
-                                 gpu_options={"gpu_policy": "sections"})
-        self.assertEqual(metadata["target"], "scoped")
-        self.assertEqual({Path(n).name for n in metadata["extra_sources"]},
-                         {"shared_interface.f90", "fort_scoped_memory.f90"})
-        self.assertEqual({Path(x["source"]).name for x in metadata["gpu_sources"]},
-                         {"shared_entry.cu", "scoped_runtime.cu"})
-        for change, reason in (({"artifact_schema_version": 1}, "artifact schema 2"),
-                               ({"offload": {}}, "without an ordinary backend"),
-                               ({"build_sources": [*units[:-1], {**units[-1], "language": "unknown"}]},
-                                "explicit CUDA or Fortran"),
-                               ({"build_sources": [*units, {"path": "old.cu", "role": "numerical_entry"}]},
-                                "only shared-entry")):
-            with self.subTest(change=change), patch("elmm_pipeline.local_adapter.subprocess.run",
-                    return_value=self.completed({**report, **change})), self.assertRaisesRegex(LocalAdapterError, reason):
-                transform(self.source, self.snapshot, self.python, self.output, entry="advance",
-                          gpu_options={"gpu_policy": "sections"})
 
     def test_native_baseline_needs_no_scope_facts(self):
         from types import SimpleNamespace

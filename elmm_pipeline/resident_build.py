@@ -135,6 +135,11 @@ def _scons_disabled_branch(test_node):
     return False
 
 
+# ELMM's primary-grid scalars that resident entries take by VALUE.
+GRID_GEOMETRY = tuple("parameters::" + name for name in (
+    "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz"))
+
+
 def discover_application_units(elmm_src: Path, poisfft_src: Path | None = None) -> tuple[list[str], list[str]]:
     """Discover active Fortran build units from ``SConstruct`` or directory scan."""
     elmm_src = Path(elmm_src).resolve(strict=True)
@@ -328,10 +333,10 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
     if not (compiler / "compiler/__main__.py").is_file():
         raise ValueError("Expected a compiler checkout containing compiler/__main__.py")
     sys.path.insert(0, str(compiler))
-    from compiler.scopes.resident_entries import export_resident_entries
+    from compiler.scopes.resident_entries import (compile_resident_entries, export_resident_entries,
+                                                  pass_scalars_by_value)
     from .resident_rk import (configured_sources, pointwise_advection, snapshot_filter,
-                             guard_periodic_entries, value_resident_geometry, generate_entries,
-                             materialize_entries, integrate_rk_epoch)
+                             guard_periodic_entries, materialize_entries, integrate_rk_epoch)
     from .gpu_hot_path import (materialize_pressure_stencils, prepare_pressure_device_entries,
                               materialize_resident_pressure, materialize_resident_pressure_tail)
     from .resident_time_loop import generate_time_entries, integrate_time_loop
@@ -371,8 +376,9 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
                  "rejected": [e for e in extracted["rejected"] if e["procedure"] in names]}
         if label == "periodic":
             group = guard_periodic_entries(group, directory / "periodic-guards")
-        group = value_resident_geometry(group, directory / (label + "-values"))
-        package = generate_entries(group, compiler, python, directory / (label + "-entries"))
+        # The primary-grid counts and spacings are set before the RK adapter is entered.
+        group = pass_scalars_by_value(group, directory / (label + "-values"), resources=GRID_GEOMETRY)
+        package = compile_resident_entries(group, directory / (label + "-entries"))
         covered = sum(len(item["region"]["source_loop_spans"]) for item in package["entries"])
         minimum = (
             min_coverage[label]
@@ -401,9 +407,9 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
     pressure = materialize_resident_pressure_tail(pressure, elmm / "src/boundaries.f90", directory / "pressure-tail")
     numerical = materialize_entries(packages, directory / "numerical")
     rk = integrate_rk_epoch(configured, numerical, pressure, directory / "rk")
-    time_entries = generate_time_entries(compiler, python, directory / "time-entries", precision=precision)
+    time_entries = generate_time_entries(directory / "time-entries", precision=precision)
     integrated = integrate_time_loop(rk, configured, time_entries, directory / "time", precision=precision)
-    wall_entries = generate_wall_entries(integrated, compiler, python, directory / "wall-entries", precision=precision)
+    wall_entries = generate_wall_entries(integrated, directory / "wall-entries", precision=precision)
     integrated = integrate_wall_entries(integrated, wall_entries, directory / "walls")
     integrated = integrate_workspace(integrated, directory / "integrated")
     entries = [e for p in packages for e in p["entries"]] + pressure_entries["entries"]

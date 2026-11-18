@@ -163,8 +163,8 @@ def prepare_pressure_device_entries(prepared, project_root, compiler_root, pytho
     successful pressure implementation. The caller still has to compose these
     entries with boundary, solver and reference tasks in its residency domain.
     """
+    from compiler.scopes.resident_entries import compile_resident_entry
     from .discovery import discover
-    from .local_adapter import transform
 
     source = Path(prepared["replacement"]["path"])
     if _identity(source) != prepared["replacement"]:
@@ -180,11 +180,10 @@ def prepare_pressure_device_entries(prepared, project_root, compiler_root, pytho
     entries = []
     for region in discovery["regions"]:
         output = directory / "entries" / region["id"]
-        generated = transform(Path(region["input_path"]), Path(compiler_root), Path(python), output,
-                              entry=region["entry"], context=region["context"],
-                              gpu_options={"gpu_policy": "sections",
-                                           "scope_transfers": "direct", "host_threads": 4})
-        entries.append({"region": region, "directory": str(output), "entry": generated["shared_entry"],
+        generated = compile_resident_entry(
+            region["input_path"], region["entry"], output,
+            collective=(region["context"] or {}).get("gpu_dispatch") == "collective_single")
+        entries.append({"region": region, "directory": str(output), "entry": generated["scoped"],
                         "compiler_report": str(output / "compiler-report.json")})
     record = {"version": 1, "kind": "elmm_pressure_shared_device_entries",
               "prepared_source": prepared, "entries": entries,

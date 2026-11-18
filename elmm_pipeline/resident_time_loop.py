@@ -17,8 +17,8 @@ from .ast_rewrites import (
 from .resident_rk import addressable_arrays, identity
 
 
-def generate_time_entries(compiler_root, python, directory, *, precision="dp"):
-    from .local_adapter import transform
+def generate_time_entries(directory, *, precision="dp"):
+    from compiler.scopes.resident_entries import compile_resident_entry
 
     real_type = "real(8)" if precision == "dp" else "real(4)"
     directory = Path(directory).resolve()
@@ -72,10 +72,7 @@ end module
         source.write_text(text)
         entry = "resident_cfl_source::values" if name == "cfl" else "resident_average_source::accumulate"
         target = directory / (name + "-entry")
-        transformed = transform(source, Path(compiler_root), Path(python), target, entry=entry,
-                                gpu_options={"gpu_policy": "sections",
-                                             "scope_transfers": "direct", "host_threads": 4})
-        shared = transformed["shared_entry"]
+        shared = compile_resident_entry(source, entry, target)["scoped"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):
             raise ValueError("Timestep numerical entry lacks GPU execution: " + name)
         result["entries"][name] = {"source": identity(source), "directory": str(target), "entry": shared}

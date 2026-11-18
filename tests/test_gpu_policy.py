@@ -2,21 +2,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 import shutil
-import subprocess
-import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-import test_local_adapter as local_fixture
 from elmm_pipeline.cli import prepare_build
 from elmm_pipeline.gpu_validation import gpu_activity, native_policy_exercised, offload_decisions
 from elmm_pipeline.instrumentation import execution_coverage
-from elmm_pipeline.local_adapter import transform
 
 
 def contract(*, collective=True, policy="auto"):
@@ -25,40 +20,6 @@ def contract(*, collective=True, policy="auto"):
 
 
 class GPUPolicyProtocolTests(unittest.TestCase):
-    def test_explicit_public_policy_arguments_and_contract(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            snapshot = root/"snapshot"
-            (snapshot/"compiler").mkdir(parents=True)
-            (snapshot/"compiler/__main__.py").touch()
-            source = root/"source.f90"
-            source.write_text("module subject\nend module\n")
-            profile = root/"hardware.json"
-            profile.write_text("{}")
-            output = root/"generated"
-            report = local_fixture.LocalCompilerProtocolTests().shared_report()
-            report["scoped"]["team"] = {"available": True}
-            outputs = report["outputs"]
-
-            def compile_(argv, **kwargs):
-                for filename in outputs:
-                    (output/filename).write_text("! generated\n")
-                return subprocess.CompletedProcess(argv, 0, json.dumps(report), "")
-
-            with patch("elmm_pipeline.local_adapter.subprocess.run", side_effect=compile_):
-                result = transform(source, snapshot, Path(sys.executable), output, entry="advance",
-                                   context={"gpu_dispatch": "collective_single"},
-                                   gpu_options={"gpu_policy": "auto", "host_threads": 4,
-                                                "calibration_profile": str(profile)})
-            argv = result["command"]
-            self.assertEqual(argv[argv.index("--gpu-policy")+1], "auto")
-            self.assertEqual(argv[argv.index("--calibration-profile")+1], str(profile))
-            self.assertEqual(argv[argv.index("--host-threads")+1], "4")
-            self.assertIn("--gpu-collective", argv)
-            self.assertNotIn("--memory-model", argv)
-            self.assertEqual(result["compiler_report"]["scoped"], report["scoped"])
-            self.assertNotIn("offload", result["compiler_report"])
-
     def test_interleaved_decisions_and_markers_remain_distinct_from_cuda_proof(self):
         region = {"id": "abcd", "entry": "outline_abcd", "transformation": {"compiler_report": {"offload": contract()}}}
         log = ("FORT_RUNTIME ELMM_PIPELINE_REGION abcd\n"
