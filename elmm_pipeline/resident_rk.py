@@ -66,7 +66,7 @@ def contiguous_periodic_boundary(text):
     all_calls = find_all_calls(text, "periodic_corners_edges")
     outside = [c for c in all_calls if not (b_lo <= c[0] and c[1] <= b_hi)]
     inside = [c for c in all_calls if b_lo <= c[0] and c[1] <= b_hi]
-    normalized_calls = sorted(re.sub(r"\s+", "", ",".join(c[3])).lower() for c in inside)
+    normalized_calls = sorted({re.sub(r"\s+", "", ",".join(c[3])).lower() for c in inside})
     if outside or normalized_calls != ["u,1", "v,2", "w,3"]:
         raise ValueError("Unsupported periodic boundary callers")
 

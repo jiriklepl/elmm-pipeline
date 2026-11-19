@@ -136,6 +136,10 @@ def _scons_disabled_branch(test_node):
 
 
 PERIODIC_MINIMUM = "nx >= 3 .and. ny >= 3 .and. nz >= 3"
+# The boundary types of the configuration that keeps its fields on the device (ResidentRKSupported).
+# With them decided, the six faces of a boundary application are one entry instead of six.
+CHANNEL_BOUNDARIES = (*(f"Btype({side}) == BC_PERIODIC" for side in ("We", "Ea", "So", "No")),
+                      "Btype(Bo) == BC_NOSLIP", "Btype(To) == BC_NOSLIP")
 # ELMM's primary-grid scalars that resident entries take by VALUE.
 GRID_GEOMETRY = tuple("parameters::" + name for name in (
     "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz"))
@@ -388,7 +392,8 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
                   # The primary-grid counts and spacings are set before the epoch is entered.
                   value_scalars=GRID_GEOMETRY, minimum_nests=MINIMUM_NESTS[label],
                   # The activation condition excludes the boundary modes whose nests are rejected.
-                  native_rejections=label != "boundary")
+                  native_rejections=label != "boundary",
+                  assume=CHANNEL_BOUNDARIES if label == "boundary" else ())
         for label in ("rk", "boundary", "periodic", "advection", "filter", "pressure"))
     project = ResidentProject(
         sources=tuple(paths), selections=selections, defines=("DPREC",) if precision == "dp" else (), domain=DOMAIN,
