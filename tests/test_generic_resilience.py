@@ -222,15 +222,14 @@ end module filters_mod
         encoding="utf-8",
     )
     from compiler.resident.rewrites import promote_line_snapshots
-    from elmm_pipeline.resident_rk import DOMAIN
 
-    text, _edits = promote_line_snapshots(source.read_text(encoding="utf-8"), domain=DOMAIN)
+    text, _edits = promote_line_snapshots(source.read_text(encoding="utf-8"))
     assert "allocatable :: tmp(:,:,:)" in text
     assert "allocate(tmp(" in text
     assert "tmp((i+ii),j,k)" in text
     assert "tmp(i,(j+jj),k)" in text
     assert "tmp(i,j,(k+kk))" in text
-    assert "resident_flow%release_real(tmp)" in text
+    assert "!$fort release(tmp)" in text
 
 
 def test_divergence_expression_and_pressure_stencils_renamed_args(tmp_path: Path) -> None:
@@ -558,10 +557,7 @@ contains
       origin='filters::filter3ord::tmp')
     rk_handle_tmp = resident_flow%bind_real64(tmp, lbound(tmp), .true., &
       origin='filters::filter3ord::tmp')
-    block
-      use elmm_resident_pressure_state, only: resident_flow
-      call resident_flow%release_real(tmp)
-    end block
+    !$fort release(tmp)
   end subroutine Filter3ord
 end module Filters
 """,

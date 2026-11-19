@@ -88,8 +88,7 @@ def integrate_workspace(sources):
         raise ValueError("Unexpected snapshot bindings: " + str(count))
     body = replace_once(
         body,
-        "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-        "      call resident_flow%release_real(tmp)\n    end block\n",
+        "    !$fort release(tmp)\n",
         """    if (managed_workspace) then
       call resident_flow%release_work_real_3(work_site,tmp)
     else

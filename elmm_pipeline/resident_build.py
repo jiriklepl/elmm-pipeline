@@ -334,10 +334,17 @@ scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemap
 # Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
 MINIMUM_NESTS = {"rk": 46, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4, "pressure": 23}
 PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson"]
+# Host statements in the selected procedures that touch arrays the entries keep on the device, as the
+# compiler's audit listed them when this file was recorded. A statement that is not listed stops the build.
+KNOWN_HOST_ACCESSES = Path(__file__).with_name("host_accesses.json")
 
 
-def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp"):
-    """Write the resident variant of ELMM's sources and compile its entries."""
+def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audit=True):
+    """Write the resident variant of ELMM's sources and compile its entries.
+
+    With ``audit`` off, host statements that are not in the recorded list are
+    only written to ``host-accesses.json`` instead of stopping the build.
+    """
     from compiler.resident.project import ResidentProject, Selection
     from compiler.resident.project import prepare as prepare_application
 
@@ -388,8 +395,12 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp"):
         rewrites={"advection.f90": ("tile_scratch",), "filters.f90": ("line_snapshot",),
                   "pressure.f90": (expand_divergence(source / "numerical_operators.f90"),)},
         edit=edit, native=native_wall_correction, held=HELD,
-        addressable=tuple(source / (name + ".f90") for name in ADDRESSABLE))
+        addressable=tuple(source / (name + ".f90") for name in ADDRESSABLE),
+        known_host_accesses=frozenset(item["id"] for item in json.loads(KNOWN_HOST_ACCESSES.read_text())),
+        strict_audit=audit)
     prepared = prepare_application(project, directory / "resident", fortran=fortran)
+    write(directory / "host-accesses.json", [{key: item[key] for key in ("id", "procedure", "arrays", "text")}
+                                             for item in prepared["audit"]])
     for row in prepared["selections"]:
         print("Generated", row["label"], row["entries"], "entries covering", row["nests"], "source nests", flush=True)
     # The container runner matches the runtime's trace against the compiler's entry records.
@@ -527,6 +538,8 @@ def add_arguments(parser):
     parser.add_argument("--nvcc", type=Path)
     parser.add_argument("--architecture")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--record-host-accesses", action="store_true",
+                        help="List new host accesses in host-accesses.json instead of stopping on them")
     parser.add_argument("--precision", choices=("dp", "sp"), default="dp",
                         help="Floating-point precision: dp (double, default) or sp (single)")
 
@@ -544,7 +557,7 @@ def execute(args):
         prepared = json.loads((args.output / "prepared.json").read_text())
     else:
         prepared = prepare(args.elmm, args.poisfft, args.compiler.resolve(strict=True), args.output,
-                           fortran=args.fortran, precision=precision)
+                           fortran=args.fortran, precision=precision, audit=not args.record_host_accesses)
     if not args.prepare_only:
         build_prepared(prepared, args.output, solver=args.solver, vkfft=args.vkfft,
                        fortran=args.fortran, cxx=args.cxx, nvcc=args.nvcc,

@@ -94,6 +94,20 @@ code is added in one hook, by these modules:
 `gpu_pressure_sources/` holds the hand-written Fortran and CUDA of the domain
 object, the solver connection and the pressure tail.
 
+### Host accesses
+
+The compiler audits the selected procedures for host statements that touch an
+array an entry keeps on the device. In ELMM these are twenty calls that pass
+such arrays to procedures that stay host code, for example the forcing terms
+called from `Convection`. Some are behind conditions the supported
+configuration excludes, and some callees are made coherent by this adapter;
+the audit sees neither. `elmm_pipeline/host_accesses.json` records the list as
+it stood on 2026-11-19, when both primary cases matched the native build. The
+entries were recorded, not reviewed one by one. A statement that is not in the
+list stops `resident-build`, so a new host access cannot appear unnoticed. After checking a new one, run the build once with
+`--record-host-accesses` and copy `host-accesses.json` from the output over
+the recorded file.
+
 ## Run helpers
 
 The container runner uses a few modules from here:
