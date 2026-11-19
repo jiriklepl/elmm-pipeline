@@ -188,8 +188,8 @@ def test_generated_bindings_include_source_origins(tmp_path):
 
 
 def test_configured_sources_skips_include_fragments_and_discover_excludes_inc(tmp_path):
+    from compiler.resident.configure import configure_sources
     from elmm_pipeline.resident_build import discover_application_units
-    from elmm_pipeline.resident_rk import configured_sources
 
     src = tmp_path / "src"
     src.mkdir()
@@ -200,11 +200,6 @@ def test_configured_sources_skips_include_fragments_and_discover_excludes_inc(tm
     assert units == ["mod"]
     gfortran = shutil.which("gfortran") or shutil.which("gfortran-15")
     if gfortran:
-        configured = configured_sources(
-            [src / "list-inc-def.f90", src / "mod.f90"],
-            ["m::s"],
-            tmp_path / "configured",
-            fortran_compiler=gfortran,
-            defines=[],
-        )
+        configured = configure_sources([src / "list-inc-def.f90", src / "mod.f90"], ["m::s"],
+                                       tmp_path / "configured", fortran=gfortran)
         assert len(configured["sources"]) == 2

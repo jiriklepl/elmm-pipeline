@@ -9,83 +9,19 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import subprocess
 from pathlib import Path
 
-from .ast_rewrites import (
-    find_all_calls,
-    find_call_span,
-    find_routine_span,
-    inline_tile_scratch_nests,
-    parse_fortran,
-    promote_line_snapshots,
-    replace_once,
-)
+from compiler.resident.rewrites import inline_tile_scratch_nests, promote_line_snapshots
+from compiler.scopes.resident_splice import ResidentDomain
+
+from .ast_rewrites import find_all_calls, find_call_span, find_routine_span, parse_fortran, replace_once
+
+DOMAIN = ResidentDomain("elmm_resident_pressure_state", "resident_flow", "pressure_require", prefix="rk")
 
 
 def identity(path):
     path = Path(path).resolve(strict=True)
     return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-
-
-def configured_sources(paths, procedures, directory, *, fortran_compiler, defines):
-    """Expand configured includes and serialize selected numerical coordinators.
-
-    The original application is untouched. OpenMP is removed only in the selected
-    procedures of the generated variant: its kernels will be dispatched by the
-    serial resident coordinator. All statements, branches and arithmetic remain.
-    Numerical dependence checks subsequently run on that complete serial source.
-    This is not permission to execute uncovered native effects on stale buffers.
-    """
-    from fparser.common.readfortran import FortranStringReader
-    from fparser.two.parser import ParserFactory
-    from fparser.two.utils import walk
-
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    parser = ParserFactory().create(std="f2008")
-    selected = {name.lower() for name in procedures}
-    selected_modules = {name.split("::", 1)[0] for name in selected if "::" in name}
-    records = []
-    for filename in paths:
-        source = Path(filename).resolve(strict=True)
-        before = identity(source)
-        command = [str(fortran_compiler), "-cpp", "-E", "-P", "-O3", "-ffree-line-length-none", "-fopenmp",
-                   *("-D" + value for value in defines), "-I" + str(source.parent), str(source)]
-        result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
-        if result.returncode:
-            raise RuntimeError("RK preprocessing failed: " + str(source) + "\n" + result.stderr)
-        lines = result.stdout.splitlines(keepends=True)
-        removed = []
-        modules_in_file = {m.group(1).lower() for m in re.finditer(r"(?im)^\s*module\s+([a-z_]\w*)\b", result.stdout)}
-        if modules_in_file & selected_modules:
-            tree = parser(FortranStringReader(result.stdout, ignore_comments=False))
-            for module in (node for node in walk(tree) if type(node).__name__ == "Module"):
-                header = next(node for node in module.content if type(node).__name__ == "Module_Stmt")
-                module_name = str(header.items[1]).lower()
-                for routine in (node for node in walk(module) if type(node).__name__ == "Subroutine_Subprogram"):
-                    statement = next(node for node in routine.content if type(node).__name__ == "Subroutine_Stmt")
-                    name = module_name + "::" + str(statement.items[1]).lower()
-                    if name not in selected:
-                        continue
-                    ending = routine.content[-1]
-                    first, last = statement.item.span[0], ending.item.span[1]
-                    for index in range(first - 1, last):
-                        if re.match(r"\s*!\$omp\b", lines[index], re.I):
-                            removed.append({"line": index + 1, "directive": lines[index].rstrip(), "procedure": name})
-                            lines[index] = "\n"
-        target = directory / (hashlib.sha256(str(source).encode()).hexdigest()[:12] + "_" + source.name)
-        target.write_text("".join(lines))
-        if identity(source) != before:
-            raise ValueError("RK source changed while preparing: " + str(source))
-        records.append({"original": before, "prepared": identity(target), "command": command,
-                        "serialized_directives": removed})
-    record = {"version": 1, "kind": "configured_resident_rk_sources", "defines": list(defines),
-              "procedures": sorted(selected), "sources": records,
-              "execution_authorized": False,
-              "contract": "serial coordinator source; uncovered native effects need explicit coherence transactions"}
-    (directory / "configured-sources.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
 
 
 def verify_resident_execution(packages, trace, required_procedures):
@@ -123,41 +59,6 @@ def verify_resident_execution(packages, trace, required_procedures):
             "evidence": "runtime launch/graph-kernel ledger matched to compiler implementation identities"}
 
 
-def guard_periodic_entries(extracted, directory):
-    """Keep halo copies independent under the adapter's three-cell minimum.
-
-    The added predicate is also a reached-call guard. Small grids use the native
-    implementation. The compiler proves these integer predicates rather than
-    accepting an assertion that a potentially overlapping copy is independent.
-    """
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    entries = []
-    for original in extracted["entries"]:
-        if original["procedure"] != "boundaries::periodic_corners_edges":
-            continue
-        source = Path(original["input_path"]).read_text()
-        assignments = list(re.finditer(r"(?im)^([ \t]*)u\(", source))
-        if len(assignments) != len(original["source_loop_spans"]):
-            raise ValueError("Periodic corner entry must have one assignment per original nest")
-        guard = "nx >= 3 .and. ny >= 3 .and. nz >= 3"
-        prepared = source
-        for assignment in reversed(assignments):
-            end = re.search(r"(?im)^[ \t]*end do\b", source[assignment.start():])
-            if end is None:
-                raise ValueError("Periodic corner entry has no enclosing point loop")
-            stop = assignment.start() + end.start()
-            prepared = (prepared[:assignment.start()] + "      if (" + guard + ") then\n"
-                        + prepared[assignment.start():stop] + "      endif\n" + prepared[stop:])
-        path = directory / Path(original["input_path"]).name
-        path.write_text(prepared)
-        entries.append({**original, "input_path": str(path),
-                        "runtime_guards": [*original["runtime_guards"], guard],
-                        "adapter_guard": {"condition": guard, "original": identity(original["input_path"]),
-                                          "prepared": identity(path), "false_path": "original native procedure"}})
-    return {**extracted, "entries": entries, "rejected": []}
-
-
 def _native_wall_correction(body):
     """Retain the original correction with conservative, bounded host access.
 
@@ -193,15 +94,14 @@ def materialize_entries(packages, directory):
     publish before native execution, except the wall-point corrections, which
     acquire smaller exact geometric supersets.
     """
-    from compiler.scopes.resident_splice import ResidentDomain, splice_resident_entries
+    from compiler.scopes.resident_splice import splice_resident_entries
 
     def native(region, original):
         if region["procedure"] == "momentumdiffusion::momentumdiffusion_nobranch_2ord":
             return _native_wall_correction(original)
         return None
 
-    domain = ResidentDomain("elmm_resident_pressure_state", "resident_flow", "pressure_require", prefix="rk")
-    return splice_resident_entries(packages, directory, domain=domain, native=native)
+    return splice_resident_entries(packages, directory, domain=DOMAIN, native=native)
 
 
 def pointwise_advection(source, directory):
@@ -243,7 +143,7 @@ def snapshot_filter(source, directory):
     """
     source = Path(source).resolve(strict=True)
     text = source.read_text()
-    updated, edits = promote_line_snapshots(text)
+    updated, edits = promote_line_snapshots(text, domain=DOMAIN)
     if not edits:
         raise ValueError("Expected at least one line-snapshot filter routine")
     directory = Path(directory).resolve()

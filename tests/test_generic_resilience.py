@@ -12,7 +12,6 @@ from elmm_pipeline.ast_rewrites import (
     find_call_span,
     find_routine_span,
     inline_pure_scalar_function,
-    inline_tile_scratch_nests,
     replace_once,
 )
 from elmm_pipeline.gpu_hot_path import (
@@ -131,56 +130,16 @@ end module custom_adv_mod
     assert result["directional_updates"] == 1
 
 
-def test_inline_tile_scratch_nests_on_elmm_and_custom() -> None:
-    if ELMM_SRC.is_dir() and (ELMM_SRC / "advection.f90").is_file():
-        adv_text = (ELMM_SRC / "advection.f90").read_text(encoding="utf-8")
-        # Inject extra comments to confirm formatting/comment invariance.
-        perturbed = adv_text.replace("end do", "! loop end\nend do", 5)
-        _, changes = inline_tile_scratch_nests(perturbed)
-        assert len(changes) == 9
+def test_inline_tile_scratch_nests_on_elmm() -> None:
+    from compiler.resident.rewrites import inline_tile_scratch_nests
 
-    custom_src = """module m_tile
-  implicit none
-contains
-  subroutine tiled_step(nx, ny, nz, bx, a, b)
-    integer, intent(in) :: nx, ny, nz, bx
-    real(8), intent(in) :: a(0:nx+1, 0:ny+1, 0:nz+1)
-    real(8), intent(out) :: b(1:nx, 1:ny, 1:nz)
-    real(8) :: scratch(1:bx+1, 1:bx, 1:bx)
-    integer :: i, j, k, ib, jb, kb, tx, ty, tz, rx, ry, rz
-    do kb = 1, nz, bx
-      do jb = 1, ny, bx
-        do ib = 1, nx, bx
-          do k = kb, min(kb + bx - 1, nz)
-            tz = k - kb + 1
-            do j = jb, min(jb + bx - 1, ny)
-              ty = j - jb + 1
-              do i = ib, min(ib + bx, nx + 1)
-                tx = i - ib + 1
-                scratch(tx, ty, tz) = 0.25d0 * a(i, j, k)
-              end do
-            end do
-          end do
-          do k = kb, min(kb + bx - 1, nz)
-            rz = k - kb + 1
-            do j = jb, min(jb + bx - 1, ny)
-              ry = j - jb + 1
-              do i = ib, min(ib + bx - 1, nx)
-                rx = i - ib + 1
-                b(i, j, k) = scratch(rx + 1, ry, rz) - scratch(rx, ry, rz)
-              end do
-            end do
-          end do
-        end do
-      end do
-    end do
-  end subroutine tiled_step
-end module m_tile
-"""
-    rewritten, custom_changes = inline_tile_scratch_nests(custom_src)
-    assert len(custom_changes) == 1
-    assert "0.25d0" in rewritten.lower()
-    assert "scratch(" not in rewritten.split("integer :: i, j, k, ib, jb, kb, tx, ty, tz, rx, ry, rz", 1)[-1]
+    if not (ELMM_SRC / "advection.f90").is_file():
+        pytest.skip("ELMM source checkout unavailable")
+    adv_text = (ELMM_SRC / "advection.f90").read_text(encoding="utf-8")
+    # Inject extra comments to confirm formatting/comment invariance.
+    perturbed = adv_text.replace("end do", "! loop end\nend do", 5)
+    _, changes = inline_tile_scratch_nests(perturbed)
+    assert len(changes) == 9
 
 
 def test_snapshot_filter_resilient_to_formatting_and_comments(tmp_path: Path) -> None:

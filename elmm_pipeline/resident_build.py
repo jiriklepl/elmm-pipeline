@@ -135,6 +135,7 @@ def _scons_disabled_branch(test_node):
     return False
 
 
+PERIODIC_MINIMUM = "nx >= 3 .and. ny >= 3 .and. nz >= 3"
 # ELMM's primary-grid scalars that resident entries take by VALUE.
 GRID_GEOMETRY = tuple("parameters::" + name for name in (
     "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz"))
@@ -332,11 +333,10 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
     compiler = Path(compiler).resolve(strict=True)
     if not (compiler / "compiler/__main__.py").is_file():
         raise ValueError("Expected a compiler checkout containing compiler/__main__.py")
-    sys.path.insert(0, str(compiler))
+    from compiler.resident.configure import configure_sources
     from compiler.scopes.resident_entries import (compile_resident_entries, export_resident_entries,
-                                                  pass_scalars_by_value)
-    from .resident_rk import (configured_sources, pointwise_advection, snapshot_filter,
-                             guard_periodic_entries, materialize_entries, integrate_rk_epoch)
+                                                  guard_entries, pass_scalars_by_value)
+    from .resident_rk import pointwise_advection, snapshot_filter, materialize_entries, integrate_rk_epoch
     from .gpu_hot_path import (materialize_pressure_stencils, prepare_pressure_device_entries,
                               materialize_resident_pressure, materialize_resident_pressure_tail)
     from .resident_time_loop import generate_time_entries, integrate_time_loop
@@ -356,8 +356,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
             if proc not in procedures:
                 procedures.append(proc)
     defines = ["DPREC"] if precision == "dp" else []
-    configured = configured_sources(paths, procedures, directory / "configured",
-                                    fortran_compiler=fortran, defines=defines)
+    configured = configure_sources(paths, procedures, directory / "configured", fortran=fortran, defines=defines)
     for name, transform in (("advection.f90", pointwise_advection), ("filters.f90", snapshot_filter)):
         record = next((r for r in configured["sources"] if Path(r["original"]["path"]).name == name), None)
         if record is not None:
@@ -375,7 +374,8 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage
         group = {**extracted, "entries": [e for e in extracted["entries"] if e["procedure"] in names],
                  "rejected": [e for e in extracted["rejected"] if e["procedure"] in names]}
         if label == "periodic":
-            group = guard_periodic_entries(group, directory / "periodic-guards")
+            # Halo copies are independent only from three cells up; smaller grids stay native.
+            group = guard_entries(group, directory / "periodic-guards", PERIODIC_MINIMUM)
         # The primary-grid counts and spacings are set before the RK adapter is entered.
         group = pass_scalars_by_value(group, directory / (label + "-values"), resources=GRID_GEOMETRY)
         package = compile_resident_entries(group, directory / (label + "-entries"))
@@ -525,8 +525,6 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
             raise ValueError("Hidden compiler options are not supported: " + key)
     directory = Path(directory).resolve()
     compiler = Path(prepared["compiler"])
-    if str(compiler) not in sys.path:
-        sys.path.insert(0, str(compiler))
     # The compiler owns its build contract and the list of runtime sources.
     from compiler.numerical_contract import CUDA_OPTIONS, HOST_OPTIONS
     from compiler.runtime import RESIDENT_SOURCES
