@@ -158,8 +158,6 @@ def integrate_time_loop(sources, entries, *, precision="dp"):
 
     ``sources`` maps ELMM file names to their text and is changed in place.
     """
-    cut = "\n    if (resident_flow%joined) then\n      call resident_flow%end_epoch()\n      resident_flow%joined=.false.\n    endif\n"
-    sources["tsteps.f90"] = replace_once(sources["tsteps.f90"], cut, "\n")
 
     # First-step setup remains native. Subsequent reached CFL work sees the
     # same domain as RK and output, including swapped physical allocations.

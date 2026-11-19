@@ -33,13 +33,6 @@ def integrate_workspace(sources):
     )
     sources["tsteps.f90"] = text[:lo] + body + text[hi:]
 
-    text = sources["dynamics.f90"]
-    release_block = (
-        "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-        "      call resident_flow%release_real(beta)\n      call resident_flow%release_real(rho)\n    end block\n"
-    )
-    sources["dynamics.f90"] = replace_once(text, release_block, "")
-
     text = sources["filters.f90"]
     lo, hi = find_routine_span(text, "Filter3ord")
     body = text[lo:hi]

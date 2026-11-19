@@ -572,4 +572,4 @@ end module Filters
     assert "acquire_work_real_3" in sources["filters.f90"]
     assert "release_work_real_3" in sources["filters.f90"]
     assert "resident_beta" in sources["tsteps.f90"]
-    assert "release_real(beta)" not in sources["dynamics.f90"]
+    assert sources["dynamics.f90"] == dynamics.read_text(encoding="utf-8")

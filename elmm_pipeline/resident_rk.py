@@ -210,8 +210,8 @@ def integrate_rk_epoch(output):
         return replace_once(text, anchor, addition, after=after, insert=True)
 
     def publish_block(indent="    "):
-        return (indent + "block\n" + indent + "  use elmm_resident_pressure_state, only: resident_flow\n"
-                + indent + "  if (resident_flow%active) call resident_flow%publish()\n" + indent + "end block\n")
+        # Host code that follows reads or writes fields the epoch keeps on the device.
+        return indent + "!$fort publish\n"
 
     tsteps = output["tsteps.f90"]
     lo, hi = find_routine_span(tsteps, "TMarchRK3")
@@ -225,13 +225,8 @@ def integrate_rk_epoch(output):
         "          call resident_flow%begin_epoch(0_c_int,2147483648_c_size_t)\n"
         "          resident_flow%joined=.true.\n        endif\n      endif\n\n"
     )
+    # The epoch stays open across RK stages and time steps; output and unsupported work close it.
     body = body[:sub_lo] + begin_epoch_code + body[sub_lo:]
-    end_do_matches = list(re.finditer(r"(?im)^[ \t]*end\s*do\b[^\n]*", body))
-    if not end_do_matches:
-        raise ValueError("Missing RK stage loop")
-    end_pos = end_do_matches[-1].end()
-    body = body[:end_pos] + ("\n    if (resident_flow%joined) then\n"
-                             "      call resident_flow%end_epoch()\n      resident_flow%joined=.false.\n    endif\n") + body[end_pos:]
     tsteps = tsteps[:lo] + body + tsteps[hi:]
     lo, hi = find_routine_span(tsteps, "IBMassSources")
     body = tsteps[lo:hi]
@@ -289,13 +284,6 @@ def integrate_rk_epoch(output):
     ts_end = re.search(r"(?im)^\s*end\s*module\s+TimeSteps\b", tsteps)
     end_mod = ts_end if ts_end is not None else end
     output["tsteps.f90"] = tsteps[:end_mod.start()] + supported + tsteps[end_mod.start():]
-
-    dynamics = output["dynamics.f90"]
-    lo, hi = find_routine_span(dynamics, "Convection")
-    body = dynamics[lo:hi]
-    body = at_once(body, "  contains", "    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-                   "      call resident_flow%release_real(beta)\n      call resident_flow%release_real(rho)\n    end block\n\n")
-    output["dynamics.f90"] = dynamics[:lo] + body + dynamics[hi:]
 
     dynamics = output["dynamics.f90"]
     lo, hi = find_routine_span(dynamics, "SubgridStresses")
