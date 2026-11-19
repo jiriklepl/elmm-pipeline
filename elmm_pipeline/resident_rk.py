@@ -50,41 +50,6 @@ def verify_resident_execution(packages, trace, required_procedures):
             "evidence": "runtime launch/graph-kernel ledger matched to compiler implementation identities"}
 
 
-def _native_wall_correction(body):
-    """Retain the original correction with conservative, bounded host access.
-
-    This adapter covers the original second-order no-branch correction includes.
-    Their stencil radius is at most two around the named wall-point coordinates.
-    Empty point sets evaluate no field descriptor or coordinate reduction.
-    """
-    points = set(re.findall(r"\b([UVW][xyz][mp]WMpoints)\s*\(i\)\s*%", body, re.I))
-    writes = set(re.findall(r"(?im)^\s*([UVW]2)\s*\([^\n]*", body))
-    if len(points) != 1 or len(writes) != 1:
-        raise ValueError("Unknown native wall-correction body")
-    points, target = next(iter(points)), next(iter(writes))
-    fields = [target, target[0], "nu"]
-    lines = ["    block", "      use, intrinsic :: iso_c_binding",
-             "      use elmm_resident_pressure_state, only: resident_flow",
-             "      integer(c_int64_t) :: wall_handles(3)", "      integer :: wall_first(3),wall_last(3),wall_index",
-             "      wall_handles=0", "      if (resident_flow%active) then", "        if (size(" + points + ")>0) then",
-             "          wall_first=[" + ",".join("minval(" + points + "%" + axis + ")" for axis in ("xi", "yj", "zk")) + "]-2",
-             "          wall_last=[" + ",".join("maxval(" + points + "%" + axis + ")" for axis in ("xi", "yj", "zk")) + "]+2"]
-    for index, field in enumerate(fields, 1):
-        lines.append(f"          wall_handles({index})=resident_flow%host_box_real({field},lbound({field}), &")
-        lines.append("            wall_first,wall_last," + (".true." if index == 1 else ".false.") + ")")
-    lines += ["        endif", "      endif", body.rstrip(),
-              "      do wall_index=1,3", "        if (wall_handles(wall_index)/=0) call resident_flow%host_end(wall_handles(wall_index))",
-              "      enddo", "    end block"]
-    return "\n".join(lines) + "\n"
-
-
-def native_wall_correction(region, original):
-    """The native form of a rejected nest: the wall corrections take bounded host access, others publish."""
-    if region["procedure"] == "momentumdiffusion::momentumdiffusion_nobranch_2ord":
-        return _native_wall_correction(original)
-    return None
-
-
 def _decl_shape_lower_bounds(node, entity_shape):
     attrs_str = re.sub(r"\s+", "", str(node.items[1] or "")).lower()
     if entity_shape is not None:

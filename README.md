@@ -87,7 +87,9 @@ code is added in one hook, by these modules:
   code;
 - `resident_time_loop.py` and `resident_output.py`: the epoch across time
   steps, the CFL and averaging kernels, snapshot output;
-- `resident_walls.py`: the planar wall model on packed planes;
+- `resident_walls.py`: the stress kernels of the flat-wall model, one loop over each list of
+  wall points. The friction velocity and fluxes stay fields of ELMM's own point lists, and
+  the wall corrections in the momentum diffusion are compiled from ELMM's own loops;
 - `resident_workspace.py`: storage for the RK constants and the filter
   snapshot that outlives one call.
 
