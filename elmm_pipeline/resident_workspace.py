@@ -1,21 +1,18 @@
 """Give checked RK constants and private snapshots their proved owner lifetime."""
-from pathlib import Path
 import hashlib
-import json
 import re
 
 from .ast_rewrites import (
     find_routine_span,
     replace_once,
 )
-from .resident_rk import identity
 
 
-def integrate_workspace(integration, directory):
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}
+def integrate_workspace(sources):
+    """Give the RK constants and the filter snapshot storage that outlives one call.
 
+    ``sources`` maps ELMM file names to their text and is changed in place.
+    """
     text = sources["tsteps.f90"]
     lo, hi = find_routine_span(text, "TMarchRK3")
     body = text[lo:hi]
@@ -108,14 +105,3 @@ def integrate_workspace(integration, directory):
 """,
     )
     sources["filters.f90"] = text[:lo] + body + text[hi:]
-    records = []
-    for name, text in sources.items():
-        path = directory / name
-        path.write_text(text)
-        records.append(identity(path))
-    result = {"version": 1, "sources": records, "basis": integration,
-              "work_site": site, "snapshot_lifetime": "domain-owned; exclusive source borrow; discard dead values on reuse",
-              "coefficient_lifetime": "caller SAVE TARGET arrays initialized by the unchanged RK PARAMETER expressions",
-              "gpu_execution_established": False}
-    (directory / "workspace-integration.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result

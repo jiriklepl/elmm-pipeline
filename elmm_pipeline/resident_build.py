@@ -9,18 +9,18 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
-import signal
-import subprocess
-import sys
-import time
 
 from .ast_rewrites import parse_fortran, replace_once
-from .resident_rk import identity
+
+
+def identity(path):
+    path = Path(path).resolve(strict=True)
+    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 # The non-MPI, non-CGAL source set of the pinned ELMM SConstruct. Keep physical
 # owners distinct: ELMM and PoisFFT both contain parameters.f90 and main.f90.
@@ -327,101 +327,83 @@ def snapshot_sources(elmm, poisfft, destination):
     return destination / "elmm", destination / "PoisFFT"
 
 
-def prepare(elmm, poisfft, compiler, directory, *, fortran, python, min_coverage=None, precision="dp"):
-    if precision not in {"dp", "sp"}:
-        raise ValueError(f"Unsupported precision {precision!r}: expected 'dp' or 'sp'")
-    compiler = Path(compiler).resolve(strict=True)
-    if not (compiler / "compiler/__main__.py").is_file():
-        raise ValueError("Expected a compiler checkout containing compiler/__main__.py")
-    from compiler.resident.configure import configure_sources
-    from compiler.scopes.resident_entries import (compile_resident_entries, export_resident_entries,
-                                                  guard_entries, pass_scalars_by_value)
-    from .resident_rk import pointwise_advection, snapshot_filter, materialize_entries, integrate_rk_epoch
-    from .gpu_hot_path import (materialize_pressure_stencils, prepare_pressure_device_entries,
-                              materialize_resident_pressure, materialize_resident_pressure_tail)
+# The ELMM sources whose arrays an entry or a residency block binds.
+ADDRESSABLE = """parameters arrayutilities subgrid dynamics momentum_diffusion advection scalarboundaries boundaries
+tsteps linearforcing volumesources sponge tiling filters wallmodels advection_variable_z water_thermodynamics
+scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemapframes""".split()
+# Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
+MINIMUM_NESTS = {"rk": 46, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4, "pressure": 23}
+PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson"]
+
+
+def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp"):
+    """Write the resident variant of ELMM's sources and compile its entries."""
+    from compiler.resident.project import ResidentProject, Selection
+    from compiler.resident.project import prepare as prepare_application
+
+    from .gpu_hot_path import HELD, expand_divergence, integrate_pressure, integrate_pressure_tail
+    from .resident_rk import DOMAIN, integrate_rk_epoch, native_wall_correction
     from .resident_time_loop import generate_time_entries, integrate_time_loop
     from .resident_walls import generate_wall_entries, integrate_wall_entries
     from .resident_workspace import integrate_workspace
 
+    if precision not in {"dp", "sp"}:
+        raise ValueError(f"Unsupported precision {precision!r}: expected 'dp' or 'sp'")
+    compiler = Path(compiler).resolve(strict=True)
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     elmm, poisfft = snapshot_sources(elmm, poisfft, directory / "application")
-    elmm_units, poisfft_units = discover_application_units(elmm / "src", poisfft / "src")
-    paths = [elmm / "src" / (n + ".f90") for n in elmm_units]
+    source = elmm / "src"
+    elmm_units, poisfft_units = discover_application_units(source, poisfft / "src")
+    paths = [source / (n + ".f90") for n in elmm_units]
     paths += [poisfft / "src" / (n + ".f90") for n in poisfft_units]
-    groups = discover_resident_procedure_groups(paths)
-    procedures = []
-    for key in ("rk", "boundary", "periodic", "advection", "filter"):
-        for proc in groups[key]:
-            if proc not in procedures:
-                procedures.append(proc)
-    defines = ["DPREC"] if precision == "dp" else []
-    configured = configure_sources(paths, procedures, directory / "configured", fortran=fortran, defines=defines)
-    for name, transform in (("advection.f90", pointwise_advection), ("filters.f90", snapshot_filter)):
-        record = next((r for r in configured["sources"] if Path(r["original"]["path"]).name == name), None)
-        if record is not None:
-            record["prepared"] = transform(record["prepared"]["path"], directory / (name + "-prepared"))["replacement"]
-    write(directory / "configured.json", configured)
-    print("Configured sources", len(paths), flush=True)
-    extracted = export_resident_entries([r["prepared"]["path"] for r in configured["sources"]],
-                                       procedures, directory / "extracted")
-    write(directory / "extracted.json", extracted)
-    baseline_loops = {"rk": 46, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4}
-    packages = []
-    for label in ("rk", "boundary", "periodic", "advection", "filter"):
-        names = groups[label]
-        expected = baseline_loops[label]
-        group = {**extracted, "entries": [e for e in extracted["entries"] if e["procedure"] in names],
-                 "rejected": [e for e in extracted["rejected"] if e["procedure"] in names]}
-        if label == "periodic":
-            # Halo copies are independent only from three cells up; smaller grids stay native.
-            group = guard_entries(group, directory / "periodic-guards", PERIODIC_MINIMUM)
-        # The primary-grid counts and spacings are set before the RK adapter is entered.
-        group = pass_scalars_by_value(group, directory / (label + "-values"), resources=GRID_GEOMETRY)
-        package = compile_resident_entries(group, directory / (label + "-entries"))
-        covered = sum(len(item["region"]["source_loop_spans"]) for item in package["entries"])
-        minimum = (
-            min_coverage[label]
-            if (min_coverage is not None and label in min_coverage)
-            else expected
-        )
-        if covered < minimum:
-            raise ValueError(
-                f"GPU source-loop coverage regressed for {label}: {covered}, minimum {minimum}"
-            )
-        if label == "boundary":
-            # The primary boundary guard excludes unsupported boundary modes.
-            # Preserve the rejection ledger, but do not publish inside an
-            # unreachable native branch of the serial resident coordinator.
-            package["excluded_boundary_rejections"] = package["rejected"]
-            package["rejected"] = []
-        package["source_loops_covered"] = covered
-        package["expected_baseline_loops"] = expected
-        packages.append(package)
-        print("Generated", label, len(package["entries"]), "entries covering", covered, "source nests", flush=True)
-    write(directory / "packages.json", packages)
-    stencils = materialize_pressure_stencils(elmm / "src/pressure.f90", directory / "pressure-stencils")
-    pressure_entries = prepare_pressure_device_entries(stencils, elmm / "src", compiler, python,
-                                                       directory / "pressure-entries", defines=defines)
-    pressure = materialize_resident_pressure(pressure_entries, elmm / "src/main.f90", directory / "pressure")
-    pressure = materialize_resident_pressure_tail(pressure, elmm / "src/boundaries.f90", directory / "pressure-tail")
-    numerical = materialize_entries(packages, directory / "numerical")
-    rk = integrate_rk_epoch(configured, numerical, pressure, directory / "rk")
-    time_entries = generate_time_entries(directory / "time-entries", precision=precision)
-    integrated = integrate_time_loop(rk, configured, time_entries, directory / "time", precision=precision)
-    wall_entries = generate_wall_entries(integrated, directory / "wall-entries", precision=precision)
-    integrated = integrate_wall_entries(integrated, wall_entries, directory / "walls")
-    integrated = integrate_workspace(integrated, directory / "integrated")
-    entries = [e for p in packages for e in p["entries"]] + pressure_entries["entries"]
-    entries += list(time_entries["entries"].values()) + list(wall_entries["entries"].values())
-    result = {"version": 1, "precision": precision, "elmm": str(elmm), "poisfft": str(poisfft),
-              "elmm_units": elmm_units, "poisfft_units": poisfft_units,
-              "procedure_groups": groups,
-              "compiler": str(compiler), "integration": integrated,
-              "entry_directories": [e["directory"] for e in entries],
+    groups = {**discover_resident_procedure_groups(paths), "pressure": list(PRESSURE_PROCEDURES)}
+    kernels = []
+
+    def edit(texts):
+        """ELMM's own residency code, added to its sources after the entry calls are in place."""
+        owned = {path.name: path for path in texts if path.parent == source}
+        sources = {name: texts[path] for name, path in owned.items()}
+        integrate_pressure(sources)
+        integrate_pressure_tail(sources)
+        integrate_rk_epoch(sources)
+        time_entries = generate_time_entries(directory / "time-entries", precision=precision)
+        integrate_time_loop(sources, time_entries, precision=precision)
+        wall_entries = generate_wall_entries(sources, directory / "wall-entries", precision=precision)
+        integrate_wall_entries(sources, wall_entries)
+        integrate_workspace(sources)
+        kernels.extend(item["directory"] for entries in (time_entries, wall_entries)
+                       for item in entries["entries"].values())
+        return {owned.get(name, name): text for name, text in sources.items()}
+
+    selections = tuple(
+        Selection(label, tuple(groups[label]), guard=PERIODIC_MINIMUM if label == "periodic" else None,
+                  # The primary-grid counts and spacings are set before the epoch is entered.
+                  value_scalars=GRID_GEOMETRY, minimum_nests=MINIMUM_NESTS[label],
+                  # The activation condition excludes the boundary modes whose nests are rejected.
+                  native_rejections=label != "boundary")
+        for label in ("rk", "boundary", "periodic", "advection", "filter", "pressure"))
+    project = ResidentProject(
+        sources=tuple(paths), selections=selections, defines=("DPREC",) if precision == "dp" else (), domain=DOMAIN,
+        rewrites={"advection.f90": ("tile_scratch",), "filters.f90": ("line_snapshot",),
+                  "pressure.f90": (expand_divergence(source / "numerical_operators.f90"),)},
+        edit=edit, native=native_wall_correction, held=HELD,
+        addressable=tuple(source / (name + ".f90") for name in ADDRESSABLE))
+    prepared = prepare_application(project, directory / "resident", fortran=fortran)
+    for row in prepared["selections"]:
+        print("Generated", row["label"], row["entries"], "entries covering", row["nests"], "source nests", flush=True)
+    # The container runner matches the runtime's trace against the compiler's entry records.
+    write(directory / "packages.json", [
+        json.loads((directory / "resident" / (label + "-entries") / "device-entries.json").read_text())
+        for label in MINIMUM_NESTS])
+    result = {"version": 2, "precision": precision, "elmm": str(elmm), "poisfft": str(poisfft),
+              "elmm_units": elmm_units, "poisfft_units": poisfft_units, "procedure_groups": groups,
+              "compiler": str(compiler),
+              "sources": [{**row, "sha256": identity(row["resident"])["sha256"]} for row in prepared["sources"]],
+              "entry_directories": prepared["entries"] + kernels,
               "packages": str(directory / "packages.json"), "gpu_execution_established": False}
     write(directory / "prepared.json", result)
-    print("Prepared", len(entries), "GPU entries", flush=True)
+    print("Prepared", len(result["entry_directories"]), "GPU entries", flush=True)
     return result
 
 
@@ -455,99 +437,35 @@ def diagnostic_main(text, *, resident):
     return finalize_before_native(text) if resident else text
 
 
-def _cmake_path(path):
-    value = str(Path(path).resolve())
-    if any(c in value for c in ('"', ';', '\n', '$')):
-        raise ValueError("Unsupported CMake path: " + value)
-    return '"' + value + '"'
-
-
-def _preserve(path):
-    """Keep failed attempts when resuming the same dependency-managed build."""
-    if not path.exists():
-        return
-    index = 1
-    while path.with_name(path.name + f".attempt-{index:02}").exists():
-        index += 1
-    shutil.copyfile(path, path.with_name(path.name + f".attempt-{index:02}"))
-
-
-def _snapshot_directory(source, target):
-    def files(root):
-        return {str(p.relative_to(root)): identity(p)["sha256"] for p in root.rglob("*")
-                if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".o", ".mod"}}
-    if target.exists():
-        if files(source) != files(target):
-            raise ValueError("Build dependency changed; prepare a fresh build: " + str(source))
-    else:
-        shutil.copytree(source, target, ignore=shutil.ignore_patterns("__pycache__", "*.o", "*.mod"))
-
-
-def _run(argv, directory, label, *, timeout):
-    record = {"argv": list(map(str, argv)), "cwd": str(directory), "status": "running"}
-    path = directory / (label + "-command.json")
-    _preserve(path)
-    _preserve(directory / (label + ".log"))
-    write(path, record)
-    start = time.monotonic()
-    process = None
-    try:
-        with (directory / (label + ".log")).open("w") as log:
-            process = subprocess.Popen(record["argv"], cwd=directory, stdout=log,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
-            returncode = process.wait(timeout=timeout)
-        record.update(returncode=returncode, status="passed" if returncode == 0 else "failed")
-        if returncode:
-            raise RuntimeError(f"{label} failed; inspect {directory / (label + '.log')}")
-    except BaseException as error:
-        record.update(status="failed", error=str(error))
-        raise
-    finally:
-        if process is not None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-        record["seconds"] = time.monotonic() - start
-        write(path, record)
-
-
 def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, architecture, jobs):
     """Fresh CMake build; neither objects nor modules from earlier builds enter."""
-    import re
+    from compiler.resident.build import (Executable, ObjectLibrary, cmake_lists, cmake_path,
+                                         configure_and_compile, snapshot_directory)
+    from compiler.runtime import RESIDENT_SOURCES
 
-    if jobs < 1 or not re.fullmatch(r"[1-9][0-9]{1,2}[af]?", architecture):
-        raise ValueError("Positive build jobs and explicit CUDA architecture are required")
-    for key in ("CFLAGS", "CXXFLAGS", "CUDAFLAGS", "FFLAGS", "FCFLAGS", "F90FLAGS", "LDFLAGS",
-                "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS"):
-        if os.environ.get(key):
-            raise ValueError("Hidden compiler options are not supported: " + key)
+    from .poisson_source import check_vkfft, snapshot_solver
+
+    if not re.fullmatch(r"[1-9][0-9]{1,2}[af]?", architecture):
+        raise ValueError("An explicit CUDA architecture is required")
     directory = Path(directory).resolve()
     compiler = Path(prepared["compiler"])
-    # The compiler owns its build contract and the list of runtime sources.
-    from compiler.numerical_contract import CUDA_OPTIONS, HOST_OPTIONS
-    from compiler.runtime import RESIDENT_SOURCES
-    from .poisson_source import check_vkfft, snapshot_solver
     vkfft = check_vkfft(vkfft)
     provider = directory / "provider-source"
     snapshot_solver(solver, provider, directory / "provider-inputs.json")
-    runtime = directory / "runtime"
-    _snapshot_directory(compiler / "compiler/runtime", runtime)
-    adapter = directory / "pressure-adapter"
-    _snapshot_directory(Path(__file__).with_name("gpu_pressure_sources"), adapter)
+    runtime = snapshot_directory(compiler / "compiler/runtime", directory / "runtime")
+    adapter = snapshot_directory(Path(__file__).with_name("gpu_pressure_sources"), directory / "pressure-adapter")
     elmm, poisfft = Path(prepared["elmm"]) / "src", Path(prepared["poisfft"]) / "src"
-    overrides = {Path(r["path"]).name: Path(r["path"]) for r in prepared["integration"]["sources"]}
-    for record in prepared["integration"]["sources"]:
-        if identity(record["path"]) != record:
-            raise ValueError("Prepared application source changed")
-    elmm_units = prepared.get("elmm_units") or ELMM_UNITS
-    poisfft_units = prepared.get("poisfft_units") or POISFFT_UNITS
-    common = [poisfft / (n + ".f90") for n in poisfft_units]
+    for row in prepared["sources"]:
+        if identity(row["resident"])["sha256"] != row["sha256"]:
+            raise ValueError("Prepared application source changed: " + row["resident"])
+    overrides = {Path(row["original"]).name: Path(row["resident"]) for row in prepared["sources"]
+                 if row["original"] is not None and Path(row["original"]).parent == elmm}
+    added = [Path(row["resident"]) for row in prepared["sources"] if row["original"] is None]
+    common = [poisfft / (n + ".f90") for n in prepared["poisfft_units"]]
     common += [elmm / n for n in ("lapack.f", "rng_par_zig_c.c", "pthreads.c") if (elmm / n).is_file()]
-    native = [elmm / (n + ".f90") for n in elmm_units if n != "main"] + common
-    resident = [overrides.get(n + ".f90", elmm / (n + ".f90")) for n in elmm_units if n != "main"] + common
-    resident += [overrides["resident_time_tasks.f90"]]
+    units = [n for n in prepared["elmm_units"] if n != "main"]
+    native = [elmm / (n + ".f90") for n in units] + common
+    resident = [overrides[n + ".f90"] for n in units] + common + added
     resident += [runtime / n for n in RESIDENT_SOURCES]
     resident += [adapter / n for n in ("gpu_pressure.f90", "resident_pressure_state.f90", "gpu_pressure_tail.f90",
                                       "gpu_pressure.cpp", "gpu_pressure_halo.cu", "gpu_pressure_tail.cu")]
@@ -558,63 +476,33 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
         diagnostic = directory / (target + "-full20.f90")
         diagnostic.write_text(diagnostic_main(source.read_text(), resident=target == "ELMM"))
         mains[target + "-full20"] = diagnostic
-    cmake = ["cmake_minimum_required(VERSION 4.0)",
-             "project(ELMMResident LANGUAGES C CXX Fortran CUDA)",
-             "set(CMAKE_EXPORT_COMPILE_COMMANDS ON)",
-             "find_package(CUDAToolkit REQUIRED)", "find_package(OpenMP REQUIRED)",
-             "set(POISSON_SOLVER_BUILD_FORTRAN ON CACHE BOOL \"\" FORCE)",
-             "set(POISSON_SOLVER_USE_MPI OFF CACHE BOOL \"\" FORCE)",
-             "set(BUILD_SHARED_LIBS ON CACHE BOOL \"\" FORCE)"]
-    for option in ("TESTS", "API_TESTS", "EXAMPLES", "DOCS"):
-        cmake.append(f'set(POISSON_SOLVER_BUILD_{option} OFF CACHE BOOL "" FORCE)')
-    cmake += ['set(POISSON_SOLVER_ENABLE_BENCHMARKS OFF CACHE BOOL "" FORCE)',
-              f'set(FETCHCONTENT_SOURCE_DIR_VKFFT {_cmake_path(vkfft)} CACHE PATH "" FORCE)',
-              f"add_subdirectory({_cmake_path(provider)} provider)"]
-    for lib in ("fftw3", "fftw3f", "fftw3_omp", "fftw3f_omp", "blas", "lapack"):
-        cmake += [f"find_library(LIB_{lib} NAMES {lib} lib{lib}.so.3 lib{lib}.so.0 REQUIRED)"]
-    cmake += ["add_library(native_libraries INTERFACE)",
-              "target_link_libraries(native_libraries INTERFACE OpenMP::OpenMP_Fortran pthread " +
-              " ".join("${LIB_" + n + "}" for n in ("fftw3_omp", "fftw3f_omp", "fftw3", "fftw3f", "blas", "lapack")) + ")"]
-    host_options, cuda_options = ";".join(HOST_OPTIONS), ";".join(CUDA_OPTIONS)
-    precision = prepared.get("precision", "dp")
-    dprec_define = ["DPREC"] if precision == "dp" else []
-    dprec_flag = "-DDPREC " if precision == "dp" else ""
-    for name, sources in (("native", native), ("resident", resident)):
-        cmake += [f"add_library({name}_objects OBJECT\n  " + "\n  ".join(_cmake_path(p) for p in sources) + "\n)",
-                  f'file(MAKE_DIRECTORY "${{CMAKE_BINARY_DIR}}/{name}-modules")',
-                  f'set_target_properties({name}_objects PROPERTIES Fortran_MODULE_DIRECTORY "${{CMAKE_BINARY_DIR}}/{name}-modules")',
-                  f'target_include_directories({name}_objects PUBLIC "${{CMAKE_BINARY_DIR}}/{name}-modules" ' +
-                  " ".join(_cmake_path(p) for p in (elmm, poisfft, runtime, adapter)) + ")",
-                  *( [f"target_compile_definitions({name}_objects PRIVATE {' '.join(dprec_define)})"] if dprec_define else [] ),
-                  f"target_compile_options({name}_objects PRIVATE "
-                  f'"$<$<COMPILE_LANGUAGE:Fortran>:-cpp;-O3;-fopenmp;-ffree-line-length-none;{host_options};-fbacktrace;-g>" '
-                  f'"$<$<COMPILE_LANGUAGE:C,CXX>:-O3;-fopenmp;{host_options};-g>" '
-                  f'"$<$<COMPILE_LANGUAGE:CUDA>:-O3;-std=c++17;{cuda_options};-Xcompiler=-fPIC,-fopenmp,{",".join(HOST_OPTIONS)}>" )',
-                  f"target_link_libraries({name}_objects PUBLIC native_libraries)"]
-        if name == "resident":
-            cmake += ["target_link_libraries(resident_objects PUBLIC poisson-solver CUDA::cudart)"]
-    cmake += [f"set_source_files_properties({_cmake_path(elmm / 'alternate_ieee_isnan.f90')} PROPERTIES COMPILE_OPTIONS -O0)"]
-    for target, source in mains.items():
-        objects = "native" if "native" in target else "resident"
-        cmake += [f"add_executable({target} {_cmake_path(source)})",
-                  f"target_link_libraries({target} PRIVATE {objects}_objects)",
-                  f"target_compile_options({target} PRIVATE -cpp -O3 -fopenmp {dprec_flag}-ffree-line-length-none "
-                  f"{' '.join(HOST_OPTIONS)} -fbacktrace -g)",
-                  f"set_target_properties({target} PROPERTIES LINKER_LANGUAGE Fortran)"]
-    _preserve(directory / "CMakeLists.txt")
-    (directory / "CMakeLists.txt").write_text("\n".join(cmake) + "\n")
+    prologue = ['set(POISSON_SOLVER_BUILD_FORTRAN ON CACHE BOOL "" FORCE)',
+                'set(POISSON_SOLVER_USE_MPI OFF CACHE BOOL "" FORCE)',
+                'set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)']
+    prologue += [f'set(POISSON_SOLVER_BUILD_{option} OFF CACHE BOOL "" FORCE)'
+                 for option in ("TESTS", "API_TESTS", "EXAMPLES", "DOCS")]
+    prologue += ['set(POISSON_SOLVER_ENABLE_BENCHMARKS OFF CACHE BOOL "" FORCE)',
+                 f'set(FETCHCONTENT_SOURCE_DIR_VKFFT {cmake_path(vkfft)} CACHE PATH "" FORCE)',
+                 f"add_subdirectory({cmake_path(provider)} provider)"]
+    libraries = ("fftw3_omp", "fftw3f_omp", "fftw3", "fftw3f", "blas", "lapack")
+    prologue += [f"find_library(LIB_{lib} NAMES {lib} lib{lib}.so.3 lib{lib}.so.0 REQUIRED)" for lib in libraries]
+    prologue += ["add_library(native_libraries INTERFACE)",
+                 "target_link_libraries(native_libraries INTERFACE OpenMP::OpenMP_Fortran pthread "
+                 + " ".join("${LIB_" + lib + "}" for lib in libraries) + ")"]
+    text = cmake_lists(
+        "ELMMResident",
+        [ObjectLibrary("native", tuple(native), link=("native_libraries",)),
+         ObjectLibrary("resident", tuple(resident), link=("native_libraries", "poisson-solver", "CUDA::cudart"))],
+        [Executable(target, source, "native" if "native" in target else "resident") for target, source in mains.items()],
+        include_directories=(elmm, poisfft, runtime, adapter),
+        definitions=("DPREC",) if prepared["precision"] == "dp" else (),
+        fortran_options=("-O3", "-fopenmp", "-ffree-line-length-none", "-fbacktrace", "-g"),
+        prologue=prologue, source_options={elmm / "alternate_ieee_isnan.f90": ("-O0",)})
+    (directory / "CMakeLists.txt").write_text(text)
     inputs = {str(p): identity(p)["sha256"] for p in set(native + resident + list(mains.values()))}
     for root in (runtime, adapter, provider, elmm, poisfft, *map(Path, prepared["entry_directories"])):
         inputs.update({str(p): identity(p)["sha256"] for p in root.rglob("*") if p.is_file()})
-    inputs[str(directory / "CMakeLists.txt")] = identity(directory / "CMakeLists.txt")["sha256"]
-    _preserve(directory / "build-inputs.json")
-    write(directory / "build-inputs.json", inputs)
-    output = directory / "build"
-    _run(["cmake", "-S", directory, "-B", output, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
-          "-DCMAKE_Fortran_COMPILER=" + str(fortran.resolve()), "-DCMAKE_CXX_COMPILER=" + str(cxx.resolve()),
-          "-DCMAKE_CUDA_COMPILER=" + str(nvcc.resolve()), "-DCMAKE_CUDA_HOST_COMPILER=" + str(cxx.resolve()),
-          "-DCMAKE_CUDA_ARCHITECTURES=" + architecture], directory, "configure", timeout=240)
-    _run(["cmake", "--build", output, "--parallel", str(jobs)], directory, "compile", timeout=2400)
+    output = configure_and_compile(directory, fortran=fortran, cxx=cxx, nvcc=nvcc, architecture=architecture, jobs=jobs)
     if any(identity(path)["sha256"] != sha for path, sha in inputs.items()):
         raise ValueError("Build source changed during compilation")
     result = {"status": "PASS", "binaries": {n: identity(output / n) for n in mains},
@@ -656,7 +544,7 @@ def execute(args):
         prepared = json.loads((args.output / "prepared.json").read_text())
     else:
         prepared = prepare(args.elmm, args.poisfft, args.compiler.resolve(strict=True), args.output,
-                           fortran=args.fortran, python=Path(sys.executable), precision=precision)
+                           fortran=args.fortran, precision=precision)
     if not args.prepare_only:
         build_prepared(prepared, args.output, solver=args.solver, vkfft=args.vkfft,
                        fortran=args.fortran, cxx=args.cxx, nvcc=args.nvcc,

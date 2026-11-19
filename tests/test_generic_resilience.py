@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -15,8 +14,7 @@ from elmm_pipeline.ast_rewrites import (
     replace_once,
 )
 from elmm_pipeline.gpu_hot_path import (
-    _divergence_expression,
-    materialize_pressure_stencils,
+    expand_divergence,
 )
 from elmm_pipeline.resident_build import (
     ELMM_UNITS,
@@ -30,8 +28,6 @@ from elmm_pipeline.resident_build import (
 from elmm_pipeline.resident_rk import (
     contiguous_filter_arguments,
     contiguous_periodic_boundary,
-    pointwise_advection,
-    snapshot_filter,
 )
 from elmm_pipeline.resident_walls import _verify_wall_helpers
 
@@ -123,11 +119,12 @@ end module custom_adv_mod
         encoding="utf-8",
     )
 
-    result = pointwise_advection(source, tmp_path / "out")
-    transformed = Path(result["replacement"]["path"]).read_text(encoding="utf-8")
+    from compiler.resident.rewrites import inline_tile_scratch_nests
+
+    transformed, changes = inline_tile_scratch_nests(source.read_text(encoding="utf-8"))
     assert "work_u(" not in transformed.split("integer :: lx, ly, lz, cx, cy, cz", 1)[-1]
     assert "0.5d0" in transformed.lower()
-    assert result["directional_updates"] == 1
+    assert len(changes) == 1
 
 
 def test_inline_tile_scratch_nests_on_elmm() -> None:
@@ -224,8 +221,10 @@ end module filters_mod
 """,
         encoding="utf-8",
     )
-    result = snapshot_filter(source, tmp_path / "out")
-    text = Path(result["replacement"]["path"]).read_text(encoding="utf-8")
+    from compiler.resident.rewrites import promote_line_snapshots
+    from elmm_pipeline.resident_rk import DOMAIN
+
+    text, _edits = promote_line_snapshots(source.read_text(encoding="utf-8"), domain=DOMAIN)
     assert "allocatable :: tmp(:,:,:)" in text
     assert "allocate(tmp(" in text
     assert "tmp((i+ii),j,k)" in text
@@ -258,9 +257,29 @@ end module operators_mod
 """,
         encoding="utf-8",
     )
-    expr, constants = _divergence_expression(operators)
-    assert "c1" in constants and "c3" in constants
-    assert "dxmin" in expr and "dymin" in expr and "dzmin" in expr
+    pressure = """module Pressure
+contains
+  subroutine PrePoisson(U, V, W, RHS, dt2)
+    real(8) :: dt2_rec
+    dt2_rec = 1._knd / dt2
+    RHS(i,j,k) = Divergence4Uniform(U(i-2,j,k), U(i-1,j,k), U(i+1,j,k), U(i+2,j,k), &
+      V(i,j-2,k), V(i,j-1,k), V(i,j+1,k), V(i,j+2,k), &
+      W(i,j,k-2), W(i,j,k-1), W(i,j,k+1), W(i,j,k+2), dxmin, dymin, dzmin)
+  end subroutine PrePoisson
+  subroutine PostPoisson()
+    p = Divergence4Uniform(a, b, c, d, a, b, c, d, a, b, c, d, dxmin, dymin, dzmin)
+  end subroutine PostPoisson
+end module Pressure
+"""
+    expanded = expand_divergence(operators)(pressure)
+    before, after = expanded.split("subroutine PostPoisson", 1)
+    # Only the call inside PrePoisson is expanded, with the function's constants declared before its first statement.
+    assert "Divergence4Uniform" not in before and "Divergence4Uniform" in after
+    assert before.lower().index("parameter :: c1") < before.index("dt2_rec = 1._knd / dt2")
+    assert "U(i+1,j,k)" in before
+    assert "dxmin" in before
+    with pytest.raises(ValueError, match="Expected one Divergence4Uniform call"):
+        expand_divergence(operators)(pressure.replace("RHS(i,j,k) = Divergence4Uniform", "RHS(i,j,k) = Other"))
 
     renamed_ops = tmp_path / "renamed_ops.f90"
     renamed_ops.write_text(
@@ -288,19 +307,6 @@ end module operators_mod
     assert expanded_count == 1
     assert "hx" not in expanded_text
     assert "dxmin" in expanded_text and "U(i+1,j,k)" in expanded_text
-
-    if (ELMM_SRC / "pressure.f90").is_file() and (ELMM_SRC / "numerical_operators.f90").is_file():
-        work_src = tmp_path / "elmm_copy"
-        work_src.mkdir()
-        shutil.copyfile(ELMM_SRC / "pressure.f90", work_src / "pressure.f90")
-        ops_text = (ELMM_SRC / "numerical_operators.f90").read_text(encoding="utf-8")
-        # Rename Divergence4Uniform dummy spacing args if matched
-        ops_mod = ops_text.replace("dx,dy,dz", "hx,hy,hz").replace("dx, dy, dz", "hx, hy, hz")
-        (work_src / "numerical_operators.f90").write_text(ops_mod, encoding="utf-8")
-        stencils = materialize_pressure_stencils(
-            work_src / "pressure.f90", tmp_path / "stencils_out"
-        )
-        assert Path(stencils["replacement"]["path"]).is_file()
 
 
 def test_verify_wall_helpers_resilient_to_comments_and_rejects_missing() -> None:
@@ -561,11 +567,9 @@ end module Filters
 """,
         encoding="utf-8",
     )
-    ws = integrate_workspace(
-        {"sources": [{"path": str(tsteps)}, {"path": str(dynamics)}, {"path": str(filters)}]},
-        tmp_path / "ws_out",
-    )
-    filt_out = (tmp_path / "ws_out" / "filters.f90").read_text(encoding="utf-8")
-    assert "acquire_work_real_3" in filt_out
-    assert "release_work_real_3" in filt_out
-    assert len(ws["sources"]) == 3
+    sources = {path.name: path.read_text(encoding="utf-8") for path in (tsteps, dynamics, filters)}
+    integrate_workspace(sources)
+    assert "acquire_work_real_3" in sources["filters.f90"]
+    assert "release_work_real_3" in sources["filters.f90"]
+    assert "resident_beta" in sources["tsteps.f90"]
+    assert "release_real(beta)" not in sources["dynamics.f90"]

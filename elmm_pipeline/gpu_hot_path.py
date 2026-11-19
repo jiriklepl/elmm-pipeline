@@ -1,21 +1,20 @@
-"""Source preparation for a resident ELMM timestep.
+"""ELMM's pressure step inside the resident epoch.
 
-Keep dispatch, boundary handling and saved state in their original routines,
-but expose the pressure stencil bodies as ordinary module procedures. These
-are numerical compiler inputs, not hand-written CUDA replacements. Native
-execution follows the same branches and evaluates the same arithmetic.
+The stencil loops of ``PrePoisson`` and ``PostPoisson`` are ordinary compiled
+entries. This module adds what is specific to ELMM around them: the device
+Poisson solver in place of the host one, the solver's two scratch arrays as
+handles the domain keeps, and the pressure reference and face update as one
+device task.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from pathlib import Path
 
 from .ast_rewrites import (
     expand_pure_calls_in_text,
     find_call_span,
-    find_once,
     find_routine_span,
     find_unique_span,
     inline_pure_scalar_function,
@@ -23,176 +22,28 @@ from .ast_rewrites import (
     replace_once,
 )
 
-
-def _identity(path: Path):
-    return {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-
-
-def _routine(text: str, name: str):
-    return find_routine_span(text, name)
+# The solver's scratch arrays are bound once per pressure step and passed to entries by handle.
+HELD = {("pressure::prepoisson", "rhs"): "resident_flow%rhs", ("pressure::postpoisson", "phi"): "resident_flow%phi"}
 
 
-def _once(text: str, anchor: str):
-    return find_once(text, anchor)
+def expand_divergence(operators):
+    """A rewrite of pressure.f90 that puts the fourth-order divergence formula where it is called.
 
-
-def _divergence_expression(source: Path):
-    """Read the existing scalar PURE stencil instead of duplicating its formula."""
-    info = inline_pure_scalar_function(source.read_text(), "Divergence4Uniform")
-    expression = info["expression"]
-    for name in ("dx", "dy", "dz"):
-        expression = re.sub(r"\b" + name + r"\b", name + "min", expression, flags=re.I)
-    return expression, info["constants_source"]
-
-
-def materialize_pressure_stencils(source: str | Path, directory: str | Path):
-    """Expose the original RHS, velocity correction and pressure update loops.
-
-    The three replacements are calls at the original control positions. The
-    moved bodies keep their arithmetic; the PURE divergence expression is
-    expanded from its original source. Phi/RHS allocation, solver
-    selection, mass flux, pressure reference, diagnostics and halos remain in
-    their original frame. All source variants, including FD2/FD4 and Q, remain
-    represented; this preparation does not silently specialize the physics.
-
-    GPU placement is a subsequent compiler step. A successful materialization
-    alone says nothing about backend coverage or performance.
+    The compiler does not yet inline a PURE function whose array arguments
+    have lower bounds, so the one call inside ``PrePoisson`` is expanded here
+    from the function's own source.
     """
-    source = Path(source).resolve(strict=True)
-    original = _identity(source)
-    text = source.read_bytes().decode("utf-8")
-    operators = source.with_name("numerical_operators.f90")
-    operator_identity = _identity(operators)
-    div_info = inline_pure_scalar_function(operators.read_text(), "Divergence4Uniform")
-    divergence, divergence_constants = _divergence_expression(operators)
-    helper_names = ("BuildPoissonRHS", "CorrectPoissonVelocity", "UpdatePoissonPressure")
-    if any(re.search(r"(?i)\b" + name + r"\b", text) for name in helper_names):
-        raise ValueError("Pressure stencil helper names already occur in the input")
+    info = inline_pure_scalar_function(Path(operators).read_text(), "Divergence4Uniform")
 
-    edits, helpers = [], []
+    def rewrite(text):
+        lower, upper = find_routine_span(text, "PrePoisson")
+        body, count = expand_pure_calls_in_text(text[lower:upper], info)
+        if count != 1:
+            raise ValueError("Expected one Divergence4Uniform call in PrePoisson")
+        body = replace_once(body, "    dt2_rec = 1._knd / dt2", info["constants_source"], insert=True)
+        return text[:lower] + body + text[upper:]
 
-    def outline(owner, name, start_anchor, end_anchor, arguments, declarations):
-        lower, upper = _routine(text, owner)
-        body = text[lower:upper]
-        begin = _once(body, start_anchor)
-        end = _once(body, end_anchor)
-        if begin >= end:
-            raise ValueError(f"Reversed stencil outline in {owner}")
-        original_body = body[begin:end]
-        moved = original_body
-        if name == "BuildPoissonRHS":
-            moved, expanded_count = expand_pure_calls_in_text(moved, div_info)
-            if expanded_count != 1:
-                raise ValueError(f"Expected one Divergence4Uniform call in {name}")
-            declarations += divergence_constants
-        call = "    call " + name + "(" + arguments + ")\n\n"
-        helper = ("\n  subroutine " + name + "(" + arguments + ")\n"
-                  + declarations + "\n" + moved + "  end subroutine " + name + "\n")
-        edits.append({"owner": owner, "procedure": "pressure::" + name.lower(),
-                      "start": lower + begin, "end": lower + end,
-                      "original_body": original_body, "replacement": call,
-                      "body_sha256": hashlib.sha256(original_body.encode()).hexdigest(),
-                      "outlined_body_sha256": hashlib.sha256(moved.encode()).hexdigest()})
-        helpers.append(helper)
-
-    velocity_inputs = "    real(knd), contiguous, intent(in) :: U(-2:,-2:,-2:), V(-2:,-2:,-2:), W(-2:,-2:,-2:)\n"
-    velocity_outputs = velocity_inputs.replace("intent(in)", "intent(inout)")
-    outline("PrePoisson", "BuildPoissonRHS",
-            "    if (discretization_order == 4) then", "  end subroutine PrePoisson",
-            "U, V, W, Q, RHS, dt2_rec",
-            velocity_inputs
-            + "    real(knd), allocatable, intent(in) :: Q(:,:,:)\n"
-            + "    real(knd), contiguous, intent(out) :: RHS(0:,0:,0:)\n"
-            + "    real(knd), intent(in) :: dt2_rec\n"
-            + "    integer :: i, j, k\n")
-    outline("PostPoisson", "CorrectPoissonVelocity",
-            "    !$omp parallel private (i,j,k)", "    if (update_pressure) then",
-            "U, V, W, Phi, Au, Av, Aw, dt2",
-            velocity_outputs
-            + "    real(knd), intent(in) :: Phi(-1:,-1:,-1:)\n"
-            + "    real(knd), intent(in) :: Au, Av, Aw, dt2\n"
-            + "    real(knd), parameter :: C1 = 9._knd / 8, C3 = 1._knd / (8*3)\n"
-            + "    integer :: i, j, k\n")
-    outline("PostPoisson", "UpdatePoissonPressure",
-            "      if (pressure_solution%projection_method==PROJECTION_METHOD_PRESSURE) then",
-            "      call FixPressureToReference(Pr)",
-            "Pr, Phi, dt3, dxmin2, dymin2, dzmin2",
-            "    real(knd), contiguous, intent(inout) :: Pr(-1:,-1:,-1:)\n"
-            + "    real(knd), intent(in) :: Phi(-1:,-1:,-1:)\n"
-            + "    real(knd), intent(in) :: dt3, dxmin2, dymin2, dzmin2\n"
-            + "    integer :: i, j, k\n")
-
-    # Apply disjoint edits against original coordinates, then insert helpers
-    # in the same module so all existing USE/host bindings stay available.
-    edits.sort(key=lambda edit: edit["start"])
-    if any(a["end"] > b["start"] for a, b in zip(edits, edits[1:])):
-        raise ValueError("Overlapping pressure stencil outlines")
-    replacement = text
-    for edit in reversed(edits):
-        replacement = replacement[:edit["start"]] + edit["replacement"] + replacement[edit["end"]:]
-    endings = list(re.finditer(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", replacement))
-    if len(endings) != 1:
-        raise ValueError("Expected one original pressure module end")
-    at = endings[0].start()
-    replacement = replacement[:at] + "\n".join(helpers) + "\n" + replacement[at:]
-    if _identity(source) != original or _identity(operators) != operator_identity:
-        raise ValueError("Pressure source changed during outlining")
-
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    target = directory / source.name
-    target.write_bytes(replacement.encode("utf-8"))
-    record = {"version": 1, "kind": "elmm_resident_pressure_stencil_preparation",
-              "original": original, "replacement": _identity(target),
-              "procedures": [edit["procedure"] for edit in edits], "edits": edits,
-              "saved_state": "unchanged original PressureCorrection frame",
-              "body_policy": "original control positions and arithmetic; scalar PURE divergence expression expanded from its source",
-              "inlined_function": {"source": operator_identity, "procedure": "numericaloperators::divergence4uniform",
-                                   "expression": divergence, "constants": divergence_constants},
-              "next_stage": "fresh configured-source export and compiler GPU region construction",
-              "gpu_execution_established": False}
-    (directory / "pressure-stencils.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
-
-
-def prepare_pressure_device_entries(prepared, project_root, compiler_root, python, directory,
-                                    *, defines=("DPREC",)):
-    """Generate shared-domain entries for every pressure stencil branch.
-
-    Fail on an uncovered body instead of treating partial GPU coverage as a
-    successful pressure implementation. The caller still has to compose these
-    entries with boundary, solver and reference tasks in its residency domain.
-    """
-    from compiler.scopes.resident_entries import compile_resident_entry
-    from .discovery import discover
-
-    source = Path(prepared["replacement"]["path"])
-    if _identity(source) != prepared["replacement"]:
-        raise ValueError("Prepared pressure source changed before device generation")
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    names = [name.split("::", 1)[1] for name in prepared["procedures"]]
-    discovery = discover(source, Path(project_root), Path(python), directory / "discovery",
-                         defines=defines, select=names, backend="gpu",
-                         compiler_root=Path(compiler_root), compiler_python=Path(python))
-    if discovery["rejected"] or {r["routine"].lower() for r in discovery["regions"]} != set(names):
-        raise ValueError("Incomplete pressure GPU coverage; see " + str(directory / "discovery/discovery.json"))
-    entries = []
-    for region in discovery["regions"]:
-        output = directory / "entries" / region["id"]
-        generated = compile_resident_entry(
-            region["input_path"], region["entry"], output,
-            collective=(region["context"] or {}).get("gpu_dispatch") == "collective_single")
-        entries.append({"region": region, "directory": str(output), "entry": generated["scoped"],
-                        "compiler_report": str(output / "compiler-report.json")})
-    record = {"version": 1, "kind": "elmm_pressure_shared_device_entries",
-              "prepared_source": prepared, "entries": entries,
-              "execution_contract": "one caller-owned domain; canonical handles passed to shared entries",
-              "integration_remaining": ["velocity boundaries and mass flux", "poisson-solver task",
-                                        "Phi halos", "pressure reference and pressure halos"],
-              "gpu_execution_established": False}
-    (directory / "pressure-device-entries.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
+    return rewrite
 
 
 def _insert_after_update_pressure(text: str, addition: str) -> str:
@@ -203,7 +54,7 @@ def _insert_after_update_pressure(text: str, addition: str) -> str:
         pass
     from fparser.two.utils import walk
 
-    lo, hi = _routine(text, "PressureCorrection")
+    lo, hi = find_routine_span(text, "PressureCorrection")
     body = text[lo:hi]
     tree = parse_fortran(body)
     for node in walk(tree):
@@ -257,86 +108,20 @@ def _verify_pressure_tail_routines(pressure_text: str, boundaries_text: str) -> 
     )
 
 
-def materialize_resident_pressure(entries, main_source, directory):
-    """Wire compiled stencils and the device solver into the original frame.
+def integrate_pressure(sources):
+    """Connect the compiled stencils to the device solver in the original pressure frame.
 
-    This integration slice owns a persistent pressure domain, with saved scratch
-    and solver plans. Borrowed application fields are published and unregistered
-    before the remaining host reference/boundary work and unmanaged return.
-    It deliberately does not claim timestep-wide residency yet.
+    ``sources`` maps ELMM file names to their text and is changed in place.
+    Borrowed application fields are published before the remaining host
+    reference and boundary work when the pressure step runs on its own.
     """
-    prepared = entries["prepared_source"]
-    source = Path(prepared["replacement"]["path"])
-    if _identity(source) != prepared["replacement"]:
-        raise ValueError("Pressure input changed after numerical generation")
-    original = source.read_text()
-    lines = original.splitlines(keepends=True)
-    gpu_lines = list(lines)
-    uses = []
-    spans = []
-    for item in sorted(entries["entries"], key=lambda item: item["region"]["start_line"], reverse=True):
-        region, entry = item["region"], item["entry"]
-        start, end = region["start_line"] - 1, region["end_line"]
-        body = "".join(lines[start:end])
-        if hashlib.sha256(body.encode()).hexdigest() != region["source_span_sha256"]:
-            raise ValueError("Pressure numerical source span changed: " + region["id"])
-        spans.append((start, end))
-        alias = "pressure_gpu_" + region["id"]
-        uses.append("  use " + entry["fortran_module"] + ", only: " + alias + " => run\n")
-        actual = dict(zip(region["args"], region["actual_args"], strict=True))
-        arrays = {parameter["name"]: parameter for parameter in entry["array_parameters"]}
-        bindings = []
-        for name, parameter in arrays.items():
-            if name.lower() in ("phi", "rhs"):
-                actual[name] = "resident_pressure%" + name.lower()
-            else:
-                handle = "resident_" + name.lower()
-                origin = region["module"].lower() + "::" + region["routine"].lower() + "::" + name.lower()
-                bindings.append("      " + handle + " = resident_pressure%bind" + str(parameter["rank"])
-                                + "(" + actual[name] + ", lbound(" + actual[name] + "), .true., &\n"
-                                + "        origin='" + origin + "')\n")
-                actual[name] = handle
-        args = ["resident_pressure%context", "FORT_SCOPE_GPU"] + [actual[name] for name in entry["argument_order"][2:]]
-        handles = ["resident_" + name.lower() for name in arrays if name.lower() not in ("phi", "rhs")]
-        replacement = "    block\n"
-        if handles:
-            replacement += "      integer(c_int64_t) :: " + ", ".join(handles) + "\n"
-        replacement += "".join(bindings)
-        replacement += "      call pressure_require(" + alias + "( &\n        " + ", &\n        ".join(args) + "))\n    end block\n"
-        gpu_lines[start:end] = [replacement]
-    spans.sort()
-    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
-        raise ValueError("Overlapping pressure numerical entries")
-    gpu_text = "".join(gpu_lines)
-
-    replacement = original
-    helpers = []
-    for name in ("BuildPoissonRHS", "CorrectPoissonVelocity", "UpdatePoissonPressure"):
-        lo, hi = _routine(gpu_text, name)
-        body = gpu_text[lo:hi]
-        body = re.sub(r"(?im)^\s*!\$omp[^\n]*\n", "\n", body)
-        body = re.sub(r"\b" + name + r"\b", name + "GPU", body, flags=re.I)
-        helpers.append(body)
-        lo, hi = _routine(replacement, name)
-        native = replacement[lo:hi]
-        signature = re.search(r"(?is)subroutine\s+" + name + r"\s*\(([^)]*)\)", native)
-        if signature is None:
-            raise ValueError(f"Expected subroutine signature for {name}")
-        sig_args = " ".join(signature.group(1).replace("&", " ").split())
-        anchor = {"BuildPoissonRHS": "    if (discretization_order == 4) then",
-                  "CorrectPoissonVelocity": "    !$omp parallel private (i,j,k)",
-                  "UpdatePoissonPressure": "      if (pressure_solution%projection_method==PROJECTION_METHOD_PRESSURE) then"}[name]
-        at = _once(native, anchor)
-        dispatch = ("    if (resident_pressure%active) then\n      call " + name + "GPU(" + sig_args
-                    + ")\n      return\n    endif\n\n")
-        replacement = replacement[:lo] + native[:at] + dispatch + native[at:] + replacement[hi:]
-
+    replacement = sources["pressure.f90"]
     replacement = replace_once(
         replacement,
         "  use Parameters\n",
         "  use, intrinsic :: iso_c_binding\n  use fort_scoped_memory, only: FORT_SCOPE_GPU\n"
         "  use elmm_gpu_pressure, only: elmm_gpu_pressure_config_v1\n"
-        "  use elmm_resident_pressure_state, only: resident_pressure => resident_flow, pressure_require\n" + "".join(uses),
+        "  use elmm_resident_pressure_state, only: resident_pressure => resident_flow, pressure_require\n",
         after=True,
         insert=True,
     )
@@ -436,61 +221,26 @@ def materialize_resident_pressure(entries, main_source, directory):
   end subroutine
 '''
     ending = re.search(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", replacement)
-    replacement = replacement[:ending.start()] + "\n".join(helpers) + state_helpers + replacement[ending.start():]
-    # C-interoperable addresses must outlive each numerical child. All borrowed
-    # registrations end within PressureCorrection, and saved scratch has TARGET.
-    names = {"pressurecorrection", "prepoisson", "postpoisson", "buildpoissonrhs", "correctpoissonvelocity",
-             "updatepoissonpressure", "buildpoissonrhsgpu", "correctpoissonvelocitygpu", "updatepoissonpressuregpu"}
-    for name in names:
-        lo, hi = _routine(replacement, name)
-        body = replacement[lo:hi]
-        body = re.sub(r"(?im)^(\s*real\(knd\)[^\n]*?)(\s*::[^\n]*\([^\n]*:[^\n]*)$",
-                      lambda match: match[0] if re.search(r"\btarget\b", match[1], re.I)
-                      else match[1].rstrip() + ", target " + match[2], body)
-        # Explicit DIMENSION attributes put the colons before '::'.
-        body = re.sub(r"(?im)^(\s*real\(knd\)[^\n]*dimension\([^\n]*:[^\n]*?)(\s*::[^\n]*)$",
-                      lambda match: match[0] if re.search(r"\btarget\b", match[1], re.I)
-                      else match[1].rstrip() + ", target " + match[2], body)
-        replacement = replacement[:lo] + body + replacement[hi:]
-
-    main_source = Path(main_source).resolve(strict=True)
-    main = main_source.read_text()
-    main = replace_once(
-        main,
+    replacement = replacement[:ending.start()] + state_helpers + replacement[ending.start():]
+    sources["pressure.f90"] = replacement
+    sources["main.f90"] = replace_once(
+        sources["main.f90"],
         "  call DeallocateGlobals",
         "  block\n    use Pressure, only: FinalizeResidentPressure\n"
         "    call FinalizeResidentPressure()\n  end block\n\n",
         after=False,
         insert=True,
     )
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    pressure_path, main_path = directory / source.name, directory / main_source.name
-    pressure_path.write_text(replacement)
-    main_path.write_text(main)
-    record = {"version": 1, "kind": "resident_pressure_source_integration", "pressure": _identity(pressure_path),
-              "main": _identity(main_path), "original_main": _identity(main_source),
-              "entries": [{"directory": item["directory"], "entry": item["entry"]["entry"]} for item in entries["entries"]],
-              "state_source": _identity(Path(__file__).parent / "gpu_pressure_sources/resident_pressure_state.f90"),
-              "host_boundaries": ["PrePoisson velocity boundaries and mass flux", "pressure reference and Bound_Pr",
-                                  "optional residue/divergence diagnostics", "return to unmanaged RK stage"],
-              "gpu_execution_established": False}
-    (directory / "resident-pressure.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
 
 
-def materialize_resident_pressure_tail(integrated, boundaries_source, directory):
+def integrate_pressure_tail(sources):
     """Replace the approved reference/Pr-face pair with one external GPU task.
 
     This explicit numerical adapter is bound to the original source routines.
     Other reference choices retain the original host pair after publication.
     """
-    pressure = Path(integrated["pressure"]["path"])
-    if _identity(pressure) != integrated["pressure"]:
-        raise ValueError("Integrated pressure source changed")
-    text = pressure.read_text()
-    boundaries_source = Path(boundaries_source).resolve(strict=True)
-    reference_sha, faces_sha = _verify_pressure_tail_routines(text, boundaries_source.read_text())
+    text = sources["pressure.f90"]
+    _verify_pressure_tail_routines(text, sources["boundaries.f90"])
     anchor = ("      if (resident_pressure%active) call resident_pressure%publish()\n"
               "      call FixPressureToReference(Pr)\n    \n      call Bound_Pr(Pr)")
     s_span, e_span = find_unique_span(text, anchor)
@@ -537,15 +287,4 @@ def materialize_resident_pressure_tail(integrated, boundaries_source, directory)
 '''
     end = re.search(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", text)
     text = text[:end.start()] + helpers + text[end.start():]
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    target = directory / "pressure.f90"
-    target.write_text(text)
-    record = {**integrated, "pressure": _identity(target), "tail_source_contract": {
-        "reference_sha256": reference_sha, "faces_sha256": faces_sha,
-        "boundaries": _identity(boundaries_source), "reference": "original serial TOP/BOTTOM order or NONE"},
-        "host_boundaries": ["PrePoisson velocity boundaries and mass flux", "unsupported reference modes",
-                            "optional residue/divergence diagnostics", "return to unmanaged RK stage"],
-        "gpu_execution_established": False}
-    (directory / "resident-pressure.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
+    sources["pressure.f90"] = text

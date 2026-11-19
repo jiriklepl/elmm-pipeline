@@ -1,27 +1,18 @@
-"""Configured source preparation for the resident RK implementation.
+"""ELMM's Runge-Kutta stages inside the resident epoch.
 
-The application adapter owns the configured source and the RK lifetime. The
-compiler owns numerical extraction, dependence analysis and shared CUDA entry
-generation. There is no second buffer-validity or placement implementation here.
+The compiler extracts, compiles and calls the numerical loop nests. This
+module places the epoch around the RK stages, says when ELMM's configuration
+supports it, and keeps the remaining host code coherent with the device.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
-from pathlib import Path
 
-from compiler.resident.rewrites import inline_tile_scratch_nests, promote_line_snapshots
 from compiler.scopes.resident_splice import ResidentDomain
 
 from .ast_rewrites import find_all_calls, find_call_span, find_routine_span, parse_fortran, replace_once
 
 DOMAIN = ResidentDomain("elmm_resident_pressure_state", "resident_flow", "pressure_require", prefix="rk")
-
-
-def identity(path):
-    path = Path(path).resolve(strict=True)
-    return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
 def verify_resident_execution(packages, trace, required_procedures):
@@ -87,79 +78,11 @@ def _native_wall_correction(body):
     return "\n".join(lines) + "\n"
 
 
-def materialize_entries(packages, directory):
-    """Splice the compiled entries into ELMM's sources through its resident flow domain.
-
-    Activation belongs to the outer RK adapter. Unsupported reached loops
-    publish before native execution, except the wall-point corrections, which
-    acquire smaller exact geometric supersets.
-    """
-    from compiler.scopes.resident_splice import splice_resident_entries
-
-    def native(region, original):
-        if region["procedure"] == "momentumdiffusion::momentumdiffusion_nobranch_2ord":
-            return _native_wall_correction(original)
-        return None
-
-    return splice_resident_entries(packages, directory, domain=DOMAIN, native=native)
-
-
-def pointwise_advection(source, directory):
-    """Inline private tile flux arrays into their original consumers.
-
-    Read formulas from the source. Each private flux has one point definition;
-    a consumer offset selects that definition at the corresponding global point.
-    Keep the directional updates and their original arithmetic order.
-    This removes CPU cache tiles, without changing the advection discretization.
-    """
-    source = Path(source).resolve(strict=True)
-    text = source.read_text()
-    updated, changes = inline_tile_scratch_nests(text)
-    if not changes:
-        raise ValueError("Incomplete fourth-order advection preparation")
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    target = directory / source.name
-    target.write_text(updated)
-    record = {
-        "version": 1,
-        "kind": "pointwise_advection",
-        "original": identity(source),
-        "replacement": identity(target),
-        "directional_updates": len(changes),
-        "formula_source": "original private flux definitions and consumer expressions",
-    }
-    (directory / "pointwise-advection.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
-
-
-def snapshot_filter(source, directory):
-    """Lift each line snapshot to a complete snapshot for pointwise filtering.
-
-    The original filter reads a private copy of each input line before writing
-    that line. A complete input snapshot preserves those reads and the original
-    seven-term accumulation order while exposing independent output points.
-    Retire the temporary through coherence before Fortran deallocates it.
-    """
-    source = Path(source).resolve(strict=True)
-    text = source.read_text()
-    updated, edits = promote_line_snapshots(text, domain=DOMAIN)
-    if not edits:
-        raise ValueError("Expected at least one line-snapshot filter routine")
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    target = directory / source.name
-    target.write_text(updated)
-    record = {
-        "version": 1,
-        "kind": "snapshot_filter",
-        "original": identity(source),
-        "replacement": identity(target),
-        "arithmetic": "original Filter3ord weights, conditions and accumulation order",
-        "lifetime": "retire snapshot after queued readers before automatic deallocation",
-    }
-    (directory / "snapshot-filter.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record
+def native_wall_correction(region, original):
+    """The native form of a rejected nest: the wall corrections take bounded host access, others publish."""
+    if region["procedure"] == "momentumdiffusion::momentumdiffusion_nobranch_2ord":
+        return _native_wall_correction(original)
+    return None
 
 
 def _decl_shape_lower_bounds(node, entity_shape):
@@ -260,31 +183,15 @@ def contiguous_filter_arguments(text):
     return text
 
 
-def integrate_rk_epoch(configured, numerical, pressure, directory):
+def integrate_rk_epoch(output):
     """Connect the compiled primary RK path and the pressure child to one epoch.
 
+    ``output`` maps ELMM file names to their text and is changed in place.
     Uniform DP, Sigma SGS, explicit FD2 diffusion and periodic/no-slip channel
     boundaries are the initial supported execution configuration. Other settings
     retain their native path. Physical allocations survive the proved three
     MOVE_ALLOC exchanges; the RK caller return publishes before unmanaged work.
     """
-    from compiler.scopes.resident_splice import addressable_arrays
-
-
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    replacements = {item["original"]["path"]: item["replacement"]["path"] for item in numerical["sources"]}
-    sources = {Path(item["original"]["path"]).name: Path(replacements.get(item["prepared"]["path"], item["prepared"]["path"]))
-               for item in configured["sources"] if "poisfft" not in item["original"]["path"].lower()}
-    # Only modules whose numerical code or address contracts are changed need
-    # rebuilding. No source graph owner or legacy placement wrapper is retained.
-    names = {"parameters.f90", "arrayutilities.f90", "subgrid.f90", "dynamics.f90", "momentum_diffusion.f90",
-             "advection.f90", "scalarboundaries.f90", "boundaries.f90", "tsteps.f90", "linearforcing.f90",
-             "volumesources.f90", "sponge.f90", "tiling.f90", "filters.f90", "wallmodels.f90",
-             "advection_variable_z.f90", "water_thermodynamics.f90", "scalar_diffusion.f90"}
-    output = {name: sources[name].read_text() for name in names}
-    output["pressure.f90"] = Path(pressure["pressure"]["path"]).read_text()
-    output["main.f90"] = Path(pressure["main"]["path"]).read_text()
     output["boundaries.f90"] = contiguous_periodic_boundary(output["boundaries.f90"])
     output["filters.f90"] = contiguous_filter_arguments(output["filters.f90"])
 
@@ -473,16 +380,3 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     else:
         s_body = at_once(s_body, "    if (enable_top_rayleigh_damping) call rayleigh_damping_top_uvw(U2, V2, W2, U, V, W)", "")
     output["sponge.f90"] = sponge[:s_lo] + s_body + sponge[s_hi:]
-
-    records = []
-    for name, text in output.items():
-        target = directory / name
-        target.write_text(addressable_arrays(text))
-        records.append(identity(target))
-    record = {"version": 1, "kind": "resident_rk_epoch_integration", "sources": records,
-              "epoch": "all reached RK stages in one invocation; pressure borrows caller domain",
-              "allocation_exchange": "original exchange_alloc_3D: A->tmp, B->A, tmp->B with MOVE_ALLOC",
-              "unmanaged_return": "batch observe then retire borrowed handles at RK caller return",
-              "gpu_execution_established": False}
-    (directory / "rk-integration.json").write_text(json.dumps(record, indent=2) + "\n")
-    return record

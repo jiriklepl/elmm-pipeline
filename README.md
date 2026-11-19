@@ -72,6 +72,28 @@ The solver can keep compiled kernels in a persistent cache. Set
 it, and record that choice when comparing timings. See the
 [solver cache contract](../poisson-solver/README.md#installed-device-api).
 
+## How the adapter is organised
+
+`resident_build.py` describes ELMM to `compiler.resident`: the source units
+(read from ELMM's `SConstruct`), six selections of procedures with their
+coverage floors, the loop rewrites, the domain object and the build. The
+compiler prepares the sources from that description. ELMM's own residency
+code is added in one hook, by these modules:
+
+- `gpu_hot_path.py`: the device Poisson solver in place of the host one, its
+  scratch arrays, the pressure reference and face update;
+- `resident_rk.py`: the epoch around the Runge-Kutta stages, the run-time
+  check of the supported configuration, host access for the remaining native
+  code;
+- `resident_time_loop.py` and `resident_output.py`: the epoch across time
+  steps, the CFL and averaging kernels, snapshot output;
+- `resident_walls.py`: the planar wall model on packed planes;
+- `resident_workspace.py`: storage for the RK constants and the filter
+  snapshot that outlives one call.
+
+`gpu_pressure_sources/` holds the hand-written Fortran and CUDA of the domain
+object, the solver connection and the pressure tail.
+
 ## Run helpers
 
 The container runner uses a few modules from here:

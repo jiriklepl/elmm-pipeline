@@ -6,7 +6,6 @@ validated as complete, unique rectangular planes before replacing indirect loops
 """
 from pathlib import Path
 import hashlib
-import json
 import re
 
 from .ast_rewrites import (
@@ -16,7 +15,6 @@ from .ast_rewrites import (
     parse_fortran,
     replace_once,
 )
-from .resident_rk import identity
 
 
 def _verify_wall_helpers(source):
@@ -210,8 +208,7 @@ end module
 """
 
 
-def _corrections(integration):
-    text = next(Path(r["path"]).read_text() for r in integration["sources"] if Path(r["path"]).name == "momentum_diffusion.f90")
+def _corrections(text):
     lo, hi = find_routine_span(text, "MomentumDiffusion_nobranch_2ord")
     body = text[lo:hi]
     pattern = r"(?ms)^    block\n(?:(?!^    end block).)*?wall_handles\(3\)(?:(?!^    end block).)*?^    end block\n"
@@ -228,18 +225,18 @@ def _corrections(integration):
     return groups
 
 
-def generate_wall_entries(integration, directory, *, precision="dp"):
+def generate_wall_entries(sources, directory, *, precision="dp"):
     from compiler.scopes.resident_entries import compile_resident_entry
 
     real_type = "real(8)" if precision == "dp" else "real(4)"
     kind_suffix = "_8" if precision == "dp" else "_4"
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
-    wall = next(r for r in integration["sources"] if Path(r["path"]).name == "wallmodels.f90")
-    original = Path(wall["path"]).read_text()
-    helpers = _verify_wall_helpers(original)
-    sources = {"stress" + str(c): (_stress_source(original, c, precision=precision), f"resident_wall_stress_{c}::stress") for c in range(4)}
-    groups = _corrections(integration)
+    original = sources["wallmodels.f90"]
+    _verify_wall_helpers(original)
+    kernels = {"stress" + str(c): (_stress_source(original, c, precision=precision), f"resident_wall_stress_{c}::stress")
+               for c in range(4)}
+    groups = _corrections(sources["momentum_diffusion.f90"])
     for component, letter in enumerate("uvw", 1):
         for side in "mp":
             point = letter + "z" + side + "wmpoints"
@@ -271,19 +268,17 @@ enddo
 end subroutine
 end module
 """
-            sources[name] = (source, f"resident_wall_{name}::correction")
-    result = {"version": 1, "original_wall": wall, "helper_contract": helpers,
-              "norm_lowering": "pinned GNU Fortran 15 scaled NORM2, accumulation order preserved",
-              "entries": {}, "correction_groups": groups}
-    for name, (source, entry) in sources.items():
+            kernels[name] = (source, f"resident_wall_{name}::correction")
+    # The stress kernels carry the pinned GNU Fortran 15 scaled NORM2 with its accumulation order.
+    result = {"entries": {}, "correction_groups": groups}
+    for name, (source, entry) in kernels.items():
         path = directory / (name + ".f90")
         path.write_text(source)
         target = directory / (name + "-entry")
         shared = compile_resident_entry(path, entry, target)["scoped"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):
             raise ValueError("Wall numerical entry lacks GPU execution: " + name)
-        result["entries"][name] = {"source": identity(path), "directory": str(target), "entry": shared}
-        (directory / "wall-entries.json").write_text(json.dumps(result, indent=2) + "\n")
+        result["entries"][name] = {"directory": str(target), "entry": shared}
     return result
 
 
@@ -510,12 +505,11 @@ def _driver(entries):
     return declarations, procedures.replace("@USES@", "\n".join(uses)).replace("@STRESS@", "\n".join(dispatch_stress)).replace("@CORRECTION@", "\n".join(dispatch_correction))
 
 
-def integrate_wall_entries(integration, entries, directory):
-    from compiler.scopes.resident_splice import addressable_arrays
+def integrate_wall_entries(sources, entries):
+    """Run the planar wall model on packed planes while the epoch is active.
 
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}
+    ``sources`` maps ELMM file names to their text and is changed in place.
+    """
     declarations, procedures = _driver(entries)
     wall = sources["wallmodels.f90"]
     start = re.search(r"(?im)^[ \t]*module\s+Wallmodels\b", wall).start()
@@ -594,22 +588,10 @@ def integrate_wall_entries(integration, entries, directory):
     text = replace_once(text, "    use Wallmodels, only: ComputeViscsWM\n", "    use Wallmodels, only: ComputeViscsWM, ResidentWallsPublish\n")
     text = replace_once(text, "        call resident_flow%end_epoch()", "        call ResidentWallsPublish()\n", after=False, insert=True)
     sources["outputs.f90"] = text
-    text = sources["pressure.f90"]
-    text = replace_once(
-        text,
+    sources["pressure.f90"] = replace_once(
+        sources["pressure.f90"],
         "  subroutine FinalizeResidentPressure()\n",
         "    use Wallmodels, only: ResidentWallsPublish\n    call ResidentWallsPublish()\n",
         after=True,
         insert=True,
     )
-    records = []
-    for name, text in sources.items():
-        path = directory / name
-        path.write_text(addressable_arrays(text))
-        records.append(identity(path))
-    result = {"version": 1, "sources": records, "basis": integration,
-              "wall_contract": "uniform flat stationary complete z planes; checked topology; no x/y wall records",
-              "dead_store": "pre-SGS point viscosity overwritten at every interior cell by primary Sigma SGS",
-              "gpu_execution_established": False}
-    (directory / "wall-integration.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result

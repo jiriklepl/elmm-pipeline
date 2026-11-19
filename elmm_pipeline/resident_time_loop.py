@@ -6,7 +6,6 @@ Unsupported output work closes the epoch before executing its original source.
 Primary VTK output uses bounded immutable snapshots and joins before teardown.
 """
 from pathlib import Path
-import json
 
 from .ast_rewrites import (
     find_call_span,
@@ -14,7 +13,6 @@ from .ast_rewrites import (
     find_unique_span,
     replace_once,
 )
-from .resident_rk import identity
 
 
 def generate_time_entries(directory, *, precision="dp"):
@@ -75,8 +73,7 @@ end module
         shared = compile_resident_entry(source, entry, target)["scoped"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):
             raise ValueError("Timestep numerical entry lacks GPU execution: " + name)
-        result["entries"][name] = {"source": identity(source), "directory": str(target), "entry": shared}
-    (directory / "time-entries.json").write_text(json.dumps(result, indent=2) + "\n")
+        result["entries"][name] = {"directory": str(target), "entry": shared}
     return result
 
 
@@ -156,13 +153,11 @@ def finalize_before_native(text):
     return replace_once(text, anchor, finalizer, after=False, insert=True)
 
 
-def integrate_time_loop(integration, configured, entries, directory, *, precision="dp"):
-    from compiler.scopes.resident_splice import addressable_arrays
+def integrate_time_loop(sources, entries, *, precision="dp"):
+    """Keep the epoch open across time steps: CFL, averaging and frame output read device values.
 
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}
-    originals = {Path(r["original"]["path"]).name: Path(r["prepared"]["path"]) for r in configured["sources"]}
+    ``sources`` maps ELMM file names to their text and is changed in place.
+    """
     cut = "\n    if (resident_flow%joined) then\n      call resident_flow%end_epoch()\n      resident_flow%joined=.false.\n    endif\n"
     sources["tsteps.f90"] = replace_once(sources["tsteps.f90"], cut, "\n")
 
@@ -188,7 +183,7 @@ def integrate_time_loop(integration, configured, entries, directory, *, precisio
     )
     sources["dynamics.f90"] = text[:lo] + body + text[hi:]
 
-    text = originals["outputs.f90"].read_text()
+    text = sources["outputs.f90"]
     lo, hi = find_routine_span(text, "OutTStep")
     body = text[lo:hi]
     body = replace_once(
@@ -230,7 +225,7 @@ def integrate_time_loop(integration, configured, entries, directory, *, precisio
         )
     sources["outputs.f90"] = text[:lo] + body + text[hi:]
 
-    text = originals["frames_common.f90"].read_text()
+    text = sources["frames_common.f90"]
     f_lo, f_hi, f_call, _ = find_call_span(text, "D%Fill")
     text = (
         text[:f_lo]
@@ -252,22 +247,8 @@ def integrate_time_loop(integration, configured, entries, directory, *, precisio
         + text[f_hi:]
     )
     sources["frames_common.f90"] = text
-    # Their derived-type bindings import the changed frame declaration.
-    for name in ("vtkframes.f90", "frames.f90", "surfacemapframes.f90"):
-        sources[name] = originals[name].read_text()
     sources["main.f90"] = finalize_before_native(sources["main.f90"])
     from .resident_output import asynchronous_frames
     sources["frames_common.f90"], sources["vtkframes.f90"], sources["main.f90"] = asynchronous_frames(
         sources["frames_common.f90"], sources["vtkframes.f90"], sources["main.f90"])
     sources["resident_time_tasks.f90"] = _tasks(entries, precision=precision)
-    records = []
-    for name, text in sources.items():
-        path = directory / name
-        path.write_text(addressable_arrays(text))
-        records.append(identity(path))
-    result = {"version": 1, "sources": records, "basis": integration,
-              "epoch": "primary adaptive time loop; native output fallback closes before access",
-              "publication": "two immutable VTK snapshot slots; unsupported frames read only; writer join before field dumps and deallocation",
-              "gpu_execution_established": False}
-    (directory / "time-integration.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result

@@ -5,9 +5,7 @@ import subprocess
 import pytest
 
 from compiler.scopes.resident_splice import addressable_arrays
-from elmm_pipeline.resident_rk import (
-    contiguous_filter_arguments, contiguous_periodic_boundary, identity, materialize_entries,
-)
+from elmm_pipeline.resident_rk import contiguous_filter_arguments, contiguous_periodic_boundary
 
 
 BOUNDARY = """
@@ -160,31 +158,6 @@ def test_filter_bindings_preserve_addresses_without_packing(tmp_path, compiler_n
 def test_filter_rejects_unexpected_array_contract():
     with pytest.raises(ValueError, match="Unsupported filter array declaration"):
         contiguous_filter_arguments(FILTER.replace("intent(in)  :: Utype", "intent(inout)  :: Utype"))
-
-
-def test_generated_bindings_include_source_origins(tmp_path):
-    source = tmp_path / "example.f90"
-    source.write_text("subroutine update(u, mask)\n  u=1\nend subroutine\n")
-    region = {
-        "source": str(source), "first_line": 2, "last_line": 2, "procedure": "example::update",
-        "resources": [
-            {"resource": "argument::u", "name": "u", "type": "real", "kind": 8},
-            {"resource": "argument::mask", "name": "mask", "type": "integer", "kind": 4},
-        ],
-        "parameters": [
-            {"resource": "argument::u", "name": "u", "rank": 3, "lower_bound_dimension": None},
-            {"resource": "argument::mask", "name": "mask", "rank": 3, "lower_bound_dimension": None},
-        ],
-        "runtime_guards": [],
-    }
-    entry = {"fortran_module": "fort_example", "argument_order": ["context", "device", "u", "mask"]}
-    package = {"source_inputs": {str(source): identity(source)["sha256"]},
-               "entries": [{"region": region, "entry": entry}], "rejected": []}
-    result = materialize_entries([package], tmp_path / "generated")
-    generated = (tmp_path / "generated" / source.name).read_text()
-    assert len(result["sources"]) == 1
-    assert "bind_real64(u,lbound(u),.true., &\n          origin='example::update::u')" in generated
-    assert "bind_integer32(mask,lbound(mask),.true., &\n          origin='example::update::mask')" in generated
 
 
 def test_configured_sources_skips_include_fragments_and_discover_excludes_inc(tmp_path):
