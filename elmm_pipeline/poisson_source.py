@@ -1,15 +1,33 @@
 """One explicit local Poisson source snapshot for every GPU build path."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import shutil
 import subprocess
 
-from .build_receipts import file_identity
-
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PARTS = ("CMakeLists.txt", "dependencies.lock.json", "src", "include", "cmake", "docs")
+
+
+def file_identity(path):
+    path = Path(path).resolve(strict=True)
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"path": str(path), "sha256": digest}
+
+
+def check_vkfft(directory):
+    """The solver's FFT dependency must be a clean checkout of the pinned revision."""
+    directory = Path(directory).resolve(strict=True)
+    pin = dependency_lock()["VkFFT"]["revision"]
+    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=directory, capture_output=True, text=True, check=True)
+    dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=directory,
+                           capture_output=True, text=True, check=True)
+    if result.stdout.strip() != pin or dirty.stdout or not (directory / "vkFFT/vkFFT.h").is_file():
+        raise ValueError("VkFFT must be a clean checkout of the pinned dependency")
+    return directory
 
 
 def dependency_lock():

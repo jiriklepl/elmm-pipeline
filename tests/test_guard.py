@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 
-from elmm_pipeline.campaigns import guard
+from elmm_pipeline import guard
 
 HERE = Path(guard.__file__).resolve().parent
 

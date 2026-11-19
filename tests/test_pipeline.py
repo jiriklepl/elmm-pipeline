@@ -10,9 +10,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from elmm_pipeline.common import clean_environment, digest_tree
 from elmm_pipeline.configuration import prepare_config
+from elmm_pipeline.launch import environment as run_environment
 from elmm_pipeline.validation import compare_vtk, read_vtk, validate_log
+
+
+def digest_tree(path):
+    return {str(item.relative_to(path)): item.read_bytes() for item in sorted(Path(path).rglob("*")) if item.is_file()}
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -131,7 +135,7 @@ class ConfigurationTests(unittest.TestCase):
     def test_run_environment_removes_implicit_elmm_input_overrides(self):
         with patch.dict(os.environ, {"ELMM_INPUTDIR": "elsewhere/", "ELMM_OUTPUTDIR": "elsewhere/",
                                     "OMP_NUM_THREADS": "200", "OPENBLAS_NUM_THREADS": "200"}):
-            environment = clean_environment(3)
+            environment = run_environment(3, traced=False)
         self.assertFalse(any(key.startswith("ELMM_") for key in environment))
         self.assertEqual(environment["OMP_NUM_THREADS"], "3")
         self.assertEqual(environment["OMP_DYNAMIC"], "FALSE")

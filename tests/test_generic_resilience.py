@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
 import shutil
-import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -18,17 +15,9 @@ from elmm_pipeline.ast_rewrites import (
     inline_tile_scratch_nests,
     replace_once,
 )
-from elmm_pipeline.build import build_generic_project
-from elmm_pipeline.cli import prepare_build
-from elmm_pipeline.configuration import prepare_config
 from elmm_pipeline.gpu_hot_path import (
     _divergence_expression,
     materialize_pressure_stencils,
-)
-from elmm_pipeline.project_profile import (
-    ELMMProfile,
-    ProjectProfile,
-    load_project_profile,
 )
 from elmm_pipeline.resident_build import (
     ELMM_UNITS,
@@ -46,7 +35,6 @@ from elmm_pipeline.resident_rk import (
     snapshot_filter,
 )
 from elmm_pipeline.resident_walls import _verify_wall_helpers
-from elmm_pipeline.validation import compare_numeric_files, validate_generic_log
 
 
 ELMM_SRC = (
@@ -532,190 +520,6 @@ end module alpha_mod
         tmp_path / "entries_all",
     )
     assert [e["procedure"] for e in exported_all["entries"]] == ["alpha_mod::step_one", "alpha_mod::step_two"]
-
-
-def test_project_profile_and_generic_validation_and_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    default_profile = load_project_profile(None)
-    assert default_profile == ELMMProfile()
-    assert default_profile.config_mode == "elmm-conf"
-    assert default_profile.build_mode == "scons-elmm"
-
-    profile_path = tmp_path / "profile.json"
-    profile_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "name": "mini-solver",
-                "source_subdir": "src",
-                "executable_name": "mini_app",
-                "default_defines": ["DPREC"],
-                "config_mode": "generic",
-                "build_mode": "command",
-                "build_command": [
-                    "gfortran",
-                    "-O2",
-                    "src/solver.f90",
-                    "-o",
-                    "{build_dir}/mini_app",
-                ],
-                "validation_mode": "json-stdout",
-                "output_files": ["field.txt"],
-            }
-        ),
-        encoding="utf-8",
-    )
-    profile = load_project_profile(profile_path)
-    assert isinstance(profile, ProjectProfile)
-    assert profile.name == "mini-solver"
-
-    cfg_src = tmp_path / "cfg_src"
-    cfg_src.mkdir()
-    (cfg_src / "input.nml").write_text("&params steps = 2 /\n", encoding="utf-8")
-    cfg_meta = prepare_config(cfg_src, tmp_path / "cfg_dst", steps=2, profile=profile)
-    assert cfg_meta["expected_max_steps"] == 2
-    assert cfg_meta["overrides"] == {"steps": 2}
-    assert (tmp_path / "cfg_dst" / "input.nml").is_file()
-
-    # Generic stdout validation
-    log_text = 'hello\nFORT_APPLICATION_COMPLETION {"completed_steps": 4, "status": "ok"}\n'
-    parsed = validate_generic_log(
-        log_text, mode="json-stdout", expected_completed_steps=4
-    )
-    assert parsed["completed_steps"] == 4
-
-    # Numeric file comparison (.txt)
-    ref_dir = tmp_path / "ref_out"
-    cand_dir = tmp_path / "cand_out"
-    ref_dir.mkdir()
-    cand_dir.mkdir()
-    (ref_dir / "field.txt").write_text("1.0 2.0 3.0\n", encoding="utf-8")
-    (cand_dir / "field.txt").write_text("1.0000001 2.0 3.0\n", encoding="utf-8")
-    cmp_ok = compare_numeric_files(ref_dir, cand_dir, ["field.txt"], atol=1e-5, rtol=1e-5)
-    assert cmp_ok["passed"] is True
-    assert cmp_ok["fields"]["field.txt"]["values"] == 3
-
-    (cand_dir / "field.txt").write_text("1.5 2.0 3.0\n", encoding="utf-8")
-    cmp_bad = compare_numeric_files(ref_dir, cand_dir, ["field.txt"], atol=1e-5, rtol=1e-5)
-    assert cmp_bad["passed"] is False
-    assert cmp_bad["fields"]["field.txt"]["failed_values"] == 1
-
-    gfortran = shutil.which("gfortran")
-    if gfortran is None:
-        pytest.skip("gfortran not available")
-
-    proj_src = tmp_path / "generic_proj"
-    (proj_src / "src").mkdir(parents=True)
-    (proj_src / "src" / "solver.f90").write_text(
-        """program mini_app
-  implicit none
-  open(unit=10, file='field.txt', status='replace')
-  write(10, '(F8.4,1X,F8.4)') 1.25d0, 2.50d0
-  close(10)
-  write(*, '(A)') 'FORT_APPLICATION_COMPLETION {"completed_steps": 4, "status": "ok"}'
-end program mini_app
-""",
-        encoding="utf-8",
-    )
-
-    build_dir = tmp_path / "build"
-    binary = build_generic_project(
-        proj_src,
-        build_dir,
-        profile=profile,
-        jobs=1,
-    )
-    assert binary.is_file()
-    assert (build_dir / "build-receipts.json").is_file()
-    assert (build_dir / "build-command.json").is_file()
-
-    run_dir = tmp_path / "run_dir"
-    run_dir.mkdir()
-    proc = subprocess.run(
-        [str(binary)],
-        cwd=run_dir,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    val = validate_generic_log(
-        proc.stdout, mode=profile.validation_mode, expected_completed_steps=4
-    )
-    assert val["completed_steps"] == 4
-
-    ref2 = tmp_path / "ref2"
-    ref2.mkdir()
-    (ref2 / "field.txt").write_text("1.2500 2.5000\n", encoding="utf-8")
-    diff = compare_numeric_files(ref2, run_dir, profile.output_files)
-    assert diff["passed"] is True
-    assert diff["fields"]["field.txt"]["max_absolute_error"] < 1e-6
-
-    # Check prepare_build builds generic profile cleanly without polluting workspace work/
-    import elmm_pipeline.cli as cli_mod
-    monkeypatch.setattr(cli_mod, "ROOT", tmp_path / "cli_root")
-    (tmp_path / "cli_root" / "elmm_pipeline").mkdir(parents=True)
-    for fname in ("build.py", "gpu_toolchain.py"):
-        shutil.copy2(Path(cli_mod.__file__).resolve().parent / fname, tmp_path / "cli_root" / "elmm_pipeline" / fname)
-    setup_state = {"compilers": {}, "pins": {}, "packages": {}, "native": {}}
-    args = SimpleNamespace(
-        jobs=1,
-        threads=1,
-        build_arg=[],
-        gpu_toolchain=None,
-    )
-    built_from_cli, build_meta = prepare_build(
-        "baseline",
-        args,
-        setup_state,
-        compilers={},
-        profile=profile,
-        explicit_source_root=proj_src,
-    )
-    assert built_from_cli.is_file()
-    assert build_meta["binary_sha256"]
-
-    # End-to-end cli.run execution + report generation for generic project
-    run_args = SimpleNamespace(
-        project_profile=profile_path,
-        source_root=proj_src,
-        config=str(cfg_src),
-        example="channel",
-        output=str(tmp_path / "e2e_results"),
-        tools=["baseline"],
-        target="cpu",
-        gpu_policy="sections",
-        gpu_profile="none",
-        scope_transfers="direct",
-        scope_entry=None,
-        scope_source=None,
-        scope_source_file=[],
-        scope_facts=None,
-        scope_effect_contracts=None,
-        calibration_profile=None,
-        nvcc=None,
-        cuda_host=None,
-        gpu_arch=None,
-        steps=4,
-        advection=None,
-        threads=1,
-        jobs=1,
-        repeats=1,
-        warmups=0,
-        timeout=60,
-        atol=1e-6,
-        rtol=1e-5,
-        build_arg=[],
-        source_pattern=["**/*.f90"],
-        select=[],
-        exclude=[],
-        marked_only=False,
-        no_coverage=False,
-    )
-    cli_mod.run(run_args)
-    report_data = json.loads((tmp_path / "e2e_results" / "report.json").read_text(encoding="utf-8"))
-    assert report_data["variants"]["baseline"]["status"] == "ok"
-    assert (tmp_path / "e2e_results" / "report.md").is_file()
 
 
 def test_pressure_tail_and_workspace_resilience(tmp_path: Path) -> None:

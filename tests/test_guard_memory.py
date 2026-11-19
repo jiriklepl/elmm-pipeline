@@ -1,5 +1,5 @@
 
-from elmm_pipeline.campaigns.guard import memory_headroom
+from elmm_pipeline.guard import memory_headroom
 
 
 def fixture(tmp_path, *, legacy=False, mount_root="/", membership="/job/step"):

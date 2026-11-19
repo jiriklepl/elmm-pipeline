@@ -6,9 +6,8 @@ import json
 from pathlib import Path
 import subprocess
 from typing import Iterable
-import fnmatch
 
-from .common import python_environment
+from .local_adapter import _python_environment
 
 
 def discover(source_path: Path | Iterable[Path], project_root: Path, python: Path,
@@ -45,26 +44,10 @@ def discover(source_path: Path | Iterable[Path], project_root: Path, python: Pat
     worker = Path(__file__).with_name("tool_workers") / "discovery_worker.py"
     command = [str(Path(python).absolute()), str(worker), "--request", str(request_path)]
     with (output_dir / "discovery.log").open("w") as log:
-        result = subprocess.run(command, cwd=output_dir, env=python_environment(), stdout=log, stderr=subprocess.STDOUT)
+        result = subprocess.run(command, cwd=output_dir, env=_python_environment(), stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         raise RuntimeError(f"Structural discovery failed; see {output_dir / 'discovery.log'}\n"
                            + (output_dir / "discovery.log").read_text()[-4000:])
     manifest = json.loads((output_dir / "discovery.json").read_text())
     manifest["command"] = command
     return manifest
-
-
-def discover_project(project_root: Path, python: Path, output_dir: Path, *,
-                     patterns: Iterable[str] = ("*.f90",), defines: Iterable[str] = ("DPREC",),
-                     select: Iterable[str] = (), backend: str = "cpu",
-                     compiler_root: Path | None = None, compiler_python: Path | None = None) -> dict:
-    """Batch a project scan so imported modules are parsed once per worker."""
-    project_root = Path(project_root).resolve(strict=True)
-    patterns = list(patterns or ("*.f90",))
-    patterns += [pattern[3:] for pattern in patterns if pattern.startswith("**/")]
-    sources = [path for path in sorted(project_root.rglob("*")) if path.is_file()
-               and path.suffix.lower() in {".f90", ".f95", ".f03", ".f08"}
-               and any(fnmatch.fnmatchcase(str(path.relative_to(project_root)).lower(), pattern.lower())
-                       or fnmatch.fnmatchcase(path.name.lower(), pattern.lower()) for pattern in patterns)]
-    return discover(sources, project_root, python, output_dir, defines, select, backend=backend,
-                    compiler_root=compiler_root, compiler_python=compiler_python)

@@ -515,7 +515,6 @@ def _run(argv, directory, label, *, timeout):
 
 def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, architecture, jobs):
     """Fresh CMake build; neither objects nor modules from earlier builds enter."""
-    from .gpu_pressure_build import _check_vkfft
     import re
 
     if jobs < 1 or not re.fullmatch(r"[1-9][0-9]{1,2}[af]?", architecture):
@@ -531,8 +530,8 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     # The compiler owns its build contract and the list of runtime sources.
     from compiler.numerical_contract import CUDA_OPTIONS, HOST_OPTIONS
     from compiler.runtime import RESIDENT_SOURCES
-    from .poisson_source import snapshot_solver
-    vkfft = _check_vkfft(vkfft)
+    from .poisson_source import check_vkfft, snapshot_solver
+    vkfft = check_vkfft(vkfft)
     provider = directory / "provider-source"
     snapshot_solver(solver, provider, directory / "provider-inputs.json")
     runtime = directory / "runtime"
