@@ -16,7 +16,7 @@ from .ast_rewrites import (
     parse_fortran,
     replace_once,
 )
-from .resident_rk import identity, addressable_arrays
+from .resident_rk import identity
 
 
 def _verify_wall_helpers(source):
@@ -511,6 +511,8 @@ def _driver(entries):
 
 
 def integrate_wall_entries(integration, entries, directory):
+    from compiler.scopes.resident_splice import addressable_arrays
+
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}

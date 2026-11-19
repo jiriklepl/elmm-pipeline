@@ -88,6 +88,41 @@ def configured_sources(paths, procedures, directory, *, fortran_compiler, define
     return record
 
 
+def verify_resident_execution(packages, trace, required_procedures):
+    """Require submitted GPU kernels, and reject observed generated-CPU work.
+
+    A generated CUDA file or a GPU placement request does not establish actual
+    execution. Match the runtime ledger to compiler-issued implementation IDs.
+    This check is for traced milestones, outside untraced performance runs.
+    """
+    from collections import Counter
+
+    implementations = {}
+    for package in packages:
+        for entry in package["entries"]:
+            for record in entry["entry"]["runtime_provenance"]["records"]:
+                if record["kind"] == "implementation":
+                    implementations[record["id"]] = (entry["region"]["procedure"], record["backend"])
+    kernels, native = Counter(), Counter()
+    for line in trace.splitlines():
+        event = re.match(r"FORT_SCOPED (\w+)", line)
+        identity = re.search(r" implementation=([a-f0-9]{64})\b", line)
+        if event is None or identity is None or identity[1] not in implementations:
+            continue
+        procedure, backend = implementations[identity[1]]
+        if backend == "generated_cpu":
+            native[procedure] += 1
+        elif backend == "cuda" and event[1] in {"launch", "graph_kernel"}:
+            kernels[procedure] += 1
+    if native:
+        raise ValueError("Resident entries executed on CPU: " + repr(dict(native)))
+    missing = sorted(set(required_procedures) - kernels.keys())
+    if missing:
+        raise ValueError("No GPU kernel execution recorded for: " + ", ".join(missing))
+    return {"gpu_kernels_by_procedure": dict(sorted(kernels.items())), "generated_cpu_events": dict(native),
+            "evidence": "runtime launch/graph-kernel ledger matched to compiler implementation identities"}
+
+
 def guard_periodic_entries(extracted, directory):
     """Keep halo copies independent under the adapter's three-cell minimum.
 
@@ -152,84 +187,21 @@ def _native_wall_correction(body):
 
 
 def materialize_entries(packages, directory):
-    """Replace proved numerical spans and preserve explicit native boundaries.
+    """Splice the compiled entries into ELMM's sources through its resident flow domain.
 
-    Activation belongs to the outer RK adapter. Every unsupported reached loop
-    publishes before native execution; the wall-point adapter uses smaller exact
-    geometric supersets. This function never infers effects for other calls.
+    Activation belongs to the outer RK adapter. Unsupported reached loops
+    publish before native execution, except the wall-point corrections, which
+    acquire smaller exact geometric supersets.
     """
-    directory = Path(directory).resolve()
-    directory.mkdir(parents=True, exist_ok=False)
-    edits, expected = {}, {}
-    for package in packages:
-        expected.update(package["source_inputs"])
-        for item in package["entries"]:
-            region, entry = item["region"], item["entry"]
-            bindings = {binding["resource"]: binding for binding in region["resources"]}
-            actual, registration, handles = {}, [], []
-            for parameter in region["parameters"]:
-                binding = bindings[parameter["resource"]]
-                name = binding["name"]
-                if parameter["lower_bound_dimension"] is not None:
-                    actual[parameter["name"]] = f"lbound({name},{parameter['lower_bound_dimension']})"
-                elif parameter["rank"]:
-                    handle = "rk_handle_" + parameter["name"]
-                    actual[parameter["name"]] = handle
-                    method = {("real", 8): "bind_real64", ("real", 4): "bind_real32", ("integer", 4): "bind_integer32"}.get((binding["type"], binding["kind"]))
-                    if method is None:
-                        raise ValueError("Unsupported resident array ABI: " + str(binding))
-                    handles.append(handle)
-                    origin = region["procedure"] + "::" + name
-                    registration.append(f"        {handle}=resident_flow%{method}({name},lbound({name}),.true., &\n"
-                                        f"          origin='{origin}')")
-                else:
-                    actual[parameter["name"]] = name
-            arguments = ["resident_flow%context", "FORT_SCOPE_GPU"] + [actual[name] for name in entry["argument_order"][2:]]
-            code = ["    block", "      use, intrinsic :: iso_c_binding",
-                    "      use fort_scoped_memory, only: FORT_SCOPE_GPU",
-                    "      use elmm_resident_pressure_state, only: resident_flow, pressure_require",
-                    "      use " + entry["fortran_module"] + ", only: rk_device_run => run",
-                    "      integer(c_int64_t) :: " + ",".join(handles),
-                    "      if (resident_flow%active) then"]
-            for guard in region["runtime_guards"]:
-                code.append("        if (.not. (" + guard + ")) error stop 'resident numerical geometry changed'")
-            code += registration + ["        call pressure_require(rk_device_run( &", "          " + ", &\n          ".join(arguments) + "))",
-                                    "      else", "@ORIGINAL@", "      endif", "    end block"]
-            edits.setdefault(region["source"], []).append((region["first_line"], region["last_line"], "\n".join(code) + "\n"))
-        for region in package["rejected"]:
-            # Extraction rejections carry procedure identity; find that source
-            # in successful entries from the same procedure, when available.
-            sources = {entry["region"]["source"] for entry in package["entries"]
-                       if entry["region"]["procedure"] == region["procedure"]}
-            if not sources:
-                continue  # Entirely native routine; outer call boundary owns it.
-            if len(sources) != 1:
-                raise ValueError("Ambiguous resident native source")
-            source = next(iter(sources))
-            wall = region["procedure"] == "momentumdiffusion::momentumdiffusion_nobranch_2ord"
-            code = "@WALL@" if wall else ("    block\n      use elmm_resident_pressure_state, only: resident_flow\n"
-                    "      if (resident_flow%active) call resident_flow%publish()\n@ORIGINAL@\n    end block\n")
-            edits.setdefault(source, []).append((region["first_line"], region["last_line"], code))
-    records = []
-    for source, replacements in edits.items():
-        path = Path(source)
-        if identity(path)["sha256"] != expected[source]:
-            raise ValueError("Resident numerical source changed: " + source)
-        lines = path.read_text().splitlines(keepends=True)
-        replacements.sort()
-        if any(a[1] >= b[0] for a, b in zip(replacements, replacements[1:])):
-            raise ValueError("Overlapping resident source replacements")
-        for first, last, code in reversed(replacements):
-            original = "".join(lines[first - 1:last])
-            replacement = _native_wall_correction(original) if code == "@WALL@" else code.replace("@ORIGINAL@", original.rstrip())
-            lines[first - 1:last] = [replacement]
-        target = directory / path.name
-        target.write_text("".join(lines))
-        records.append({"original": identity(path), "replacement": identity(target), "region_count": len(replacements)})
-    result = {"version": 1, "kind": "resident_rk_numerical_source_edits", "sources": records,
-              "activation_authority": "outer RK adapter; native call effects are not inferred here"}
-    (directory / "source-edits.json").write_text(json.dumps(result, indent=2) + "\n")
-    return result
+    from compiler.scopes.resident_splice import ResidentDomain, splice_resident_entries
+
+    def native(region, original):
+        if region["procedure"] == "momentumdiffusion::momentumdiffusion_nobranch_2ord":
+            return _native_wall_correction(original)
+        return None
+
+    domain = ResidentDomain("elmm_resident_pressure_state", "resident_flow", "pressure_require", prefix="rk")
+    return splice_resident_entries(packages, directory, domain=domain, native=native)
 
 
 def pointwise_advection(source, directory):
@@ -288,39 +260,6 @@ def snapshot_filter(source, directory):
     }
     (directory / "snapshot-filter.json").write_text(json.dumps(record, indent=2) + "\n")
     return record
-
-
-def addressable_arrays(text):
-    """Give borrowed primitive allocations and dummy arrays stable C addresses."""
-    from fparser.common.readfortran import FortranStringReader
-    from fparser.two.parser import ParserFactory
-    from fparser.two.utils import walk
-
-    tree = ParserFactory().create(std="f2008")(FortranStringReader(text, ignore_comments=False))
-    lines = text.splitlines(keepends=True)
-    changes = []
-    for node in walk(tree):
-        if type(node).__name__ != "Type_Declaration_Stmt":
-            continue
-        dtype, attributes, entities = node.items
-        attrs = str(attributes).lower()
-        if not re.match(r"(?i)^(real|integer|logical)\b", str(dtype)) or re.search(r"\b(target|parameter|pointer)\b", attrs):
-            continue
-        is_array = "dimension" in attrs or any(entity.items[1] is not None for entity in entities.items)
-        parent = node.parent
-        while parent is not None and type(parent).__name__ not in {"Module", "Subroutine_Subprogram", "Function_Subprogram", "Derived_Type_Def", "Main_Program"}:
-            parent = getattr(parent, "parent", None)
-        if not is_array or parent is None or type(parent).__name__ == "Derived_Type_Def":
-            continue
-        if type(parent).__name__ not in {"Module", "Main_Program"} and "intent" not in attrs and "allocatable" not in attrs:
-            continue
-        first, last = node.item.span
-        declaration = str(node)
-        before, after = declaration.split("::", 1)
-        changes.append((first, last, before.rstrip() + ", TARGET ::" + after + "\n"))
-    for first, last, replacement in sorted(changes, reverse=True):
-        lines[first-1:last] = [replacement]
-    return "".join(lines)
 
 
 def _decl_shape_lower_bounds(node, entity_shape):
@@ -429,6 +368,8 @@ def integrate_rk_epoch(configured, numerical, pressure, directory):
     retain their native path. Physical allocations survive the proved three
     MOVE_ALLOC exchanges; the RK caller return publishes before unmanaged work.
     """
+    from compiler.scopes.resident_splice import addressable_arrays
+
 
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)

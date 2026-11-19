@@ -14,7 +14,7 @@ from .ast_rewrites import (
     find_unique_span,
     replace_once,
 )
-from .resident_rk import addressable_arrays, identity
+from .resident_rk import identity
 
 
 def generate_time_entries(directory, *, precision="dp"):
@@ -157,6 +157,8 @@ def finalize_before_native(text):
 
 
 def integrate_time_loop(integration, configured, entries, directory, *, precision="dp"):
+    from compiler.scopes.resident_splice import addressable_arrays
+
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     sources = {Path(r["path"]).name: Path(r["path"]).read_text() for r in integration["sources"]}

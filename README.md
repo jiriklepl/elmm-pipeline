@@ -33,12 +33,14 @@ branch. Coverage checks count original source nests rather than entry calls, so
 grouping cannot satisfy coverage by dropping work. The entry boundary does not
 end residency or permit moving work across a native effect.
 
-Resident numerical packages require the compiler's artifact schema 2. Generation
-emits the shared entry/interface and common runtime directly, without unused
-ordinary CUDA/C++ backends or their fallback-query metadata. The adapter consumes
-the declared shared build sources and rejects older combined packages with an
-explicit regeneration error. Ordinary-call output-name switches do not apply to
-scoped generation; the shared runtime and entry ABIs remain unchanged.
+The resident build leaves extraction, entry compilation and the splicing of
+entry calls to the compiler (`compiler.scopes.resident_entries` and
+`compiler.scopes.resident_splice`), and takes the numerical compile options and
+the runtime source list from it. The pipeline supplies what is specific to
+ELMM: the procedures to export, the grid scalars that may be passed by value,
+the `resident_flow` domain object, the native handling of the wall-point
+corrections, and the pressure, time-loop, wall-model and output integration.
+The pressure stencils still go through the pipeline's own region discovery.
 
 ```sh
 python /path/to/elmm-pipeline/pipeline.py resident-build \

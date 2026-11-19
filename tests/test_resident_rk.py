@@ -4,8 +4,9 @@ import subprocess
 
 import pytest
 
+from compiler.scopes.resident_splice import addressable_arrays
 from elmm_pipeline.resident_rk import (
-    addressable_arrays, contiguous_filter_arguments, contiguous_periodic_boundary, identity, materialize_entries,
+    contiguous_filter_arguments, contiguous_periodic_boundary, identity, materialize_entries,
 )
 
 
