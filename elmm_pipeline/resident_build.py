@@ -447,7 +447,8 @@ def diagnostic_main(text, *, resident):
     return finalize_before_native(text) if resident else text
 
 
-def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, architecture, jobs):
+def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, architecture, jobs,
+                   strict_fp=True):
     """Fresh CMake build; neither objects nor modules from earlier builds enter."""
     from compiler.resident.build import (Executable, ObjectLibrary, cmake_lists, cmake_path,
                                          configure_and_compile, snapshot_directory)
@@ -507,7 +508,8 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
         include_directories=(elmm, poisfft, runtime, adapter),
         definitions=("DPREC",) if prepared["precision"] == "dp" else (),
         fortran_options=("-O3", "-fopenmp", "-ffree-line-length-none", "-fbacktrace", "-g"),
-        prologue=prologue, source_options={elmm / "alternate_ieee_isnan.f90": ("-O0",)})
+        prologue=prologue, source_options={elmm / "alternate_ieee_isnan.f90": ("-O0",)},
+        strict_fp=strict_fp)
     (directory / "CMakeLists.txt").write_text(text)
     inputs = {str(p): identity(p)["sha256"] for p in set(native + resident + list(mains.values()))}
     for root in (runtime, adapter, provider, elmm, poisfft, *map(Path, prepared["entry_directories"])):
@@ -515,7 +517,7 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     output = configure_and_compile(directory, fortran=fortran, cxx=cxx, nvcc=nvcc, architecture=architecture, jobs=jobs)
     if any(identity(path)["sha256"] != sha for path, sha in inputs.items()):
         raise ValueError("Build source changed during compilation")
-    result = {"status": "PASS", "binaries": {n: identity(output / n) for n in mains},
+    result = {"status": "PASS", "strict_fp": strict_fp, "binaries": {n: identity(output / n) for n in mains},
               "provider": identity(output / "lib/libpoisson-solver.so"),
               "gpu_execution_established": False, "performance_qualified": False}
     write(directory / "built.json", result)
@@ -541,10 +543,13 @@ def add_arguments(parser):
                         help="List new host accesses in host-accesses.json instead of stopping on them")
     parser.add_argument("--precision", choices=("dp", "sp"), default="dp",
                         help="Floating-point precision: dp (double, default) or sp (single)")
+    parser.add_argument("--fast-fp", action="store_true",
+                        help="Opt in to FMA contraction and fast CUDA div/sqrt instead of strict no-FMA flags")
 
 
 def execute(args):
     precision = getattr(args, "precision", "dp")
+    strict_fp = not getattr(args, "fast_fp", False)
     if args.jobs < 1:
         raise ValueError("Build jobs must be positive")
     if args.prepare_only and args.build_prepared:
@@ -560,7 +565,7 @@ def execute(args):
     if not args.prepare_only:
         build_prepared(prepared, args.output, solver=args.solver, vkfft=args.vkfft,
                        fortran=args.fortran, cxx=args.cxx, nvcc=args.nvcc,
-                       architecture=args.architecture, jobs=args.jobs)
+                       architecture=args.architecture, jobs=args.jobs, strict_fp=strict_fp)
 
 
 def main():
