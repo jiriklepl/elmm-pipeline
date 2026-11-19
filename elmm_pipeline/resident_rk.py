@@ -192,6 +192,17 @@ def integrate_rk_epoch(output):
     )
     # The epoch stays open across RK stages and time steps; output and unsupported work close it.
     body = body[:sub_lo] + begin_epoch_code + body[sub_lo:]
+    # ELMM applies the velocity boundaries before and after IBMomentum. Without immersed-boundary
+    # points IBMomentum changes nothing, and the supported boundaries only copy interior values,
+    # so the second application would rewrite what the first one wrote.
+    body, repeated = re.subn(
+        r"(call IBMomentum\((\w+), (\w+), (\w+)\)\n(?:[ \t]*\n)*)([ \t]*)call BoundUVW\(\2, \3, \4\)\n",
+        lambda m: (f"{m[1]}{m[5]}block\n{m[5]}  use ImmersedBoundary, only: UIBPoints, VIBPoints, WIBPoints\n"
+                   f"{m[5]}  if (.not. resident_flow%active .or. size(UIBPoints)+size(VIBPoints)+size(WIBPoints)>0) &\n"
+                   f"{m[5]}    call BoundUVW({m[2]}, {m[3]}, {m[4]})\n{m[5]}end block\n"),
+        body)
+    if repeated != 2:
+        raise ValueError(f"Expected two boundary applications after IBMomentum in TMarchRK3, found {repeated}")
     tsteps = tsteps[:lo] + body + tsteps[hi:]
     lo, hi = find_routine_span(tsteps, "IBMassSources")
     body = tsteps[lo:hi]
