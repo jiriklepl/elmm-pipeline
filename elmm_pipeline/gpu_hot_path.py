@@ -10,40 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-from pathlib import Path
 
-from .ast_rewrites import (
-    expand_pure_calls_in_text,
-    find_call_span,
-    find_routine_span,
-    find_unique_span,
-    inline_pure_scalar_function,
-    parse_fortran,
-    replace_once,
-)
+from .ast_rewrites import find_call_span, find_routine_span, find_unique_span, parse_fortran, replace_once
 
 # The solver's scratch arrays are bound once per pressure step and passed to entries by handle.
 HELD = {("pressure::prepoisson", "rhs"): "resident_flow%rhs", ("pressure::postpoisson", "phi"): "resident_flow%phi"}
-
-
-def expand_divergence(operators):
-    """A rewrite of pressure.f90 that puts the fourth-order divergence formula where it is called.
-
-    The compiler does not yet inline a PURE function whose array arguments
-    have lower bounds, so the one call inside ``PrePoisson`` is expanded here
-    from the function's own source.
-    """
-    info = inline_pure_scalar_function(Path(operators).read_text(), "Divergence4Uniform")
-
-    def rewrite(text):
-        lower, upper = find_routine_span(text, "PrePoisson")
-        body, count = expand_pure_calls_in_text(text[lower:upper], info)
-        if count != 1:
-            raise ValueError("Expected one Divergence4Uniform call in PrePoisson")
-        body = replace_once(body, "    dt2_rec = 1._knd / dt2", info["constants_source"], insert=True)
-        return text[:lower] + body + text[upper:]
-
-    return rewrite
 
 
 def _insert_after_update_pressure(text: str, addition: str) -> str:

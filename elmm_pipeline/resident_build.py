@@ -348,7 +348,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     from compiler.resident.project import ResidentProject, Selection
     from compiler.resident.project import prepare as prepare_application
 
-    from .gpu_hot_path import HELD, expand_divergence, integrate_pressure, integrate_pressure_tail
+    from .gpu_hot_path import HELD, integrate_pressure, integrate_pressure_tail
     from .resident_rk import DOMAIN, integrate_rk_epoch, native_wall_correction
     from .resident_time_loop import generate_time_entries, integrate_time_loop
     from .resident_walls import generate_wall_entries, integrate_wall_entries
@@ -392,8 +392,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
         for label in ("rk", "boundary", "periodic", "advection", "filter", "pressure"))
     project = ResidentProject(
         sources=tuple(paths), selections=selections, defines=("DPREC",) if precision == "dp" else (), domain=DOMAIN,
-        rewrites={"advection.f90": ("tile_scratch",), "filters.f90": ("line_snapshot",),
-                  "pressure.f90": (expand_divergence(source / "numerical_operators.f90"),)},
+        rewrites={"advection.f90": ("tile_scratch",), "filters.f90": ("line_snapshot",)},
         edit=edit, native=native_wall_correction, held=HELD,
         addressable=tuple(source / (name + ".f90") for name in ADDRESSABLE),
         known_host_accesses=frozenset(item["id"] for item in json.loads(KNOWN_HOST_ACCESSES.read_text())),

@@ -6,15 +6,10 @@ import pytest
 
 from compiler.scopes.resident_entries import export_resident_entries
 from elmm_pipeline.ast_rewrites import (
-    expand_pure_calls_in_text,
     find_all_calls,
     find_call_span,
     find_routine_span,
-    inline_pure_scalar_function,
     replace_once,
-)
-from elmm_pipeline.gpu_hot_path import (
-    expand_divergence,
 )
 from elmm_pipeline.resident_build import (
     ELMM_UNITS,
@@ -230,82 +225,6 @@ end module filters_mod
     assert "tmp(i,(j+jj),k)" in text
     assert "tmp(i,j,(k+kk))" in text
     assert "!$fort release(tmp)" in text
-
-
-def test_divergence_expression_and_pressure_stencils_renamed_args(tmp_path: Path) -> None:
-    operators = tmp_path / "numerical_operators.f90"
-    operators.write_text(
-        """module operators_mod
-  implicit none
-contains
-  pure real(8) function Divergence4Uniform(um2, um1, up1, up2, &
-      vm2, vm1, vp1, vp2, &
-      wm2, wm1, wp1, wp2, &
-      dx, dy, dz) result(div_val)
-    real(8), intent(in) :: um2, um1, up1, up2
-    real(8), intent(in) :: vm2, vm1, vp1, vp2
-    real(8), intent(in) :: wm2, wm1, wp1, wp2
-    real(8), intent(in) :: dx, dy, dz
-    real(8), parameter :: c1 = 27.0d0 / 24.0d0
-    real(8), parameter :: c3 = 1.0d0 / 24.0d0
-    div_val = (c1 * (up1 - um1) - c3 * (up2 - um2)) / dx + &
-              (c1 * (vp1 - vm1) - c3 * (vp2 - vm2)) / dy + &
-              (c1 * (wp1 - wm1) - c3 * (wp2 - wm2)) / dz
-  end function Divergence4Uniform
-end module operators_mod
-""",
-        encoding="utf-8",
-    )
-    pressure = """module Pressure
-contains
-  subroutine PrePoisson(U, V, W, RHS, dt2)
-    real(8) :: dt2_rec
-    dt2_rec = 1._knd / dt2
-    RHS(i,j,k) = Divergence4Uniform(U(i-2,j,k), U(i-1,j,k), U(i+1,j,k), U(i+2,j,k), &
-      V(i,j-2,k), V(i,j-1,k), V(i,j+1,k), V(i,j+2,k), &
-      W(i,j,k-2), W(i,j,k-1), W(i,j,k+1), W(i,j,k+2), dxmin, dymin, dzmin)
-  end subroutine PrePoisson
-  subroutine PostPoisson()
-    p = Divergence4Uniform(a, b, c, d, a, b, c, d, a, b, c, d, dxmin, dymin, dzmin)
-  end subroutine PostPoisson
-end module Pressure
-"""
-    expanded = expand_divergence(operators)(pressure)
-    before, after = expanded.split("subroutine PostPoisson", 1)
-    # Only the call inside PrePoisson is expanded, with the function's constants declared before its first statement.
-    assert "Divergence4Uniform" not in before and "Divergence4Uniform" in after
-    assert before.lower().index("parameter :: c1") < before.index("dt2_rec = 1._knd / dt2")
-    assert "U(i+1,j,k)" in before
-    assert "dxmin" in before
-    with pytest.raises(ValueError, match="Expected one Divergence4Uniform call"):
-        expand_divergence(operators)(pressure.replace("RHS(i,j,k) = Divergence4Uniform", "RHS(i,j,k) = Other"))
-
-    renamed_ops = tmp_path / "renamed_ops.f90"
-    renamed_ops.write_text(
-        operators.read_text(encoding="utf-8")
-        .replace("dx, dy, dz", "hx, hy, hz")
-        .replace(":: dx, dy, dz", ":: hx, hy, hz")
-        .replace("c1", "w1")
-        .replace("c3", "w3")
-        .replace("/ dx", "/ hx")
-        .replace("/ dy", "/ hy")
-        .replace("/ dz", "/ hz"),
-        encoding="utf-8",
-    )
-    parsed = inline_pure_scalar_function(
-        renamed_ops.read_text(encoding="utf-8"), "Divergence4Uniform"
-    )
-    call_text = """
-    Pr(i, j, k) = Divergence4Uniform( &
-      U(i-1,j,k), U(i,j,k), U(i+1,j,k), U(i+2,j,k), &
-      V(i,j-1,k), V(i,j,k), V(i,j+1,k), V(i,j+2,k), &
-      W(i,j,k-1), W(i,j,k), W(i,j,k+1), W(i,j,k+2), &
-      dxmin, dymin, dzmin)
-    """
-    expanded_text, expanded_count = expand_pure_calls_in_text(call_text, parsed)
-    assert expanded_count == 1
-    assert "hx" not in expanded_text
-    assert "dxmin" in expanded_text and "U(i+1,j,k)" in expanded_text
 
 
 def test_verify_wall_helpers_resilient_to_comments_and_rejects_missing() -> None:
