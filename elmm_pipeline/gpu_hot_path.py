@@ -181,7 +181,6 @@ def integrate_pressure(sources):
 #else
     config%solver%flags = 1
 #endif
-    config%solver%device_budget_bytes = 1073741824_c_int64_t
     call resident_pressure%start(config)
     resident_pressure%phi = resident_pressure%bind3(Phi,lbound(Phi),.true.,.true.,origin='pressure::phi')
     resident_pressure%rhs = resident_pressure%bind3(RHS,lbound(RHS),.false.,.true.,origin='pressure::rhs')

@@ -43,10 +43,12 @@ contains
       endif
     endif
     ! An epoch that only the pressure solve opens leaves the time step to the host's OpenMP code.
-    if (.not. self%active) call self%begin_epoch(0_c_int,2147483648_c_size_t,keep_team=.true.)
+    if (.not. self%active) call self%begin_epoch(0_c_int,keep_team=.true.)
     if (.not. c_associated(self%solver)) then
-      call pressure_require(elmm_gpu_pressure_create_v1(self%domain,config,self%solver))
       self%config=config
+      ! The solver sizes its own workspace within what the domain has left.
+      self%config%solver%device_budget_bytes=int(self%unclaimed(),c_int64_t)
+      call pressure_require(elmm_gpu_pressure_create_v1(self%domain,self%config,self%solver))
     endif
   end subroutine
 

@@ -187,7 +187,7 @@ def integrate_rk_epoch(output):
     begin_epoch_code = (
         "      if (.not. resident_flow%joined) then\n"
         "        if (ResidentRKSupported()) then\n"
-        "          call resident_flow%begin_epoch(0_c_int,2147483648_c_size_t)\n"
+        "          call resident_flow%begin_epoch(0_c_int)\n"
         "          resident_flow%joined=.true.\n        endif\n      endif\n\n"
     )
     # The epoch stays open across RK stages and time steps; output and unsupported work close it.
