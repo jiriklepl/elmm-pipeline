@@ -20,10 +20,7 @@ from elmm_pipeline.resident_build import (
     discover_application_units,
     discover_resident_procedure_groups,
 )
-from elmm_pipeline.resident_rk import (
-    contiguous_filter_arguments,
-    contiguous_periodic_boundary,
-)
+from elmm_pipeline.resident_rk import contiguous_filter_arguments
 from elmm_pipeline.resident_walls import _verify_wall_helpers
 
 
@@ -271,35 +268,6 @@ end module m_filt
     with pytest.raises(ValueError):
         contiguous_filter_arguments(good_filter.replace(", intent(in) :: Utype(-2:, -2:, -2:)", ", intent(in) :: Utype(:,:,:)"))
 
-    good_bound = """module m_bnd
-  implicit none
-contains
-  subroutine BoundUVW_do_BC(U, V, W)
-    real(8), contiguous, intent(inout) :: U(-2:, -2:, -2:), &
-      V(-2:, -2:, -2:), W(-2:, -2:, -2:)
-    call periodic_corners_edges(U, 1)
-    call periodic_corners_edges(V, 2)
-    call periodic_corners_edges(W, 3)
-  end subroutine BoundUVW_do_BC
-  subroutine periodic_corners_edges(U, dir)
-    real(8), dimension(-2:, -2:, -2:), intent(inout) :: U
-    integer, intent(in) :: dir
-    print *, dir, size(U)
-  end subroutine periodic_corners_edges
-end module m_bnd
-"""
-    rewritten_bnd = contiguous_periodic_boundary(good_bound)
-    assert "contiguous" in rewritten_bnd.split("subroutine periodic_corners_edges", 1)[1]
-
-    bad_bound = good_bound + """
-subroutine extra_caller(X)
-  real(8), intent(inout) :: X(-2:,-2:,-2:)
-  call periodic_corners_edges(X, 1)
-end subroutine extra_caller
-"""
-    with pytest.raises(ValueError):
-        contiguous_periodic_boundary(bad_bound)
-
 
 def test_ast_call_lookup_and_diagnostic_main() -> None:
     code = """module main_test
@@ -350,11 +318,10 @@ def test_discovery_and_wildcard_export(tmp_path: Path) -> None:
         groups = discover_resident_procedure_groups(
             [ELMM_SRC / f"{unit}.f90" for unit in elmm_units]
         )
-        assert set(groups) == {"rk", "boundary", "periodic", "advection", "filter"}
+        assert set(groups) == {"rk", "boundary", "advection", "filter"}
         assert set(groups["rk"]) == set(RK_PROCEDURES)
         assert "filters::filter3ord" in groups["filter"]
         assert "boundaries::bounduvw_do_bc" in groups["boundary"]
-        assert "boundaries::periodic_corners_edges" in groups["periodic"]
 
     # Synthetic SConstruct-less directory discovery + wildcard export_resident_entries
     synth = tmp_path / "synth_src"

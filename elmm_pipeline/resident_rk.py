@@ -10,7 +10,7 @@ import re
 
 from compiler.scopes.resident_splice import ResidentDomain
 
-from .ast_rewrites import find_all_calls, find_call_span, find_routine_span, parse_fortran, replace_once
+from .ast_rewrites import find_call_span, find_routine_span, parse_fortran, replace_once
 
 DOMAIN = ResidentDomain("elmm_resident_pressure_state", "resident_flow", "pressure_require", prefix="rk")
 
@@ -58,62 +58,6 @@ def _decl_shape_lower_bounds(node, entity_shape):
     return m.group(1) if m else ""
 
 
-def contiguous_periodic_boundary(text):
-    from fparser.two.utils import walk
-
-    b_lo, b_hi = find_routine_span(text, "BoundUVW_do_BC")
-    owner = text[b_lo:b_hi]
-    all_calls = find_all_calls(text, "periodic_corners_edges")
-    outside = [c for c in all_calls if not (b_lo <= c[0] and c[1] <= b_hi)]
-    inside = [c for c in all_calls if b_lo <= c[0] and c[1] <= b_hi]
-    normalized_calls = sorted({re.sub(r"\s+", "", ",".join(c[3])).lower() for c in inside})
-    if outside or normalized_calls != ["u,1", "v,2", "w,3"]:
-        raise ValueError("Unsupported periodic boundary callers")
-
-    owner_tree = parse_fortran(owner)
-    found_owner_arrays: dict[str, bool] = {}
-    for decl in walk(owner_tree):
-        if type(decl).__name__ != "Type_Declaration_Stmt":
-            continue
-        dtype_str = re.sub(r"\s+", "", str(decl.items[0])).lower()
-        attrs_str = re.sub(r"\s+", "", str(decl.items[1] or "")).lower()
-        if not dtype_str.startswith("real"):
-            continue
-        if "intent(inout)" not in attrs_str or "contiguous" not in attrs_str:
-            continue
-        for ent in decl.items[2].items:
-            vname = str(ent.items[0]).lower()
-            if vname in {"u", "v", "w"} and _decl_shape_lower_bounds(decl, ent.items[1]) == "-2:,-2:,-2:":
-                found_owner_arrays[vname] = True
-    if set(found_owner_arrays) != {"u", "v", "w"}:
-        raise ValueError("BoundUVW_do_BC must declare contiguous U, V, W arrays")
-
-    p_lo, p_hi = find_routine_span(text, "periodic_corners_edges")
-    body = text[p_lo:p_hi]
-    body_tree = parse_fortran(body)
-    target_spans = []
-    for decl in walk(body_tree):
-        if type(decl).__name__ != "Type_Declaration_Stmt":
-            continue
-        dtype_str = re.sub(r"\s+", "", str(decl.items[0])).lower()
-        attrs_str = re.sub(r"\s+", "", str(decl.items[1] or "")).lower()
-        if not dtype_str.startswith("real") or "intent(inout)" not in attrs_str:
-            continue
-        for ent in decl.items[2].items:
-            if str(ent.items[0]).lower() == "u" and _decl_shape_lower_bounds(decl, ent.items[1]) == "-2:,-2:,-2:":
-                target_spans.append((decl.item.span, "contiguous" in attrs_str))
-    if len(target_spans) != 1:
-        raise ValueError("Unsupported U declaration in periodic_corners_edges")
-    (first_line, last_line), has_contig = target_spans[0]
-    if not has_contig:
-        lines = body.splitlines(keepends=True)
-        chunk = "".join(lines[first_line - 1 : last_line])
-        before, after = chunk.split("::", 1)
-        lines[first_line - 1 : last_line] = [before.rstrip() + ", contiguous ::" + after]
-        body = "".join(lines)
-    return text[:p_lo] + body + text[p_hi:]
-
-
 def contiguous_filter_arguments(text):
     from fparser.two.utils import walk
 
@@ -157,7 +101,6 @@ def integrate_rk_epoch(output):
     retain their native path. Physical allocations survive the proved three
     MOVE_ALLOC exchanges; the RK caller return publishes before unmanaged work.
     """
-    output["boundaries.f90"] = contiguous_periodic_boundary(output["boundaries.f90"])
     output["filters.f90"] = contiguous_filter_arguments(output["filters.f90"])
 
     arrays = output["arrayutilities.f90"]

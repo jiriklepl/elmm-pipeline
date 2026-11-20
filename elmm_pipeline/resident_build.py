@@ -42,7 +42,7 @@ momentumdiffusion::momentumdiffusion_4ord_5point scalarboundaries::boundviscosit
 arrayutilities::add_3d arrayutilities::set_3d arrayutilities::multiply_3d""".split()
 ADVECTION_PROCEDURES = ["momentumadvection::" + n for n in
                         "cdudiv cdvdiv cdwdiv cduadv cdvadv cdwadv cd4divu cd4divv cd4divw".split()]
-BOUNDARY_PROCEDURES = ["boundaries::bounduvw_do_bc", "boundaries::periodic_corners_edges"]
+BOUNDARY_PROCEDURES = ["boundaries::bounduvw_do_bc"]
 
 
 def write(path, value):
@@ -135,14 +135,15 @@ def _scons_disabled_branch(test_node):
     return False
 
 
-PERIODIC_MINIMUM = "nx >= 3 .and. ny >= 3 .and. nz >= 3"
+# The halo copies of a periodic direction do not overlap from three cells on (ResidentRKSupported).
+BOUNDARY_MINIMUM = " .and. ".join(f"{component}n{axis} >= 3" for component in "UVW" for axis in "xyz")
 # The boundary types of the configuration that keeps its fields on the device (ResidentRKSupported).
 # With them decided, the six faces of a boundary application are one entry instead of six.
 CHANNEL_BOUNDARIES = (*(f"Btype({side}) == BC_PERIODIC" for side in ("We", "Ea", "So", "No")),
                       "Btype(Bo) == BC_NOSLIP", "Btype(To) == BC_NOSLIP")
 # ELMM's primary-grid scalars that resident entries take by VALUE.
 GRID_GEOMETRY = tuple("parameters::" + name for name in (
-    "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz"))
+    "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz", "prnx", "prny", "prnz"))
 
 
 def discover_application_units(elmm_src: Path, poisfft_src: Path | None = None) -> tuple[list[str], list[str]]:
@@ -281,7 +282,6 @@ def discover_resident_procedure_groups(paths: list[Path]) -> dict[str, list[str]
     ]
 
     boundary = [name for name in ("boundaries::bounduvw_do_bc",) if name in available] or [BOUNDARY_PROCEDURES[0]]
-    periodic = [name for name in ("boundaries::periodic_corners_edges",) if name in available] or [BOUNDARY_PROCEDURES[1]]
 
     rk = [name for name in RK_PROCEDURES if name in available]
     rk_modules = {"subgrid", "momentumdiffusion"}
@@ -298,7 +298,6 @@ def discover_resident_procedure_groups(paths: list[Path]) -> dict[str, list[str]
     return {
         "rk": rk,
         "boundary": boundary,
-        "periodic": periodic,
         "advection": advection,
         "filter": filter_procs,
     }
@@ -338,7 +337,7 @@ scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemap
 # Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
 # The divergence check of the pressure selection and the diagnostics are loops that only accumulate
 # scalars; each of those counts as its three compiled nests.
-MINIMUM_NESTS = {"rk": 82, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4, "pressure": 35,
+MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 35,
                  "diagnostics": 21}
 PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson"]
 # What a step reads of the flow without changing it: the CFL number and the mean friction velocities.
@@ -395,12 +394,14 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
         return {owned.get(name, name): text for name, text in sources.items()}
 
     selections = tuple(
-        Selection(label, tuple(groups[label]), guard=PERIODIC_MINIMUM if label == "periodic" else None,
+        Selection(label, tuple(groups[label]), guard=BOUNDARY_MINIMUM if label == "boundary" else None,
                   # The primary-grid counts and spacings are set before the epoch is entered.
                   value_scalars=GRID_GEOMETRY, minimum_nests=MINIMUM_NESTS[label],
                   # The activation condition excludes the boundary modes whose nests are rejected.
                   native_rejections=label != "boundary",
-                  assume=CHANNEL_BOUNDARIES if label == "boundary" else ())
+                  assume=CHANNEL_BOUNDARIES if label == "boundary" else (),
+                  # The corner and edge copies of the three components then stand next to the faces.
+                  inline=("boundaries::periodic_corners_edges",) if label == "boundary" else ())
         for label in MINIMUM_NESTS)
     project = ResidentProject(
         sources=tuple(paths), selections=selections, defines=("DPREC",) if precision == "dp" else (), domain=DOMAIN,

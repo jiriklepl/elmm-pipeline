@@ -75,11 +75,13 @@ it, and record that choice when comparing timings. See the
 ## How the adapter is organised
 
 `resident_build.py` describes ELMM to `compiler.resident`: the source units
-(read from ELMM's `SConstruct`), seven selections of procedures with their
+(read from ELMM's `SConstruct`), six selections of procedures with their
 coverage floors, the loop rewrites, the domain object and the build. The
 boundary selection also declares the boundary types of the supported
 configuration (periodic in x and y, no-slip in z), which lets the compiler
-make the six faces of a boundary application one entry. The diagnostics
+make the six faces of a boundary application one entry, and has the three
+calls that copy corners and edges replaced by their statements, so that the
+copies of the three velocity components share launches. The diagnostics
 selection holds what a step reads of the flow without changing it: the CFL
 loop and the mean friction velocities, which the compiler turns into device
 loops that bring back only their results. The compiler prepares
