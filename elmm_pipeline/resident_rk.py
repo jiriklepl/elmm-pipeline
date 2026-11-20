@@ -195,7 +195,6 @@ def integrate_rk_epoch(output):
     supported = supported .and. .not. enable_top_sponge .and. .not. enable_out_sponge_x .and. .not. enable_out_sponge_y
     supported = supported .and. .not. enable_fixed_flow_rate
     supported = supported .and. debuglevel==0 .and. steady/=1 .and. size(ScalFlIBPoints)==0
-    supported = supported .and. .not. pressure_solution%check_divergence
     supported = supported .and. .not. any(pressure_solution%correct_mass_flux)
   end function
 '''
