@@ -40,7 +40,6 @@ extern "C" int poisson_solver_workspace_query_v1(poisson_solver_handle_v1*,poiss
 extern "C" int poisson_solver_execute_device_v1(poisson_solver_handle_v1*,void*,size_t,const void*,size_t,
  const int32_t*,const int32_t*,void*,int*) { return POISSON_SOLVER_EXECUTION; }
 extern "C" const char *poisson_solver_last_error_v1(void) { return "unexpected provider execution"; }
-extern "C" int elmm_gpu_pressure_launch_halo_v1(double*,const int32_t*,const int32_t*,void*,int*) { return FORT_SCOPE_EXECUTION; }
 int main(int argc,char **argv) {
   assert(argc==2);mode=std::atoi(argv[1]);
   elmm_gpu_pressure_config_v1 config{};
