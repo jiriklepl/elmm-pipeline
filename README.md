@@ -109,16 +109,18 @@ object, the solver connection and the pressure tail.
 ### Host accesses
 
 The compiler audits the selected procedures for host statements that touch an
-array an entry keeps on the device. In ELMM these are twenty calls that pass
-such arrays to procedures that stay host code, for example the forcing terms
-called from `Convection`. Some are behind conditions the supported
-configuration excludes, and some callees are made coherent by this adapter;
-the audit sees neither. `elmm_pipeline/host_accesses.json` records the list as
-it stood on 2026-11-19, when both primary cases matched the native build. The
-entries were recorded, not reviewed one by one. A statement that is not in the
+array an entry keeps on the device. A statement that only passes whole arrays
+to compiled procedures, directly or through wrappers, is not reported. In ELMM
+eighteen calls remain, all from `Convection` and `PostPoisson` to procedures
+that stay host code. `elmm_pipeline/host_accesses.json` lists them, each with
+the `reason` it is safe, as reviewed on 2026-11-21: seven are behind conditions
+the supported configuration excludes, six are wrappers once this adapter's
+edit is in, and five publish the device values before the host code runs. The
+review found one gap, a configuration with buoyant gases and no transported
+scalar, which the supported-configuration check now excludes. A statement that is not in the
 list stops `resident-build`, so a new host access cannot appear unnoticed. After checking a new one, run the build once with
-`--record-host-accesses` and copy `host-accesses.json` from the output over
-the recorded file.
+`--record-host-accesses`, copy `host-accesses.json` from the output over
+the recorded file and add the reason.
 
 ## Run helpers
 

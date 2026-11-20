@@ -8,7 +8,8 @@
       "v",
       "w"
     ],
-    "text": "CALL CDU_variable_z(Ustar, U, V, W)"
+    "text": "CALL CDU_variable_z(Ustar, U, V, W)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires a uniform grid"
   },
   {
     "id": "880d49ebbdd50581",
@@ -19,7 +20,8 @@
       "vstar",
       "w"
     ],
-    "text": "CALL CDV_variable_z(Vstar, U, V, W)"
+    "text": "CALL CDV_variable_z(Vstar, U, V, W)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires a uniform grid"
   },
   {
     "id": "1c5ce4642f44da1f",
@@ -30,7 +32,8 @@
       "w",
       "wstar"
     ],
-    "text": "CALL CDW_variable_z(Wstar, U, V, W)"
+    "text": "CALL CDW_variable_z(Wstar, U, V, W)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires a uniform grid"
   },
   {
     "id": "34be796fbac3d3e5",
@@ -41,7 +44,8 @@
       "v",
       "w"
     ],
-    "text": "CALL CDU(Ustar, U, V, W)"
+    "text": "CALL CDU(Ustar, U, V, W)",
+    "reason": "a wrapper once the adapter's edit is in: it only passes the arrays to compiled procedures"
   },
   {
     "id": "92c768e2c3d3cd20",
@@ -52,7 +56,8 @@
       "vstar",
       "w"
     ],
-    "text": "CALL CDV(Vstar, U, V, W)"
+    "text": "CALL CDV(Vstar, U, V, W)",
+    "reason": "a wrapper once the adapter's edit is in: it only passes the arrays to compiled procedures"
   },
   {
     "id": "91902566c9ad0d27",
@@ -63,7 +68,8 @@
       "w",
       "wstar"
     ],
-    "text": "CALL CDW(Wstar, U, V, W)"
+    "text": "CALL CDW(Wstar, U, V, W)",
+    "reason": "a wrapper once the adapter's edit is in: it only passes the arrays to compiled procedures"
   },
   {
     "id": "28904b05152ba0af",
@@ -71,7 +77,8 @@
     "arrays": [
       "ustar"
     ],
-    "text": "CALL set(Ustar, 0)"
+    "text": "CALL set(Ustar, 0)",
+    "reason": "a wrapper once the adapter's edit is in: it only passes the arrays to compiled procedures"
   },
   {
     "id": "7b1a5c785d61eded",
@@ -79,7 +86,8 @@
     "arrays": [
       "vstar"
     ],
-    "text": "CALL set(Vstar, 0)"
+    "text": "CALL set(Vstar, 0)",
+    "reason": "a wrapper once the adapter's edit is in: it only passes the arrays to compiled procedures"
   },
   {
     "id": "aea2b170d79072bc",
@@ -87,7 +95,8 @@
     "arrays": [
       "wstar"
     ],
-    "text": "CALL set(Wstar, 0)"
+    "text": "CALL set(Wstar, 0)",
+    "reason": "a wrapper once the adapter's edit is in: it only passes the arrays to compiled procedures"
   },
   {
     "id": "d628831558125d47",
@@ -98,7 +107,8 @@
       "v",
       "vstar"
     ],
-    "text": "IF (ABS(Coriolis_parameter) > TINY(1._knd)) CALL CoriolisForce(Ustar, Vstar, U, V)"
+    "text": "IF (ABS(Coriolis_parameter) > TINY(1._knd)) CALL CoriolisForce(Ustar, Vstar, U, V)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires a zero Coriolis parameter"
   },
   {
     "id": "06fbaac10c29978d",
@@ -107,7 +117,8 @@
       "pr",
       "wstar"
     ],
-    "text": "CALL BuoyancyForce(Wstar, Temperature, Moisture, Scalar, Pr)"
+    "text": "CALL BuoyancyForce(Wstar, Temperature, Moisture, Scalar, Pr)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires no buoyancy, moisture, scalars or buoyant gases"
   },
   {
     "id": "b125057667b90449",
@@ -120,7 +131,8 @@
       "w",
       "wstar"
     ],
-    "text": "CALL ResistanceForce(Ustar, Vstar, Wstar, U, V, W)"
+    "text": "CALL ResistanceForce(Ustar, Vstar, Wstar, U, V, W)",
+    "reason": "the procedure publishes the device values itself before it touches a field (added by the adapter)"
   },
   {
     "id": "e28c0d009bd0e0cb",
@@ -133,7 +145,8 @@
       "w",
       "wstar"
     ],
-    "text": "CALL linear_forcing(Ustar, Vstar, Wstar, U, V, W)"
+    "text": "CALL linear_forcing(Ustar, Vstar, Wstar, U, V, W)",
+    "reason": "the procedure publishes the device values itself before it touches a field (added by the adapter)"
   },
   {
     "id": "013a0d280fd39beb",
@@ -146,7 +159,8 @@
       "w",
       "wstar"
     ],
-    "text": "CALL rayleigh_damping_uvw(Ustar, Vstar, Wstar, U, V, W)"
+    "text": "CALL rayleigh_damping_uvw(Ustar, Vstar, Wstar, U, V, W)",
+    "reason": "the procedure publishes the device values itself before it touches a field (added by the adapter)"
   },
   {
     "id": "c3b9e56b858b460a",
@@ -155,7 +169,8 @@
       "ustar",
       "vstar"
     ],
-    "text": "CALL StressBoundaryFlux(Ustar, Vstar, dt)"
+    "text": "CALL StressBoundaryFlux(Ustar, Vstar, dt)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires a no-slip top boundary, and the procedure acts only on an automatic-flux one"
   },
   {
     "id": "a2f6a662f8001fd5",
@@ -168,17 +183,8 @@
       "w",
       "wstar"
     ],
-    "text": "CALL MomentumDiffusion_variable_z_nobranch_2ord(Ustar, Vstar, Wstar, U, V, W)"
-  },
-  {
-    "id": "d4af733a176be46a",
-    "procedure": "pressure::prepoisson",
-    "arrays": [
-      "u",
-      "v",
-      "w"
-    ],
-    "text": "CALL BoundUVW(U, V, W)"
+    "text": "CALL MomentumDiffusion_variable_z_nobranch_2ord(Ustar, Vstar, Wstar, U, V, W)",
+    "reason": "not reached while fields are on the device: ResidentRKSupported requires a uniform grid"
   },
   {
     "id": "d7a1560a7cb1c1a1",
@@ -186,7 +192,8 @@
     "arrays": [
       "pr"
     ],
-    "text": "CALL FixPressureToReference(Pr)"
+    "text": "CALL FixPressureToReference(Pr)",
+    "reason": "replaced by the device pressure tail; the adapter publishes before the host version runs"
   },
   {
     "id": "8889e8d40310bce8",
@@ -194,16 +201,7 @@
     "arrays": [
       "pr"
     ],
-    "text": "CALL Bound_Pr(Pr)"
-  },
-  {
-    "id": "905f1497b271cc09",
-    "procedure": "pressure::postpoisson",
-    "arrays": [
-      "u",
-      "v",
-      "w"
-    ],
-    "text": "CALL BoundUVW(U, V, W)"
+    "text": "CALL Bound_Pr(Pr)",
+    "reason": "replaced by the device pressure tail; the adapter publishes before the host version runs"
   }
 ]
