@@ -25,11 +25,6 @@ int elmm_gpu_pressure_create_v1(fort_scope_domain_t domain,
  * and overwrite. Phi halos and the complete RHS are preserved. */
 int elmm_gpu_pressure_solve_v1(fort_scope_t, elmm_gpu_pressure_handle_v1 *,
     fort_buffer_t phi, fort_buffer_t rhs, fort_scope_external_report_v1 *);
-/* Exact Bound_Phi periodic/even-reflection face semantics: read six interior strips,
- * overwrite six disjoint two-layer faces with transverse interior extents.
- * Edges/corners remain unchanged. No host publication occurs. */
-int elmm_gpu_pressure_halo_v1(fort_scope_t, elmm_gpu_pressure_handle_v1 *,
-    fort_buffer_t phi, fort_scope_external_report_v1 *);
 /* Provider completion/destruction precedes workspace-lease release. */
 int elmm_gpu_pressure_destroy_v1(elmm_gpu_pressure_handle_v1 **);
 const char *elmm_gpu_pressure_error_v1(void);

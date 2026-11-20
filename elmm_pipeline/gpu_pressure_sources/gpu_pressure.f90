@@ -23,13 +23,6 @@ module elmm_gpu_pressure
       type(fort_scope_external_report_v1), intent(out) :: report
       integer(c_int) :: status
     end function
-    function elmm_gpu_pressure_halo_v1(context, handle, phi, report) bind(C) result(status)
-      import :: c_int, c_int64_t, c_ptr, fort_scope_external_report_v1
-      integer(c_int64_t), value :: context, phi
-      type(c_ptr), value :: handle
-      type(fort_scope_external_report_v1), intent(out) :: report
-      integer(c_int) :: status
-    end function
     function elmm_gpu_pressure_destroy_v1(handle) bind(C) result(status)
       import :: c_int, c_ptr
       type(c_ptr), intent(inout) :: handle

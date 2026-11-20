@@ -19,8 +19,6 @@ struct elmm_gpu_pressure_handle_v1 {
     bool ready=false;
     std::mutex mutex;
 };
-extern "C" int elmm_gpu_pressure_launch_halo_real32_v1(float *,const int32_t *,const int32_t *,void *,int *);
-extern "C" int elmm_gpu_pressure_launch_halo_v1(double *,const int32_t *,const int32_t *,void *,int *);
 namespace {
 thread_local char diagnostic[1024]{};
 void message(const char *s) { std::snprintf(diagnostic,sizeof diagnostic,"%s",s?s:""); }
@@ -111,18 +109,6 @@ int solve_worker(void *opaque,const fort_scope_external_view_v1 *views,size_t co
         return provider_status(status);
     });
 }
-int halo_worker(void *opaque,const fort_scope_external_view_v1 *views,size_t count,void *stream,int *started) noexcept {
-    *started=0;
-    return guarded([&]() -> int {
-        auto &h=*static_cast<elmm_gpu_pressure_handle_v1 *>(opaque);
-        require(count==1 && views,"pressure halo transaction requires one Phi root");view_check(views[0],h,true);
-        if(h.config.solver.flags & POISSON_SOLVER_REAL32)
-            return elmm_gpu_pressure_launch_halo_real32_v1(static_cast<float *>(views[0].device),h.config.solver.sizes,
-                h.config.solver.boundary_conditions,stream,started);
-        return elmm_gpu_pressure_launch_halo_v1(static_cast<double *>(views[0].device),h.config.solver.sizes,
-            h.config.solver.boundary_conditions,stream,started);
-    });
-}
 }
 extern "C" const char *elmm_gpu_pressure_error_v1(void) { return diagnostic; }
 extern "C" int elmm_gpu_pressure_create_v1(fort_scope_domain_t domain,const elmm_gpu_pressure_config_v1 *c,elmm_gpu_pressure_handle_v1 **out) {
@@ -173,31 +159,6 @@ extern "C" int elmm_gpu_pressure_solve_v1(fort_scope_t context,elmm_gpu_pressure
         fort_scope_external_binding_v1 bindings[2]={{phi,scope_type,3,elem_bytes,write},{rhs,scope_type,3,elem_bytes,read}};
         fort_scope_external_call_v1 call{1,0,bindings,2,h->lease,h->workspace};
         return fort_scope_external_execute_v1(context,&call,solve_worker,h,report);
-    });
-    if(report) report->status=result;return result;
-}
-extern "C" int elmm_gpu_pressure_halo_v1(fort_scope_t context,elmm_gpu_pressure_handle_v1 *h,fort_buffer_t phi,fort_scope_external_report_v1 *report) {
-    report_reset(report);
-    const int result=guarded([&]() -> int {
-        require(h && report && phi,"missing pressure halo root or provider");std::lock_guard lock(h->mutex);
-        const int status=context_check(context,*h);if(status) return status;
-        std::array<size_t,3> lower{2,2,2},upper{};for(int i=0;i<3;++i) upper[i]=size_t(h->config.solver.sizes[i])+2;
-        std::array<std::array<size_t,3>,6> lo,hi,read_lo,read_hi;
-        std::array<fort_scope_section,6> faces,reads;
-        for(int axis=0;axis<3;++axis) for(int side=0;side<2;++side) {
-            const int f=2*axis+side;lo[f]=lower;hi[f]=upper;
-            lo[f][axis]=side?upper[axis]:0;hi[f][axis]=lo[f][axis]+2;faces[f]={lo[f].data(),hi[f].data()};
-            read_lo[f]=lower;read_hi[f]=upper;
-            const bool periodic=h->config.solver.boundary_conditions[f]==0;
-            read_lo[f][axis]=(periodic!=bool(side))?upper[axis]-2:2;
-            read_hi[f][axis]=read_lo[f][axis]+2;reads[f]={read_lo[f].data(),read_hi[f].data()};
-        }
-        const bool is_float=(h->config.solver.flags & POISSON_SOLVER_REAL32)!=0;
-        const auto scope_type=is_float?FORT_SCOPE_REAL32:FORT_SCOPE_REAL64;
-        const size_t elem_bytes=is_float?sizeof(float):sizeof(double);
-        fort_scope_access access{0,6,reads.data(),6,faces.data(),6,faces.data()};
-        fort_scope_external_binding_v1 binding{phi,scope_type,3,elem_bytes,access};
-        fort_scope_external_call_v1 call{1,0,&binding,1,0,0};return fort_scope_external_execute_v1(context,&call,halo_worker,h,report);
     });
     if(report) report->status=result;return result;
 }

@@ -3,8 +3,8 @@
 The stencil loops of ``PrePoisson`` and ``PostPoisson`` are ordinary compiled
 entries. This module adds what is specific to ELMM around them: the device
 Poisson solver in place of the host one, and the solver's two scratch arrays
-as handles the domain keeps. The pressure reference and the pressure halo are
-compiled from ELMM's own procedures, like the stencils.
+as handles the domain keeps. The halo of the solution, the pressure reference
+and the pressure halo are compiled from ELMM's own procedures, like the stencils.
 """
 from __future__ import annotations
 
@@ -13,7 +13,8 @@ import re
 from .ast_rewrites import find_call_span, find_routine_span, parse_fortran, replace_once
 
 # The solver's scratch arrays are bound once per pressure step and passed to entries by handle.
-HELD = {("pressure::prepoisson", "rhs"): "resident_flow%rhs", ("pressure::postpoisson", "phi"): "resident_flow%phi"}
+HELD = {("pressure::prepoisson", "rhs"): "resident_flow%rhs", ("boundaries::bound_phi", "phi"): "resident_flow%phi",
+        ("pressure::postpoisson", "phi"): "resident_flow%phi"}
 
 
 def _insert_after_update_pressure(text: str, addition: str) -> str:
@@ -82,15 +83,6 @@ def integrate_pressure(sources):
         + poiss_raw
         + "\n          endif"
         + replacement[poiss_hi:]
-    )
-    bound_lo, bound_hi, bound_raw, _ = find_call_span(replacement, "Bound_Phi", within_routine="PressureCorrection")
-    replacement = (
-        replacement[:bound_lo]
-        + "    if (resident_pressure%active) then\n      call resident_pressure%halo()\n"
-        + "    else\n"
-        + bound_raw
-        + "\n    endif"
-        + replacement[bound_hi:]
     )
     res_lo, res_hi, res_raw, _ = find_call_span(replacement, "Poiss_Residue", within_routine="PressureCorrection")
     replacement = (

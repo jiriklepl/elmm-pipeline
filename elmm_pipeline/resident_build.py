@@ -67,6 +67,11 @@ BOUNDARY_MINIMUM = " .and. ".join(f"{component}n{axis} >= 3" for component in "U
 # With them decided, the six faces of a boundary application are one entry instead of six.
 CHANNEL_BOUNDARIES = (*(f"Btype({side}) == BC_PERIODIC" for side in ("We", "Ea", "So", "No")),
                       "Btype(Bo) == BC_NOSLIP", "Btype(To) == BC_NOSLIP")
+# The pressure boundary types that follow from them. With them decided, the six faces of a pressure halo
+# are one entry too; any other configuration takes the procedures' original bodies, whose nests are entries
+# of their own.
+CHANNEL_PRESSURE_BOUNDARIES = (*(f"PrBtype({side}) == BC_PERIODIC" for side in ("We", "Ea", "So", "No")),
+                               "PrBtype(Bo) == BC_NEUMANN", "PrBtype(To) == BC_NEUMANN")
 # ELMM's primary-grid scalars that resident entries take by VALUE.
 GRID_GEOMETRY = tuple("parameters::" + name for name in (
     "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz", "prnx", "prny", "prnz"))
@@ -259,11 +264,12 @@ scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemap
 # Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
 # The divergence check of the pressure selection and the diagnostics are loops that only accumulate
 # scalars; each of those counts as its three compiled nests.
-MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 66,
+MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 48, "pressure_halo": 47,
                  "diagnostics": 21}
-# The pressure step: the Poisson right-hand side, the correction, and the reference and halo of the pressure.
-PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson", "pressure::fixpressuretoreference",
-                       "boundaries::bound_pr"]
+# The pressure step: the Poisson right-hand side, the halo of the solution, the correction, and the
+# reference and halo of the pressure.
+PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson", "pressure::fixpressuretoreference"]
+PRESSURE_HALO_PROCEDURES = ["boundaries::bound_phi", "boundaries::bound_pr"]
 # What a step reads of the flow without changing it: the CFL number and the mean friction velocities.
 DIAGNOSTIC_PROCEDURES = ["dynamics::timesteplength::get_u_dx_max", "wallmodels::groundustar",
                          "wallmodels::groundustarflat"]
@@ -298,7 +304,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     paths = [source / (n + ".f90") for n in elmm_units]
     paths += [poisfft / "src" / (n + ".f90") for n in poisfft_units]
     groups = {**discover_resident_procedure_groups(paths), "pressure": list(PRESSURE_PROCEDURES),
-              "diagnostics": list(DIAGNOSTIC_PROCEDURES)}
+              "pressure_halo": list(PRESSURE_HALO_PROCEDURES), "diagnostics": list(DIAGNOSTIC_PROCEDURES)}
     kernels = []
 
     def edit(texts):
@@ -322,7 +328,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
                   value_scalars=GRID_GEOMETRY, minimum_nests=MINIMUM_NESTS[label],
                   # The activation condition excludes the boundary modes whose nests are rejected.
                   native_rejections=label != "boundary",
-                  assume=CHANNEL_BOUNDARIES if label == "boundary" else (),
+                  assume={"boundary": CHANNEL_BOUNDARIES, "pressure_halo": CHANNEL_PRESSURE_BOUNDARIES}.get(label, ()),
                   # The corner and edge copies of the three components then stand next to the faces.
                   inline=("boundaries::periodic_corners_edges",) if label == "boundary" else ())
         for label in MINIMUM_NESTS)
@@ -463,8 +469,7 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     native = [elmm / (n + ".f90") for n in units] + common
     resident = [overrides[n + ".f90"] for n in units] + common + added
     resident += [runtime / n for n in RESIDENT_SOURCES]
-    resident += [adapter / n for n in ("gpu_pressure.f90", "resident_pressure_state.f90", "gpu_pressure.cpp",
-                                      "gpu_pressure_halo.cu")]
+    resident += [adapter / n for n in ("gpu_pressure.f90", "resident_pressure_state.f90", "gpu_pressure.cpp")]
     for entry in prepared["entry_directories"]:
         resident += [Path(entry) / n for n in ("shared_interface.f90", "shared_entry.cu")]
     mains = {}

@@ -93,8 +93,9 @@ the sources from that description. ELMM's own residency
 code is added in one hook, by these modules:
 
 - `gpu_hot_path.py`: the device Poisson solver in place of the host one and its
-  scratch arrays. The pressure reference and the pressure halo are entries
-  compiled from `FixPressureToReference` and `Bound_Pr`;
+  scratch arrays. The halo of the solution, the pressure reference and the
+  pressure halo are entries compiled from `Bound_Phi`, `FixPressureToReference`
+  and `Bound_Pr`;
 - `resident_rk.py`: the epoch around the Runge-Kutta stages, the run-time
   check of the supported configuration, host access for the remaining native
   code, and the one change to ELMM's time step: the velocity boundaries are

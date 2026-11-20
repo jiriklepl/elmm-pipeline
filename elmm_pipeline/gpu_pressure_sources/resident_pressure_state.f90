@@ -23,7 +23,6 @@ module elmm_resident_pressure_state
     procedure :: pressure_bind1_f64
     generic :: bind1 => pressure_bind1_f32, pressure_bind1_f64
     procedure :: solve => pressure_solve
-    procedure :: halo => pressure_halo
     procedure :: observe_scratch => pressure_observe_scratch
     procedure :: finish => pressure_finish
   end type
@@ -98,12 +97,6 @@ contains
     class(resident_pressure_state), intent(inout) :: self
     type(fort_scope_external_report_v1) :: report
     call pressure_require(elmm_gpu_pressure_solve_v1(self%context,self%solver,self%phi,self%rhs,report))
-  end subroutine
-
-  subroutine pressure_halo(self)
-    class(resident_pressure_state), intent(inout) :: self
-    type(fort_scope_external_report_v1) :: report
-    call pressure_require(elmm_gpu_pressure_halo_v1(self%context,self%solver,self%phi,report))
   end subroutine
 
   subroutine pressure_observe_scratch(self)
