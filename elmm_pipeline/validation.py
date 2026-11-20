@@ -23,7 +23,10 @@ def validate_log(text, expected_max_steps=None, *, expected_completed_steps=None
                          f"expected {expected_completed_steps}")
     times = {}
     for name, label in (("time_steps_seconds", "Total wall clock time for time steps"),
-                        ("poisson_seconds", "Wall clock time for Poisson solver")):
+                        ("poisson_seconds", "Wall clock time for Poisson solver"),
+                        ("initialization_seconds", "Wall clock time for initialization"),
+                        ("loop_seconds", "Wall clock time for loop"),
+                        ("finalization_seconds", "Wall clock time for finalization")):
         match = re.search(re.escape(label) + r":\s*([\d.]+)", text)
         times[name] = float(match[1]) if match else None
     if times["time_steps_seconds"] is None:

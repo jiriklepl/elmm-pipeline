@@ -223,6 +223,55 @@ class ApplicationLogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_log(text)
 
+    def test_phase_timings_are_parsed_when_present_and_optional_otherwise(self):
+        legacy = validate_log(successful_log(), expected_max_steps=7)
+        self.assertIsNone(legacy["initialization_seconds"])
+        self.assertIsNone(legacy["loop_seconds"])
+        self.assertIsNone(legacy["finalization_seconds"])
+
+        with_phases = (
+            successful_log()
+            + " Wall clock time for initialization: .125000\n"
+            + " Wall clock time for loop: 1.230000\n"
+            + " Wall clock time for finalization: .045000\n"
+        )
+        record = validate_log(with_phases, expected_max_steps=7)
+        self.assertAlmostEqual(record["initialization_seconds"], 0.125)
+        self.assertAlmostEqual(record["loop_seconds"], 1.23)
+        self.assertAlmostEqual(record["finalization_seconds"], 0.045)
+
+    def test_phase_timed_main_wraps_phases_and_composes_with_diagnostic_main(self):
+        from elmm_pipeline.resident_build import diagnostic_main, phase_timed_main
+
+        sample_main = (
+            "program CLMM\n"
+            "  logical :: error_exit = .false.\n"
+            "  call par_init\n"
+            "  call InitTimer\n"
+            "  if (time_stepping%end_time > time_stepping%start_time) then\n"
+            "    call TMarchRK3\n"
+            "  endif\n\n"
+            "  call par_sync_all\n"
+            "  if (master .and. time_steps_time>0) &\n"
+            "    write(*,'(1x,a,f0.2)') 'Total wall clock time for time steps: ', time_steps_time\n"
+            "  call Dynamics_Deallocate\n"
+            "  call DeallocateGlobals\n"
+            "end program CLMM\n"
+        )
+        timed = phase_timed_main(sample_main)
+        self.assertLess(timed.index("count = phase_timer_start"), timed.index("call par_init"))
+        self.assertLess(timed.index("call InitTimer"), timed.index("count = phase_timer_loop_start"))
+        self.assertLess(timed.index("count = phase_timer_loop_start"),
+                        timed.index("if (time_stepping%end_time > time_stepping%start_time) then"))
+        self.assertLess(timed.index("count = phase_timer_loop_end"), timed.index("call par_sync_all"))
+        self.assertLess(timed.index("call DeallocateGlobals"), timed.index("count = phase_timer_end"))
+        for label in ("Wall clock time for initialization:", "Wall clock time for loop:",
+                      "Wall clock time for finalization:"):
+            self.assertIn(label, timed)
+        diagnostic = diagnostic_main(timed, resident=False)
+        self.assertLess(diagnostic.index("comparison_U2"), diagnostic.index("call Dynamics_Deallocate"))
+        self.assertLess(diagnostic.index("call DeallocateGlobals"), diagnostic.index("count = phase_timer_end"))
+
 
 def vtk_bytes(*, pressure=(2.0, -3.0), velocity=(1.0, 2.0, 3.0, 4.0, 5.0, 6.0)):
     def values(items):

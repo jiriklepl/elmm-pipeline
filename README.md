@@ -33,6 +33,8 @@ The supplied source trees are not modified.
 The output directory must be new. It receives:
 
 - `build/ELMM` and `build/ELMM-native`, the resident and the native executable;
+  besides ELMM's own timings both print the wall clock time of initialization,
+  of the time-stepping loop and of finalization;
 - `build/ELMM-full20` and `build/ELMM-native-full20`, which also dump complete
   fields for comparison;
 - `prepared.json`, `packages.json` and `built.json`, the records later steps

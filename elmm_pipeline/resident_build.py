@@ -431,6 +431,54 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     return result
 
 
+def phase_timed_main(text):
+    """Report wall clock time separately for initialization, the time-stepping loop, and finalization."""
+    text = replace_once(
+        text,
+        "  logical :: error_exit = .false.\n",
+        "  integer(dbl) :: phase_timer_start = 0, phase_timer_loop_start = 0, &\n"
+        "                  phase_timer_loop_end = 0, phase_timer_end = 0\n",
+        after=True,
+        insert=True,
+    )
+    text = replace_once(
+        text,
+        "  call par_init\n",
+        "  call system_clock(count = phase_timer_start)\n",
+        after=False,
+        insert=True,
+    )
+    text = replace_once(
+        text,
+        "  if (time_stepping%end_time > time_stepping%start_time) then\n",
+        "  call system_clock(count = phase_timer_loop_start)\n",
+        after=False,
+        insert=True,
+    )
+    text = replace_once(
+        text,
+        "  call par_sync_all\n  if (master .and. time_steps_time>0) &\n",
+        "  call system_clock(count = phase_timer_loop_end)\n",
+        after=False,
+        insert=True,
+    )
+    return replace_once(
+        text,
+        "  call DeallocateGlobals\n",
+        "  call system_clock(count = phase_timer_end)\n"
+        "  if (master .and. timer_rate > 0) then\n"
+        '    write(*,\'(1x,a,f0.6)\') "Wall clock time for initialization: ", &\n'
+        "      real(max(0_dbl, phase_timer_loop_start - phase_timer_start), dbl) / real(timer_rate, dbl)\n"
+        '    write(*,\'(1x,a,f0.6)\') "Wall clock time for loop: ", &\n'
+        "      real(max(0_dbl, phase_timer_loop_end - phase_timer_loop_start), dbl) / real(timer_rate, dbl)\n"
+        '    write(*,\'(1x,a,f0.6)\') "Wall clock time for finalization: ", &\n'
+        "      real(max(0_dbl, phase_timer_end - phase_timer_loop_end), dbl) / real(timer_rate, dbl)\n"
+        "  end if\n",
+        after=True,
+        insert=True,
+    )
+
+
 def diagnostic_main(text, *, resident):
     """Full allocation dumps at their original last observable points."""
     def block(fields, uses=""):
@@ -496,10 +544,13 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
                                       "gpu_pressure.cpp", "gpu_pressure_halo.cu", "gpu_pressure_tail.cu")]
     for entry in prepared["entry_directories"]:
         resident += [Path(entry) / n for n in ("shared_interface.f90", "shared_entry.cu")]
-    mains = {"ELMM": overrides["main.f90"], "ELMM-native": elmm / "main.f90"}
-    for target, source in list(mains.items()):
+    mains = {}
+    for target, source in (("ELMM", overrides["main.f90"]), ("ELMM-native", elmm / "main.f90")):
+        timed = directory / (target + "-main.f90")
+        timed.write_text(phase_timed_main(source.read_text()))
+        mains[target] = timed
         diagnostic = directory / (target + "-full20.f90")
-        diagnostic.write_text(diagnostic_main(source.read_text(), resident=target == "ELMM"))
+        diagnostic.write_text(diagnostic_main(timed.read_text(), resident=target == "ELMM"))
         mains[target + "-full20"] = diagnostic
     prologue = ['set(POISSON_SOLVER_BUILD_FORTRAN ON CACHE BOOL "" FORCE)',
                 'set(POISSON_SOLVER_USE_MPI OFF CACHE BOOL "" FORCE)',
