@@ -49,6 +49,51 @@ def write(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + "\n")
 
 
+_PLANE_SUM = re.compile(
+    r"(?im)^(?P<indent>[ \t]*)!\$omp\s+do\s+reduction\s*\(\s*\+\s*:\s*(?P<sum>\w+)\s*\)[ \t]*(?:![^\n]*)?\n"
+    r"(?P<loops>[ \t]*do\s+(?P<outer>\w+)\s*=\s*1\s*,\s*(?P<outer_count>\w+)[ \t]*(?:![^\n]*)?\n"
+    r"[ \t]*do\s+(?P<inner>\w+)\s*=\s*1\s*,\s*(?P<inner_count>\w+)[ \t]*(?:![^\n]*)?\n"
+    r"[ \t]*(?P=sum)\s*=\s*(?P=sum)\s*\+\s*\w+\s*\(\s*(?P=inner)\s*,\s*(?P=outer)\s*,\s*\w+\s*\)[ \t]*(?:![^\n]*)?\n"
+    r"[ \t]*end\s*do[ \t]*(?:![^\n]*)?\n[ \t]*end\s*do[ \t]*(?:![^\n]*)?\n)"
+    r"[ \t]*!\$omp\s+end\s+do[ \t]*(?:![^\n]*)?\n(?:\s*(?:![^\n]*)?\n)*"
+    r"[ \t]*!\$omp\s+single[ \t]*(?:![^\n]*)?\n"
+    r"(?P<mean>[ \t]*(?P=sum)\s*=\s*(?P=sum)\s*/[^\n]+\n)"
+    r"[ \t]*!\$omp\s+end\s+single\b[^\n]*")
+_SERIAL_PLANE_SUM = re.compile(
+    r"(?im)^(?P<indent>[ \t]*)!\$omp\s+master\b[^\n]*\n(?P<marked>[ \t]*!\$fort\s+reduction\b[^\n]*\n)?"
+    r"(?=[ \t]*do\s+\w+\s*=\s*1\s*,\s*\w+[^\n]*\n[ \t]*do\s+\w+\s*=\s*1\s*,\s*\w+[^\n]*\n"
+    r"[ \t]*(?P<sum>\w+)\s*=\s*(?P=sum)\s*\+)")
+
+
+def repeatable_reference(text):
+    """Sum the pressure of the top or bottom plane in one order, so that a native run repeats itself.
+
+    ELMM sums that plane with an OpenMP reduction. The threads' partial sums are
+    combined in the order the threads finish, so the pressure reference, which
+    every later step depends on, differs in rounding between two runs of the
+    same executable; over a few thousand adaptive steps the step count changes
+    too. The sum of one plane is small: the master thread does it. The
+    ``!$fort reduction`` line says the order is still free where the fields are
+    on the device, which then sums in a fixed order of its own. Source that is
+    already in the serial form only gets that line.
+    """
+    serial = list(_SERIAL_PLANE_SUM.finditer(text))
+    if len(serial) == 1 and not _PLANE_SUM.search(text):
+        match = serial[0]
+        if match.group("marked"):
+            return text
+        at = match.end()
+        return text[:at] + f"{match.group('indent')}!$fort reduction(+: {match.group('sum')})\n" + text[at:]
+    found = [match for match in _PLANE_SUM.finditer(text) if "(i,j,k_ref)" in match.group("loops").replace(" ", "").lower()]
+    if len(found) != 1:
+        raise ValueError("Unsupported pressure-reference source; expected one non-MPI TOP/BOTTOM plane sum")
+    match = found[0]
+    indent = match.group("indent")
+    return (text[:match.start()] + f"{indent}!$omp master\n{indent}!$fort reduction(+: {match.group('sum')})\n"
+            + match.group("loops") + match.group("mean") + f"{indent}!$omp end master\n{indent}!$omp barrier"
+            + text[match.end():])
+
+
 def _scons_disabled_branch(test_node):
     """Return True if an SConstruct ``if`` test belongs to MPI, CGAL, or missing_pfft."""
     names = {node.id for node in ast.walk(test_node) if isinstance(node, ast.Name)}
@@ -253,7 +298,11 @@ def snapshot_sources(elmm, poisfft, destination):
             if identity(path) != before or identity(output)["sha256"] != before["sha256"]:
                 raise ValueError("Source changed during snapshot: " + str(path))
             records.append({"original": before, "snapshot": identity(output)})
-    write(destination / "source-inputs.json", {"sources": records})
+    pressure = destination / "elmm/src/pressure.f90"
+    before = identity(pressure)
+    pressure.write_text(repeatable_reference(pressure.read_text()))
+    write(destination / "source-inputs.json", {"sources": records,
+          "repeatable_pressure_reference": {"before": before, "after": identity(pressure)}})
     return destination / "elmm", destination / "PoisFFT"
 
 

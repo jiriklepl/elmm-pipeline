@@ -18,6 +18,7 @@ from elmm_pipeline.resident_build import (
     diagnostic_main,
     discover_application_units,
     discover_resident_procedure_groups,
+    repeatable_reference,
 )
 from elmm_pipeline.resident_rk import contiguous_filter_arguments
 from elmm_pipeline.resident_walls import _verify_wall_helpers
@@ -29,6 +30,38 @@ ELMM_SRC = (
 POISFFT_SRC = (
     Path(__file__).resolve().parents[1] / ".cache" / "repos" / "PoisFFT" / "src"
 )
+
+
+def test_the_reference_plane_is_summed_in_one_order_and_the_device_may_choose_its_own() -> None:
+    variant = """module press_mod
+contains
+  subroutine FixPressureToReference(Pr)
+    !$omp   do   reduction( + : Phi_ref )   ! ref plane sum
+    do   j = 1, Prny
+      do  i = 1, Prnx
+        Phi_ref = Phi_ref + Pr( i , j , k_ref )
+      enddo
+    enddo
+    !$omp end do
+
+    ! optional comment between directives
+    !$omp   single
+    Phi_ref = Phi_ref / ( Prnx * Prny )
+    !$omp   end   single
+  end subroutine FixPressureToReference
+end module press_mod
+"""
+    rewritten = repeatable_reference(variant)
+    # One thread sums, so a native run repeats itself; the directive leaves the order free on the device.
+    assert "    !$omp master\n    !$fort reduction(+: Phi_ref)\n    do   j = 1, Prny\n" in rewritten
+    assert "!$omp end master\n    !$omp barrier" in rewritten
+    assert "!$omp   do" not in rewritten
+    assert repeatable_reference(rewritten) == rewritten
+    # Source that already sums serially only gets the directive.
+    serial = rewritten.replace("    !$fort reduction(+: Phi_ref)\n", "")
+    assert repeatable_reference(serial) == rewritten
+    with pytest.raises(ValueError):
+        repeatable_reference("subroutine empty()\nend subroutine empty\n")
 
 
 def test_pointwise_advection_handles_renamed_routines_and_arrays(tmp_path: Path) -> None:

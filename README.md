@@ -57,11 +57,15 @@ uniform grid, Sigma subgrid model, explicit second-order diffusion, and
 periodic/no-slip channel boundaries. The check is made at run time; any other
 configuration takes the original native branches of the same executable.
 
-Native and resident builds compile the same unchanged ELMM sources. The sums
-ELMM marks with an OpenMP reduction (the pressure reference, the mean friction
-velocity) run on the device in a fixed order of their own, so they differ from
-a native run in rounding, as native runs with different thread counts do. No
-aggressive floating-point options are enabled.
+Native and resident builds compile the same ELMM sources, with one change: the
+pressure reference of the top or bottom plane is summed by one thread. ELMM
+sums it with an OpenMP reduction, whose partial sums are combined in the order
+the threads finish, so two runs of the same native executable differed in
+rounding and, after a few thousand adaptive steps, in their step count. The
+loop carries a `!$fort reduction` line: on the device the plane is summed in
+parallel, in a fixed order of the device's own. The mean friction velocity,
+which only goes to output, keeps ELMM's reduction. No aggressive
+floating-point options are enabled.
 
 ### Output and the solver cache
 
