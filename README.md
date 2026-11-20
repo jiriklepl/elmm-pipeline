@@ -75,11 +75,14 @@ it, and record that choice when comparing timings. See the
 ## How the adapter is organised
 
 `resident_build.py` describes ELMM to `compiler.resident`: the source units
-(read from ELMM's `SConstruct`), six selections of procedures with their
+(read from ELMM's `SConstruct`), seven selections of procedures with their
 coverage floors, the loop rewrites, the domain object and the build. The
 boundary selection also declares the boundary types of the supported
 configuration (periodic in x and y, no-slip in z), which lets the compiler
-make the six faces of a boundary application one entry. The compiler prepares
+make the six faces of a boundary application one entry. The diagnostics
+selection holds what a step reads of the flow without changing it: the CFL
+loop and the mean friction velocities, which the compiler turns into device
+loops that bring back only their results. The compiler prepares
 the sources from that description. ELMM's own residency
 code is added in one hook, by these modules:
 
@@ -91,10 +94,12 @@ code is added in one hook, by these modules:
   not applied a second time after `IBMomentum` when there are no
   immersed-boundary points and nothing changed in between;
 - `resident_time_loop.py` and `resident_output.py`: the epoch across time
-  steps, the CFL and averaging kernels, snapshot output;
+  steps, the averaging kernel, snapshot output;
 - `resident_walls.py`: the stress kernels of the flat-wall model, one loop over each list of
   wall points. The friction velocity and fluxes stay fields of ELMM's own point lists, and
-  the wall corrections in the momentum diffusion are compiled from ELMM's own loops;
+  the wall corrections in the momentum diffusion are compiled from ELMM's own loops. The mean
+  friction velocity of the U and V points gets a procedure that names the four lists of a
+  flat-wall geometry, because ELMM's own loop reaches them through pointers;
 - `resident_workspace.py`: storage for the RK constants and the filter
   snapshot that outlives one call.
 

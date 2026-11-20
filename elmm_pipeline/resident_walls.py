@@ -359,9 +359,45 @@ def _driver(entries, *, precision="dp"):
     return declarations, procedures.replace("@USES@", "\n".join(uses)).replace("@STRESS@", "\n".join(dispatch))
 
 
-# The friction velocities the ground diagnostics read, as the wall-point lists hold them.
-_GROUND = ("WMPoints(:)%ustar, UzmWMpoints(:)%ustar, UzpWMpoints(:)%ustar, VzmWMpoints(:)%ustar, "
-           "VzpWMpoints(:)%ustar, WzmWMpoints(:)%ustar, WzpWMpoints(:)%ustar")
+# The lists of the walls below and above, in the order ELMM's ground diagnostic visits them.
+_FLAT_LISTS = ("UzmWMpoints", "UzpWMpoints", "VzmWMpoints", "VzpWMpoints")
+_SIDE_LISTS = tuple(component + side + "WMpoints" for component in "UV" for side in ("xm", "xp", "ym", "yp"))
+
+
+def name_ground_lists(text):
+    """Let the mean friction velocity of the U and V wall points be accumulated over named lists.
+
+    ELMM visits the lists through an array of pointers, which no compiled
+    loop can follow. With points only on the walls below and above, four
+    module arrays hold all of them; a procedure of its own accumulates over
+    those, in ELMM's order, and can run on the device. Other geometries keep
+    ELMM's loop.
+    """
+    lo, hi = find_routine_span(text, "GroundUstarUVW", kind="function")
+    body = text[lo:hi]
+    # ELMM's own loop, with its OpenMP region, stays whole in the other branch.
+    start = body.index("      !$omp parallel reduction(+:res,n)\n")
+    stop = body.index("      !$omp end parallel\n", start) + len("      !$omp end parallel\n")
+    flat = " + ".join(f"size({name})" for name in _SIDE_LISTS)
+    body = (body[:start] + f"      if ({flat} == 0) then\n        call GroundUstarFlat(res, n)\n      else\n"
+            + body[start:stop] + "      end if\n" + body[stop:])
+    loops = "".join(f"""    !$fort reduction(+: res, n)
+    do k = 1, size({name})
+      if ({name}(k)%zk==1) then
+        res = res + {name}(k)%ustar
+        n = n + 1
+      end if
+    end do
+""" for name in _FLAT_LISTS)
+    procedure = f"""  subroutine GroundUstarFlat(res, n)
+    real(knd), intent(inout) :: res
+    integer, intent(inout) :: n
+    integer :: k
+{loops}  end subroutine GroundUstarFlat
+
+
+"""
+    return text[:lo] + procedure + body + text[hi:]
 
 
 def integrate_wall_entries(sources, entries, *, precision="dp"):
@@ -381,13 +417,6 @@ def integrate_wall_entries(sources, entries, *, precision="dp"):
     if end is None:
         raise ValueError("Missing wall model module end")
     wall = wall[:end.start()] + procedures + wall[end.start():]
-    for name, anchor in (("GroundUstar", "    if (offset_to_global_z==0) then"),
-                         ("GroundUstarUVW", "    if (any(WMPoints%zk == 1)) then")):
-        f_lo, f_hi = find_routine_span(wall, name, kind="function")
-        f_body = wall[f_lo:f_hi]
-        f_body = replace_once(f_body, anchor, "    !$fort observe(" + _GROUND
-                              + ") if(resident_wall_epoch==resident_flow%generation)\n", after=False, insert=True)
-        wall = wall[:f_lo] + f_body + wall[f_hi:]
     sources["wallmodels.f90"] = wall
 
     text = sources["dynamics.f90"]

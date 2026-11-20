@@ -1,7 +1,7 @@
 """Checked primary-channel timestep lifetime and numerical source preparation.
 
 This adapter owns the ELMM control region, not coherence. Ordinary compiler
-entries implement the per-cell arithmetic; the generic runtime reduces CFL.
+entries implement the per-cell arithmetic; the CFL loop is compiled from ELMM's own source.
 Unsupported output work closes the epoch before executing its original source.
 Primary VTK output uses bounded immutable snapshots and joins before teardown.
 """
@@ -22,29 +22,6 @@ def generate_time_entries(directory, *, precision="dp"):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     sources = {
-        "cfl": f"""module resident_cfl_source
-implicit none
-contains
-subroutine values(u,v,w,cfl,nx,ny,nz,dx,dy,dz)
-{real_type}, intent(in) :: u(:,:,:),v(:,:,:),w(:,:,:)
-{real_type}, intent(out) :: cfl(:,:,:)
-integer, value, intent(in) :: nx,ny,nz
-{real_type}, value, intent(in) :: dx,dy,dz
-integer :: i,j,k
-{real_type} :: p
-do k=1,nz
- do j=1,ny
-  do i=1,nx
-   p = max(abs(u(i+3,j+3,k+3)),abs(u(i+2,j+3,k+3))) / dx
-   p = p + max(abs(v(i+3,j+3,k+3)),abs(v(i+3,j+2,k+3))) / dy
-   p = p + max(abs(w(i+3,j+3,k+3)),abs(w(i+3,j+3,k+2))) / dz
-   cfl(i,j,k)=p
-  enddo
- enddo
-enddo
-end subroutine
-end module
-""",
         "average": f"""module resident_average_source
 implicit none
 contains
@@ -68,9 +45,8 @@ end module
     for name, text in sources.items():
         source = directory / (name + ".f90")
         source.write_text(text)
-        entry = "resident_cfl_source::values" if name == "cfl" else "resident_average_source::accumulate"
         target = directory / (name + "-entry")
-        shared = compile_resident_entry(source, entry, target)["scoped"]
+        shared = compile_resident_entry(source, "resident_average_source::accumulate", target)["scoped"]
         if not shared["region_execution"] or not all(r["gpu_available"] for r in shared["region_execution"]):
             raise ValueError("Timestep numerical entry lacks GPU execution: " + name)
         result["entries"][name] = {"directory": str(target), "entry": shared}
@@ -78,54 +54,22 @@ end module
 
 
 def _tasks(entries, *, precision="dp"):
-    cfl, avg = (entries["entries"][n]["entry"] for n in ("cfl", "average"))
-    c_real = "c_double" if precision == "dp" else "c_float"
-    real_type_c = f"real({c_real})"
-    zero_literal = "0._c_double" if precision == "dp" else "0._c_float"
-    max_fn = "fort_scope_max_real64_v1" if precision == "dp" else "fort_scope_max_real32_v1"
-    def invoke(entry, arguments):
-        values = ["resident_flow%context", "FORT_SCOPE_GPU"] + [arguments[n] for n in entry["argument_order"][2:]]
-        return "call pressure_require(" + ("cfl_run" if entry is cfl else "average_run") + "( &\n      " + ", &\n      ".join(values) + "))"
-    cfl_call = invoke(cfl, dict(u="handles(1)", v="handles(2)", w="handles(3)", cfl="handle",
-                                nx="nx", ny="ny", nz="nz", dx="dx", dy="dy", dz="dz"))
-    avg_call = invoke(avg, dict(source="source_handle", average="average_handle", nx="size(average,1)",
-                                ny="size(average,2)", nz="size(average,3)", ox="offset(1)",
-                                oy="offset(2)", oz="offset(3)", weight="weight"))
+    avg = entries["entries"]["average"]["entry"]
+    real_type_c = "real(c_double)" if precision == "dp" else "real(c_float)"
+    arguments = dict(source="source_handle", average="average_handle", nx="size(average,1)",
+                     ny="size(average,2)", nz="size(average,3)", ox="offset(1)",
+                     oy="offset(2)", oz="offset(3)", weight="weight")
+    values = ["resident_flow%context", "FORT_SCOPE_GPU"] + [arguments[n] for n in avg["argument_order"][2:]]
+    avg_call = "call pressure_require(average_run( &\n      " + ", &\n      ".join(values) + "))"
     return f"""module elmm_resident_time_tasks
   use, intrinsic :: iso_c_binding
   use fort_scoped_memory
-  use fort_resident_reductions
   use elmm_resident_pressure_state, only: resident_flow, pressure_require
-  use {cfl['fortran_module']}, only: cfl_run=>run
   use {avg['fortran_module']}, only: average_run=>run
   implicit none
   private
-  public :: ResidentCFL, ResidentAverage
-  {real_type_c}, allocatable, target, save :: cfl_values(:,:,:)
+  public :: ResidentAverage
 contains
-  subroutine ResidentCFL(U,V,W,nx,ny,nz,dx,dy,dz,maximum,nan)
-    {real_type_c}, contiguous, target, intent(in) :: U(:,:,:),V(:,:,:),W(:,:,:)
-    integer, intent(in) :: nx,ny,nz
-    {real_type_c}, intent(in) :: dx,dy,dz
-    {real_type_c}, intent(out) :: maximum
-    logical, intent(out) :: nan
-    integer(c_int64_t) :: handles(3),handle
-    integer(c_int32_t) :: any_nan
-    type(fort_scope_external_report_v1) :: report
-    if (min(nx,ny,nz)<1) error stop 'invalid CFL grid'
-    if (.not.allocated(cfl_values)) allocate(cfl_values(nx,ny,nz))
-    if (any(shape(cfl_values)/=[nx,ny,nz])) error stop 'CFL storage epoch shape changed'
-    if (any(shape(U)<[nx,ny,nz]+3) .or. any(shape(V)<[nx,ny,nz]+3) .or. &
-        any(shape(W)<[nx,ny,nz]+3)) error stop 'CFL velocity geometry changed'
-    handles(1)=resident_flow%bind_real(U,[-2,-2,-2],.true.,origin='time::cfl::u')
-    handles(2)=resident_flow%bind_real(V,[-2,-2,-2],.true.,origin='time::cfl::v')
-    handles(3)=resident_flow%bind_real(W,[-2,-2,-2],.true.,origin='time::cfl::w')
-    handle=resident_flow%bind_real(cfl_values,[1,1,1],.false.,persistent=.true.,origin='time::cfl::values')
-    {cfl_call}
-    call pressure_require({max_fn}(resident_flow%context,handle,3_c_int32_t, &
-      size(cfl_values,kind=c_size_t),{zero_literal},maximum,any_nan,report))
-    nan=any_nan/=0
-  end subroutine
   subroutine ResidentAverage(source,average,source_lower,average_lower,offset,weight)
     {real_type_c}, contiguous, target, intent(in) :: source(:,:,:)
     {real_type_c}, contiguous, target, intent(inout) :: average(:,:,:)
@@ -154,32 +98,10 @@ def finalize_before_native(text):
 
 
 def integrate_time_loop(sources, entries, *, precision="dp"):
-    """Keep the epoch open across time steps: CFL, averaging and frame output read device values.
+    """Keep the epoch open across time steps: averaging and frame output read device values.
 
     ``sources`` maps ELMM file names to their text and is changed in place.
     """
-
-    # First-step setup remains native. Subsequent reached CFL work sees the
-    # same domain as RK and output, including swapped physical allocations.
-    text = sources["dynamics.f90"]
-    lo, hi = find_routine_span(text, "TimeStepLength")
-    body = text[lo:hi]
-    anchor = "    subroutine get_U_dx_max\n"
-    body = replace_once(
-        body,
-        anchor,
-        """      use elmm_resident_pressure_state, only: resident_flow
-      use elmm_resident_time_tasks, only: ResidentCFL
-      if (resident_flow%active) then
-        if (gridtype/=GRID_UNIFORM) error stop 'resident CFL requires uniform grid'
-        call ResidentCFL(U,V,W,Prnx,Prny,Prnz,dxmin,dymin,dzmin,U_dx_max,nan)
-        return
-      endif
-""",
-        after=True,
-        insert=True,
-    )
-    sources["dynamics.f90"] = text[:lo] + body + text[hi:]
 
     text = sources["outputs.f90"]
     lo, hi = find_routine_span(text, "OutTStep")

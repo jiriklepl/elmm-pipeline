@@ -336,8 +336,14 @@ ADDRESSABLE = """parameters arrayutilities subgrid dynamics momentum_diffusion a
 tsteps linearforcing volumesources sponge tiling filters wallmodels advection_variable_z water_thermodynamics
 scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemapframes""".split()
 # Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
-MINIMUM_NESTS = {"rk": 82, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4, "pressure": 23}
+# The divergence check of the pressure selection and the diagnostics are loops that only accumulate
+# scalars; each of those counts as its three compiled nests.
+MINIMUM_NESTS = {"rk": 82, "boundary": 128, "periodic": 20, "advection": 15, "filter": 4, "pressure": 35,
+                 "diagnostics": 21}
 PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson"]
+# What a step reads of the flow without changing it: the CFL number and the mean friction velocities.
+DIAGNOSTIC_PROCEDURES = ["dynamics::timesteplength::get_u_dx_max", "wallmodels::groundustar",
+                         "wallmodels::groundustarflat"]
 # Host statements in the selected procedures that touch arrays the entries keep on the device, as the
 # compiler's audit listed them when this file was recorded. A statement that is not listed stops the build.
 KNOWN_HOST_ACCESSES = Path(__file__).with_name("host_accesses.json")
@@ -355,7 +361,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     from .gpu_hot_path import HELD, integrate_pressure, integrate_pressure_tail
     from .resident_rk import DOMAIN, integrate_rk_epoch
     from .resident_time_loop import generate_time_entries, integrate_time_loop
-    from .resident_walls import generate_wall_entries, integrate_wall_entries
+    from .resident_walls import generate_wall_entries, integrate_wall_entries, name_ground_lists
     from .resident_workspace import integrate_workspace
 
     if precision not in {"dp", "sp"}:
@@ -368,7 +374,8 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     elmm_units, poisfft_units = discover_application_units(source, poisfft / "src")
     paths = [source / (n + ".f90") for n in elmm_units]
     paths += [poisfft / "src" / (n + ".f90") for n in poisfft_units]
-    groups = {**discover_resident_procedure_groups(paths), "pressure": list(PRESSURE_PROCEDURES)}
+    groups = {**discover_resident_procedure_groups(paths), "pressure": list(PRESSURE_PROCEDURES),
+              "diagnostics": list(DIAGNOSTIC_PROCEDURES)}
     kernels = []
 
     def edit(texts):
@@ -394,10 +401,11 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
                   # The activation condition excludes the boundary modes whose nests are rejected.
                   native_rejections=label != "boundary",
                   assume=CHANNEL_BOUNDARIES if label == "boundary" else ())
-        for label in ("rk", "boundary", "periodic", "advection", "filter", "pressure"))
+        for label in MINIMUM_NESTS)
     project = ResidentProject(
         sources=tuple(paths), selections=selections, defines=("DPREC",) if precision == "dp" else (), domain=DOMAIN,
-        rewrites={"advection.f90": ("tile_scratch",), "filters.f90": ("line_snapshot",)},
+        rewrites={"advection.f90": ("tile_scratch",), "filters.f90": ("line_snapshot",),
+                  "wallmodels.f90": (name_ground_lists,)},
         edit=edit, held=HELD,
         addressable=tuple(source / (name + ".f90") for name in ADDRESSABLE),
         known_host_accesses=frozenset(item["id"] for item in json.loads(KNOWN_HOST_ACCESSES.read_text())),
