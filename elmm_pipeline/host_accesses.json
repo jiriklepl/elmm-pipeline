@@ -187,21 +187,75 @@
     "reason": "not reached while fields are on the device: ResidentRKSupported requires a uniform grid"
   },
   {
-    "id": "d7a1560a7cb1c1a1",
-    "procedure": "pressure::postpoisson",
+    "id": "0285a5fa601afd9b",
+    "procedure": "pressure::fixpressuretoreference",
     "arrays": [
       "pr"
     ],
-    "text": "CALL FixPressureToReference(Pr)",
-    "reason": "replaced by the device pressure tail; the adapter publishes before the host version runs"
+    "text": "p000 = Pr(i, j, k)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
   },
   {
-    "id": "8889e8d40310bce8",
-    "procedure": "pressure::postpoisson",
+    "id": "3ca8882934262a12",
+    "procedure": "pressure::fixpressuretoreference",
     "arrays": [
       "pr"
     ],
-    "text": "CALL Bound_Pr(Pr)",
-    "reason": "replaced by the device pressure tail; the adapter publishes before the host version runs"
+    "text": "p100 = Pr(i + 1, j, k)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
+  },
+  {
+    "id": "e6a9e25d77d742da",
+    "procedure": "pressure::fixpressuretoreference",
+    "arrays": [
+      "pr"
+    ],
+    "text": "p010 = Pr(i, j + 1, k)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
+  },
+  {
+    "id": "7f8ffad238363752",
+    "procedure": "pressure::fixpressuretoreference",
+    "arrays": [
+      "pr"
+    ],
+    "text": "p001 = Pr(i, j, k + 1)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
+  },
+  {
+    "id": "8b42e7ff8b2ff957",
+    "procedure": "pressure::fixpressuretoreference",
+    "arrays": [
+      "pr"
+    ],
+    "text": "p110 = Pr(i + 1, j + 1, k)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
+  },
+  {
+    "id": "80b765daf14649fb",
+    "procedure": "pressure::fixpressuretoreference",
+    "arrays": [
+      "pr"
+    ],
+    "text": "p101 = Pr(i + 1, j, k + 1)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
+  },
+  {
+    "id": "c6d418b24c7aadab",
+    "procedure": "pressure::fixpressuretoreference",
+    "arrays": [
+      "pr"
+    ],
+    "text": "p011 = Pr(i, j + 1, k + 1)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
+  },
+  {
+    "id": "5b5a4f011b0299fe",
+    "procedure": "pressure::fixpressuretoreference",
+    "arrays": [
+      "pr"
+    ],
+    "text": "p111 = Pr(i + 1, j + 1, k + 1)",
+    "reason": "The reference at a point. PostPoisson publishes the fields before the call when the reference is of this type."
   }
 ]

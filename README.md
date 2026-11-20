@@ -57,9 +57,11 @@ uniform grid, Sigma subgrid model, explicit second-order diffusion, and
 periodic/no-slip channel boundaries. The check is made at run time; any other
 configuration takes the original native branches of the same executable.
 
-Native and resident builds share one approved source change: the TOP/BOTTOM
-pressure reference is summed serially, so its value does not depend on the
-thread count. No aggressive floating-point options are enabled.
+Native and resident builds compile the same unchanged ELMM sources. The sums
+ELMM marks with an OpenMP reduction (the pressure reference, the mean friction
+velocity) run on the device in a fixed order of their own, so they differ from
+a native run in rounding, as native runs with different thread counts do. No
+aggressive floating-point options are enabled.
 
 ### Output and the solver cache
 
@@ -90,8 +92,9 @@ loops that bring back only their results. The compiler prepares
 the sources from that description. ELMM's own residency
 code is added in one hook, by these modules:
 
-- `gpu_hot_path.py`: the device Poisson solver in place of the host one, its
-  scratch arrays, the pressure reference and face update;
+- `gpu_hot_path.py`: the device Poisson solver in place of the host one and its
+  scratch arrays. The pressure reference and the pressure halo are entries
+  compiled from `FixPressureToReference` and `Bound_Pr`;
 - `resident_rk.py`: the epoch around the Runge-Kutta stages, the run-time
   check of the supported configuration, host access for the remaining native
   code, and the one change to ELMM's time step: the velocity boundaries are
@@ -108,7 +111,7 @@ code is added in one hook, by these modules:
   snapshot that outlives one call.
 
 `gpu_pressure_sources/` holds the hand-written Fortran and CUDA of the domain
-object, the solver connection and the pressure tail.
+object and the solver connection.
 
 ### Host accesses
 

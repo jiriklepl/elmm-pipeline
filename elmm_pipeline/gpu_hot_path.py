@@ -2,16 +2,15 @@
 
 The stencil loops of ``PrePoisson`` and ``PostPoisson`` are ordinary compiled
 entries. This module adds what is specific to ELMM around them: the device
-Poisson solver in place of the host one, the solver's two scratch arrays as
-handles the domain keeps, and the pressure reference and face update as one
-device task.
+Poisson solver in place of the host one, and the solver's two scratch arrays
+as handles the domain keeps. The pressure reference and the pressure halo are
+compiled from ELMM's own procedures, like the stencils.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 
-from .ast_rewrites import find_call_span, find_routine_span, find_unique_span, parse_fortran, replace_once
+from .ast_rewrites import find_call_span, find_routine_span, parse_fortran, replace_once
 
 # The solver's scratch arrays are bound once per pressure step and passed to entries by handle.
 HELD = {("pressure::prepoisson", "rhs"): "resident_flow%rhs", ("pressure::postpoisson", "phi"): "resident_flow%phi"}
@@ -42,41 +41,6 @@ def _insert_after_update_pressure(text: str, addition: str) -> str:
             updated = body[:pos] + addition.lstrip("\n") + "\n" + body[pos:]
             return text[:lo] + updated + text[hi:]
     raise ValueError("Pressure outlining requires update_pressure block in PressureCorrection")
-
-
-def _verify_pressure_tail_routines(pressure_text: str, boundaries_text: str) -> tuple[str, str]:
-    """Structurally verify FixPressureToReference and Bound_Pr without rigid SHA-256 locks."""
-    from fparser.two.utils import walk
-
-    try:
-        r_lo, r_hi = find_routine_span(pressure_text, "FixPressureToReference")
-        f_lo, f_hi = find_routine_span(boundaries_text, "Bound_Pr")
-    except ValueError as error:
-        raise ValueError("Missing source routine for pressure tail") from error
-    ref_body = pressure_text[r_lo:r_hi]
-    face_body = boundaries_text[f_lo:f_hi]
-    ref_tree = parse_fortran(ref_body)
-    face_tree = parse_fortran(face_body)
-    ref_assignments = [
-        re.sub(r"\s+", "", str(n)).lower()
-        for n in walk(ref_tree)
-        if type(n).__name__ == "Assignment_Stmt"
-    ]
-    ref_names = {str(n).lower() for n in walk(ref_tree) if type(n).__name__ == "Name"}
-    if (
-        "pr" not in ref_names
-        or "pressure_reference_none" not in ref_names
-        or "pressure_reference_boundary" not in ref_names
-        or not any("pr(i,j,k)=pr(i,j,k)-" in stmt for stmt in ref_assignments)
-    ):
-        raise ValueError("GPU pressure tail requires the approved reference and original Bound_Pr formulas")
-    face_names = {str(n).lower() for n in walk(face_tree) if type(n).__name__ == "Name"}
-    if not {"pr", "prbtype", "bc_periodic", "bc_dirichlet"}.issubset(face_names):
-        raise ValueError("GPU pressure tail requires the approved reference and original Bound_Pr formulas")
-    return (
-        hashlib.sha256(ref_body.encode()).hexdigest(),
-        hashlib.sha256(face_body.encode()).hexdigest(),
-    )
 
 
 def integrate_pressure(sources):
@@ -138,7 +102,9 @@ def integrate_pressure(sources):
     fix_lo, fix_hi, fix_raw, _ = find_call_span(replacement, "FixPressureToReference", within_routine="PostPoisson")
     replacement = (
         replacement[:fix_lo]
-        + "      if (resident_pressure%active) call resident_pressure%publish()\n"
+        # The reference at a point is interpolated by host statements; the other references are entries.
+        + "      if (resident_pressure%active .and. pressure_solution%reference%type == PRESSURE_REFERENCE_POINT) &\n"
+        + "        call resident_pressure%publish()\n"
         + fix_raw
         + replacement[fix_hi:]
     )
@@ -201,60 +167,3 @@ def integrate_pressure(sources):
         after=False,
         insert=True,
     )
-
-
-def integrate_pressure_tail(sources):
-    """Replace the approved reference/Pr-face pair with one external GPU task.
-
-    This explicit numerical adapter is bound to the original source routines.
-    Other reference choices retain the original host pair after publication.
-    """
-    text = sources["pressure.f90"]
-    _verify_pressure_tail_routines(text, sources["boundaries.f90"])
-    anchor = ("      if (resident_pressure%active) call resident_pressure%publish()\n"
-              "      call FixPressureToReference(Pr)\n    \n      call Bound_Pr(Pr)")
-    s_span, e_span = find_unique_span(text, anchor)
-    text = text[:s_span] + '''      if (ResidentPressureTailSupported()) then
-        call ResidentPressureTail(Pr)
-      else
-        if (resident_pressure%active) call resident_pressure%publish()
-        call FixPressureToReference(Pr)
-        call Bound_Pr(Pr)
-      endif''' + text[e_span:]
-    helpers = '''
-  logical function ResidentPressureTailSupported() result(supported)
-    supported = resident_pressure%active .and. min(Prnx,Prny,Prnz) >= 3
-    supported = supported .and. (pressure_solution%reference%type == PRESSURE_REFERENCE_NONE .or. &
-      (pressure_solution%reference%type == PRESSURE_REFERENCE_BOUNDARY .and. &
-       (pressure_solution%reference%boundary_index == Bo .or. pressure_solution%reference%boundary_index == To)))
-    ! The solver's periodic/Neumann pair must describe the actual Pr faces.
-    supported = supported .and. all((PrBtype == BC_PERIODIC) .eqv. (PoissonBtype == 0))
-    supported = supported .and. .not. any(PrBtype == BC_DIRICHLET)
-    supported = supported .and. .not. any(PrBtype >= BC_MPI_BOUNDS_MIN .and. PrBtype <= BC_MPI_BOUNDS_MAX)
-  end function
-
-  subroutine ResidentPressureTail(Pr)
-    use elmm_gpu_pressure_tail, only: elmm_gpu_pressure_tail_real32_v1, elmm_gpu_pressure_tail_v1
-    use fort_scoped_memory, only: fort_scope_external_report_v1
-    real(knd), contiguous, target, intent(inout) :: Pr(-1:,-1:,-1:)
-    integer(c_int64_t) :: pressure_handle
-    integer(c_int) :: reference
-    type(fort_scope_external_report_v1) :: report
-    reference = 0
-    if (pressure_solution%reference%type == PRESSURE_REFERENCE_BOUNDARY) then
-      reference = 1
-      if (pressure_solution%reference%boundary_index == To) reference = 2
-    endif
-    pressure_handle = resident_pressure%bind3(Pr,lbound(Pr),.true.,origin='pressure::tail::pr')
-#ifdef DPREC
-    call pressure_require(elmm_gpu_pressure_tail_v1(resident_pressure%context,pressure_handle, &
-      int([Prnx,Prny,Prnz],c_int32_t),int(PoissonBtype,c_int32_t),reference,report))
-#else
-    call pressure_require(elmm_gpu_pressure_tail_real32_v1(resident_pressure%context,pressure_handle, &
-      int([Prnx,Prny,Prnz],c_int32_t),int(PoissonBtype,c_int32_t),reference,report))
-#endif
-  end subroutine
-'''
-    end = re.search(r"(?im)^\s*end\s*module(?:\s+pressure)?\s*(?:!.*)?$", text)
-    text = text[:end.start()] + helpers + text[end.start():]
-    sources["pressure.f90"] = text

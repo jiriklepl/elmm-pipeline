@@ -49,80 +49,6 @@ def write(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + "\n")
 
 
-def deterministic_reference(text):
-    """Approved change: serial TOP/BOTTOM plane sum, within the four-thread team."""
-    old = """        !$omp do reduction(+:Phi_ref)
-        do j = 1, Prny
-          do i = 1, Prnx
-            Phi_ref = Phi_ref + Pr(i,j,k_ref)
-          end do
-        end do
-        !$omp end do
-
-        !$omp single
-        Phi_ref = Phi_ref / (Prnx*Prny)
-        !$omp end single"""
-    new = """        !$omp master
-        do j = 1, Prny
-          do i = 1, Prnx
-            Phi_ref = Phi_ref + Pr(i,j,k_ref)
-          end do
-        end do
-        Phi_ref = Phi_ref / (Prnx*Prny)
-        !$omp end master
-        !$omp barrier"""
-    if text.count(new) == 1 and old not in text:
-        return text
-    if text.count(old) == 1:
-        return text.replace(old, new)
-
-    already_pat = re.compile(
-        r"(?im)^[ \t]*!\$omp\s+master\b[^\n]*\n"
-        r"[ \t]*do\s+\w+\s*=\s*1\s*,\s*\w+\b[^\n]*\n"
-        r"[ \t]*do\s+\w+\s*=\s*1\s*,\s*\w+\b[^\n]*\n"
-        r"[ \t]*(\w+)\s*=\s*\1\s*\+\s*\w+\s*\([^\n]+\)[ \t]*\n"
-        r"[ \t]*end\s*do\b[^\n]*\n"
-        r"[ \t]*end\s*do\b[^\n]*\n"
-        r"[ \t]*\1\s*=\s*\1\s*/[^\n]+\n"
-        r"[ \t]*!\$omp\s+end\s+master\b[^\n]*\n"
-        r"[ \t]*!\$omp\s+barrier\b[^\n]*"
-    )
-    reduction_pat = re.compile(
-        r"(?im)^([ \t]*)!\$omp\s+do\s+reduction\s*\(\s*\+\s*:\s*(\w+)\s*\)[ \t]*(?:![^\n]*)?\n"
-        r"([ \t]*)do\s+(\w+)\s*=\s*1\s*,\s*(\w+)[ \t]*(?:![^\n]*)?\n"
-        r"([ \t]*)do\s+(\w+)\s*=\s*1\s*,\s*(\w+)[ \t]*(?:![^\n]*)?\n"
-        r"([ \t]*)\2\s*=\s*\2\s*\+\s*(\w+)\s*\(\s*\7\s*,\s*\4\s*,\s*(\w+)\s*\)[ \t]*(?:![^\n]*)?\n"
-        r"([ \t]*)end\s*do[ \t]*(?:![^\n]*)?\n"
-        r"([ \t]*)end\s*do[ \t]*(?:![^\n]*)?\n"
-        r"[ \t]*!\$omp\s+end\s+do[ \t]*(?:![^\n]*)?\n(?:\s*(?:![^\n]*)?\n)*"
-        r"[ \t]*!\$omp\s+single[ \t]*(?:![^\n]*)?\n"
-        r"([ \t]*)\2\s*=\s*\2\s*/\s*(?:\(\s*\8\s*\*\s*\5\s*\)|\(\s*\5\s*\*\s*\8\s*\))[ \t]*(?:![^\n]*)?\n"
-        r"[ \t]*!\$omp\s+end\s+single\b[^\n]*"
-    )
-    matches = list(reduction_pat.finditer(text))
-    if not matches and len(already_pat.findall(text)) == 1:
-        return text
-    if len(matches) != 1:
-        raise ValueError("Unsupported pressure-reference source; expected one non-MPI TOP/BOTTOM sum")
-    m = matches[0]
-    indent = m.group(1)
-    var, jvar, jmax, ivar, imax, arr, kref = (
-        m.group(2), m.group(4), m.group(5), m.group(7), m.group(8), m.group(10), m.group(11)
-    )
-    replacement = (
-        f"{indent}!$omp master\n"
-        f"{indent}do {jvar} = 1, {jmax}\n"
-        f"{indent}  do {ivar} = 1, {imax}\n"
-        f"{indent}    {var} = {var} + {arr}({ivar},{jvar},{kref})\n"
-        f"{indent}  end do\n"
-        f"{indent}end do\n"
-        f"{indent}{var} = {var} / ({imax}*{jmax})\n"
-        f"{indent}!$omp end master\n"
-        f"{indent}!$omp barrier"
-    )
-    return text[: m.start()] + replacement + text[m.end() :]
-
-
 def _scons_disabled_branch(test_node):
     """Return True if an SConstruct ``if`` test belongs to MPI, CGAL, or missing_pfft."""
     names = {node.id for node in ast.walk(test_node) if isinstance(node, ast.Name)}
@@ -322,11 +248,7 @@ def snapshot_sources(elmm, poisfft, destination):
             if identity(path) != before or identity(output)["sha256"] != before["sha256"]:
                 raise ValueError("Source changed during snapshot: " + str(path))
             records.append({"original": before, "snapshot": identity(output)})
-    pressure = destination / "elmm/src/pressure.f90"
-    before = identity(pressure)
-    pressure.write_text(deterministic_reference(pressure.read_text()))
-    write(destination / "source-inputs.json", {"sources": records,
-          "approved_pressure_reference": {"before": before, "after": identity(pressure)}})
+    write(destination / "source-inputs.json", {"sources": records})
     return destination / "elmm", destination / "PoisFFT"
 
 
@@ -337,9 +259,11 @@ scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemap
 # Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
 # The divergence check of the pressure selection and the diagnostics are loops that only accumulate
 # scalars; each of those counts as its three compiled nests.
-MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 35,
+MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 66,
                  "diagnostics": 21}
-PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson"]
+# The pressure step: the Poisson right-hand side, the correction, and the reference and halo of the pressure.
+PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson", "pressure::fixpressuretoreference",
+                       "boundaries::bound_pr"]
 # What a step reads of the flow without changing it: the CFL number and the mean friction velocities.
 DIAGNOSTIC_PROCEDURES = ["dynamics::timesteplength::get_u_dx_max", "wallmodels::groundustar",
                          "wallmodels::groundustarflat"]
@@ -357,7 +281,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     from compiler.resident.project import ResidentProject, Selection
     from compiler.resident.project import prepare as prepare_application
 
-    from .gpu_hot_path import HELD, integrate_pressure, integrate_pressure_tail
+    from .gpu_hot_path import HELD, integrate_pressure
     from .resident_rk import DOMAIN, integrate_rk_epoch
     from .resident_time_loop import generate_time_entries, integrate_time_loop
     from .resident_walls import generate_wall_entries, integrate_wall_entries, name_ground_lists
@@ -382,7 +306,6 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
         owned = {path.name: path for path in texts if path.parent == source}
         sources = {name: texts[path] for name, path in owned.items()}
         integrate_pressure(sources)
-        integrate_pressure_tail(sources)
         integrate_rk_epoch(sources)
         time_entries = generate_time_entries(directory / "time-entries", precision=precision)
         integrate_time_loop(sources, time_entries, precision=precision)
@@ -540,8 +463,8 @@ def build_prepared(prepared, directory, *, solver, vkfft, fortran, cxx, nvcc, ar
     native = [elmm / (n + ".f90") for n in units] + common
     resident = [overrides[n + ".f90"] for n in units] + common + added
     resident += [runtime / n for n in RESIDENT_SOURCES]
-    resident += [adapter / n for n in ("gpu_pressure.f90", "resident_pressure_state.f90", "gpu_pressure_tail.f90",
-                                      "gpu_pressure.cpp", "gpu_pressure_halo.cu", "gpu_pressure_tail.cu")]
+    resident += [adapter / n for n in ("gpu_pressure.f90", "resident_pressure_state.f90", "gpu_pressure.cpp",
+                                      "gpu_pressure_halo.cu")]
     for entry in prepared["entry_directories"]:
         resident += [Path(entry) / n for n in ("shared_interface.f90", "shared_entry.cu")]
     mains = {}

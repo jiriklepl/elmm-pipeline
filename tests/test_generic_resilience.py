@@ -15,7 +15,6 @@ from elmm_pipeline.resident_build import (
     ELMM_UNITS,
     POISFFT_UNITS,
     RK_PROCEDURES,
-    deterministic_reference,
     diagnostic_main,
     discover_application_units,
     discover_resident_procedure_groups,
@@ -30,38 +29,6 @@ ELMM_SRC = (
 POISFFT_SRC = (
     Path(__file__).resolve().parents[1] / ".cache" / "repos" / "PoisFFT" / "src"
 )
-
-
-def test_deterministic_reference_handles_formatting_variants() -> None:
-    variant = """module press_mod
-  ! modified indentation and extra comments
-  implicit none
-contains
-  subroutine FixPressureToReference(Pr)
-    !$omp   do   reduction( + : Phi_ref )   ! ref plane sum
-    do   j = 1, Prny
-      do  i = 1, Prnx
-        Phi_ref = Phi_ref + Pr( i , j , k_ref )
-      enddo
-    enddo
-    !$omp end do
-
-    ! optional comment between directives
-    !$omp   single
-    Phi_ref = Phi_ref / ( Prnx * Prny )
-    !$omp   end   single
-  end subroutine FixPressureToReference
-end module press_mod
-"""
-    rewritten = deterministic_reference(variant)
-    assert "!$omp master" in rewritten
-    assert "!$omp barrier" in rewritten
-    assert "reduction" not in rewritten
-    # Idempotent once already rewritten.
-    assert deterministic_reference(rewritten) == rewritten
-
-    with pytest.raises(ValueError):
-        deterministic_reference("subroutine empty()\nend subroutine empty\n")
 
 
 def test_pointwise_advection_handles_renamed_routines_and_arrays(tmp_path: Path) -> None:
@@ -372,29 +339,8 @@ end module alpha_mod
     assert [e["procedure"] for e in exported_all["entries"]] == ["alpha_mod::step_one", "alpha_mod::step_two"]
 
 
-def test_pressure_tail_and_workspace_resilience(tmp_path: Path) -> None:
-    from elmm_pipeline.gpu_hot_path import _verify_pressure_tail_routines
+def test_workspace_resilience(tmp_path: Path) -> None:
     from elmm_pipeline.resident_workspace import integrate_workspace
-
-    if (ELMM_SRC / "pressure.f90").is_file() and (ELMM_SRC / "boundaries.f90").is_file():
-        p_text = deterministic_reference((ELMM_SRC / "pressure.f90").read_text(encoding="utf-8"))
-        b_text = (ELMM_SRC / "boundaries.f90").read_text(encoding="utf-8")
-        # Inject comments and spacing changes into FixPressureToReference and Bound_Pr
-        p_mod = p_text.replace(
-            "subroutine FixPressureToReference",
-            "! comment before routine\n  subroutine   FixPressureToReference",
-            1,
-        )
-        b_mod = b_text.replace(
-            "subroutine Bound_Pr",
-            "! comment before Bound_Pr\n  subroutine   Bound_Pr",
-            1,
-        )
-        ref_sha, face_sha = _verify_pressure_tail_routines(p_mod, b_mod)
-        assert len(ref_sha) == 64 and len(face_sha) == 64
-
-        with pytest.raises(ValueError):
-            _verify_pressure_tail_routines("module m\nend module m\n", b_mod)
 
     # Verify integrate_workspace handles non-canonical real(8) allocatable declaration in Filter3ord
     tsteps = tmp_path / "tsteps.f90"
