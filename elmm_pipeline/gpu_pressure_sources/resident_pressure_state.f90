@@ -42,7 +42,8 @@ contains
         call self%finish()
       endif
     endif
-    if (.not. self%active) call self%begin_epoch(0_c_int,2147483648_c_size_t)
+    ! An epoch that only the pressure solve opens leaves the time step to the host's OpenMP code.
+    if (.not. self%active) call self%begin_epoch(0_c_int,2147483648_c_size_t,keep_team=.true.)
     if (.not. c_associated(self%solver)) then
       call pressure_require(elmm_gpu_pressure_create_v1(self%domain,config,self%solver))
       self%config=config

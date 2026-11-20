@@ -77,14 +77,19 @@ it, and record that choice when comparing timings. See the
 `resident_build.py` describes ELMM to `compiler.resident`: the source units
 (read from ELMM's `SConstruct`), six selections of procedures with their
 coverage floors, the loop rewrites, the domain object and the build. The
-compiler prepares the sources from that description. ELMM's own residency
+boundary selection also declares the boundary types of the supported
+configuration (periodic in x and y, no-slip in z), which lets the compiler
+make the six faces of a boundary application one entry. The compiler prepares
+the sources from that description. ELMM's own residency
 code is added in one hook, by these modules:
 
 - `gpu_hot_path.py`: the device Poisson solver in place of the host one, its
   scratch arrays, the pressure reference and face update;
 - `resident_rk.py`: the epoch around the Runge-Kutta stages, the run-time
   check of the supported configuration, host access for the remaining native
-  code;
+  code, and the one change to ELMM's time step: the velocity boundaries are
+  not applied a second time after `IBMomentum` when there are no
+  immersed-boundary points and nothing changed in between;
 - `resident_time_loop.py` and `resident_output.py`: the epoch across time
   steps, the CFL and averaging kernels, snapshot output;
 - `resident_walls.py`: the stress kernels of the flat-wall model, one loop over each list of
