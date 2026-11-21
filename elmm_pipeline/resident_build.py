@@ -313,7 +313,7 @@ scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemap
 # Source loop nests that must end up compiled, by selection. Fewer is a coverage regression.
 # The divergence check of the pressure selection and the diagnostics are loops that only accumulate
 # scalars; each of those counts as its three compiled nests.
-MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 48, "pressure_halo": 47,
+MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 48, "pressure_halo": 48,
                  "diagnostics": 21, "outputs": 15, "forces": 4}
 # The pressure step: the Poisson right-hand side, the halo of the solution, the correction, and the
 # reference and halo of the pressure.
