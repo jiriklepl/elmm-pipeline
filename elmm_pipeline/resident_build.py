@@ -117,9 +117,6 @@ CHANNEL_BOUNDARIES = (*(f"Btype({side}) == BC_PERIODIC" for side in ("We", "Ea",
 # of their own.
 CHANNEL_PRESSURE_BOUNDARIES = (*(f"PrBtype({side}) == BC_PERIODIC" for side in ("We", "Ea", "So", "No")),
                                "PrBtype(Bo) == BC_NEUMANN", "PrBtype(To) == BC_NEUMANN")
-# ELMM's primary-grid scalars that resident entries take by VALUE.
-GRID_GEOMETRY = tuple("parameters::" + name for name in (
-    "dxmin", "dymin", "dzmin", "unx", "uny", "unz", "vnx", "vny", "vnz", "wnx", "wny", "wnz", "prnx", "prny", "prnz"))
 
 
 def discover_application_units(elmm_src: Path, poisfft_src: Path | None = None) -> tuple[list[str], list[str]]:
@@ -383,8 +380,7 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp"):
 
     selections = tuple(
         Selection(label, tuple(groups[label]), guard=BOUNDARY_MINIMUM if label == "boundary" else None,
-                  # The primary-grid counts and spacings are set before the epoch is entered.
-                  value_scalars=GRID_GEOMETRY, minimum_nests=MINIMUM_NESTS[label],
+                  minimum_nests=MINIMUM_NESTS[label],
                   # The activation condition excludes the boundary modes whose nests are rejected.
                   native_rejections=label != "boundary",
                   assume={"boundary": CHANNEL_BOUNDARIES, "pressure_halo": CHANNEL_PRESSURE_BOUNDARIES}.get(label, ()),
