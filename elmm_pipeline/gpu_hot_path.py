@@ -91,15 +91,6 @@ def integrate_pressure(sources):
         + res_raw
         + replacement[res_hi:]
     )
-    fix_lo, fix_hi, fix_raw, _ = find_call_span(replacement, "FixPressureToReference", within_routine="PostPoisson")
-    replacement = (
-        replacement[:fix_lo]
-        # The reference at a point is interpolated by host statements; the other references are entries.
-        + "      if (resident_pressure%active .and. pressure_solution%reference%type == PRESSURE_REFERENCE_POINT) &\n"
-        + "        call resident_pressure%publish()\n"
-        + fix_raw
-        + replacement[fix_hi:]
-    )
     replacement = _insert_after_update_pressure(
         replacement,
         "\n    if (resident_pressure%active .and. .not. resident_pressure%joined) call resident_pressure%publish()",

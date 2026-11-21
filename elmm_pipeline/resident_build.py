@@ -314,7 +314,7 @@ scalar_diffusion pressure main outputs frames_common vtkframes frames surfacemap
 # The divergence check of the pressure selection and the diagnostics are loops that only accumulate
 # scalars; each of those counts as its three compiled nests.
 MINIMUM_NESTS = {"rk": 82, "boundary": 218, "advection": 15, "filter": 4, "pressure": 48, "pressure_halo": 47,
-                 "diagnostics": 21}
+                 "diagnostics": 21, "outputs": 15, "forces": 4}
 # The pressure step: the Poisson right-hand side, the halo of the solution, the correction, and the
 # reference and halo of the pressure.
 PRESSURE_PROCEDURES = ["pressure::prepoisson", "pressure::postpoisson", "pressure::fixpressuretoreference"]
@@ -322,23 +322,34 @@ PRESSURE_HALO_PROCEDURES = ["boundaries::bound_phi", "boundaries::bound_pr"]
 # What a step reads of the flow without changing it: the CFL number and the mean friction velocities.
 DIAGNOSTIC_PROCEDURES = ["dynamics::timesteplength::get_u_dx_max", "wallmodels::groundustar",
                          "wallmodels::groundustarflat"]
-# Host statements in the selected procedures that touch arrays the entries keep on the device, as the
-# compiler's audit listed them when this file was recorded. A statement that is not listed stops the build.
-KNOWN_HOST_ACCESSES = Path(__file__).with_name("host_accesses.json")
+# What a step adds to the running averages: array assignments of ELMM's own.
+OUTPUT_PROCEDURES = ["outputs::outtstep"]
+# Forces that Convection applies in every step and that act only in configurations where the fields are
+# not kept on the device. Selected, their loops take care of their arrays should they ever run there.
+FORCE_PROCEDURES = ["dynamics::coriolisforce", "dynamics::buoyancyforce", "dynamics::stressboundaryflux"]
+# Procedures outside the selections that see to the arrays they are handed, so that a call to one hands
+# nothing over. Each is called in every step, and bringing its arrays back for it would cost a download
+# per call.
+SELF_MANAGED = (
+    # Given residency code by this adapter: the wall model's host transaction, and the frame writers,
+    # which take device snapshots when a frame is due.
+    "wallmodels::computeviscswm", "vtkframes::savevtkframes", "surfaceframes::savesurfaceframes",
+    "staggeredframes::savestaggeredframes",
+    # Wrappers once this adapter's edit is in: they only pass their arrays on to compiled procedures.
+    "momentumadvection::cdu", "momentumadvection::cdv", "momentumadvection::cdw", "arrayutilities::set_int_3d",
+    # They publish the device values themselves before they touch a field (directives this adapter adds),
+    # which they do only when the configuration gives them something to do.
+    "volumesources::resistanceforce", "linearforcing::linear_forcing", "sponge::rayleigh_damping_uvw")
 
 
-def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audit=True):
-    """Write the resident variant of ELMM's sources and compile its entries.
-
-    With ``audit`` off, host statements that are not in the recorded list are
-    only written to ``host-accesses.json`` instead of stopping the build.
-    """
+def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp"):
+    """Write the resident variant of ELMM's sources and compile its entries."""
     from compiler.resident.project import ResidentProject, Selection
     from compiler.resident.project import prepare as prepare_application
 
     from .gpu_hot_path import HELD, integrate_pressure
     from .resident_rk import DOMAIN, integrate_rk_epoch
-    from .resident_time_loop import generate_time_entries, integrate_time_loop
+    from .resident_time_loop import integrate_time_loop
     from .resident_walls import generate_wall_entries, integrate_wall_entries, name_ground_lists
     from .resident_workspace import integrate_workspace
 
@@ -353,7 +364,8 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
     paths = [source / (n + ".f90") for n in elmm_units]
     paths += [poisfft / "src" / (n + ".f90") for n in poisfft_units]
     groups = {**discover_resident_procedure_groups(paths), "pressure": list(PRESSURE_PROCEDURES),
-              "pressure_halo": list(PRESSURE_HALO_PROCEDURES), "diagnostics": list(DIAGNOSTIC_PROCEDURES)}
+              "pressure_halo": list(PRESSURE_HALO_PROCEDURES), "diagnostics": list(DIAGNOSTIC_PROCEDURES),
+              "outputs": list(OUTPUT_PROCEDURES), "forces": list(FORCE_PROCEDURES)}
     kernels = []
 
     def edit(texts):
@@ -362,13 +374,11 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
         sources = {name: texts[path] for name, path in owned.items()}
         integrate_pressure(sources)
         integrate_rk_epoch(sources)
-        time_entries = generate_time_entries(directory / "time-entries", precision=precision)
-        integrate_time_loop(sources, time_entries, precision=precision)
+        integrate_time_loop(sources)
         wall_entries = generate_wall_entries(sources, directory / "wall-entries", precision=precision)
         integrate_wall_entries(sources, wall_entries, precision=precision)
         integrate_workspace(sources)
-        kernels.extend(item["directory"] for entries in (time_entries, wall_entries)
-                       for item in entries["entries"].values())
+        kernels.extend(item["directory"] for item in wall_entries["entries"].values())
         return {owned.get(name, name): text for name, text in sources.items()}
 
     selections = tuple(
@@ -387,10 +397,10 @@ def prepare(elmm, poisfft, compiler, directory, *, fortran, precision="dp", audi
                   "wallmodels.f90": (name_ground_lists,)},
         edit=edit, held=HELD,
         addressable=tuple(source / (name + ".f90") for name in ADDRESSABLE),
-        known_host_accesses=frozenset(item["id"] for item in json.loads(KNOWN_HOST_ACCESSES.read_text())),
-        strict_audit=audit)
+        self_managed=SELF_MANAGED)
     prepared = prepare_application(project, directory / "resident", fortran=fortran)
-    write(directory / "host-accesses.json", [{key: item[key] for key in ("id", "procedure", "arrays", "text")}
+    # Where host statements of the selected procedures get arrays back from the device, for reading.
+    write(directory / "host-accesses.json", [{key: item[key] for key in ("procedure", "arrays", "text", "access")}
                                              for item in prepared["audit"]])
     for row in prepared["selections"]:
         print("Generated", row["label"], row["entries"], "entries covering", row["nests"], "source nests", flush=True)
@@ -581,8 +591,6 @@ def add_arguments(parser):
     parser.add_argument("--nvcc", type=Path)
     parser.add_argument("--architecture")
     parser.add_argument("--jobs", type=int, default=2)
-    parser.add_argument("--record-host-accesses", action="store_true",
-                        help="List new host accesses in host-accesses.json instead of stopping on them")
     parser.add_argument("--precision", choices=("dp", "sp"), default="dp",
                         help="Floating-point precision: dp (double, default) or sp (single)")
     parser.add_argument("--fast-fp", action="store_true",
@@ -603,7 +611,7 @@ def execute(args):
         prepared = json.loads((args.output / "prepared.json").read_text())
     else:
         prepared = prepare(args.elmm, args.poisfft, args.compiler.resolve(strict=True), args.output,
-                           fortran=args.fortran, precision=precision, audit=not args.record_host_accesses)
+                           fortran=args.fortran, precision=precision)
     if not args.prepare_only:
         build_prepared(prepared, args.output, solver=args.solver, vkfft=args.vkfft,
                        fortran=args.fortran, cxx=args.cxx, nvcc=args.nvcc,

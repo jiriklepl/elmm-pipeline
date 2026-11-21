@@ -25,6 +25,7 @@ module elmm_resident_pressure_state
     procedure :: solve => pressure_solve
     procedure :: observe_scratch => pressure_observe_scratch
     procedure :: finish => pressure_finish
+    procedure :: end_epoch => pressure_end_epoch
   end type
   type(resident_pressure_state), save :: resident_flow
 contains
@@ -102,6 +103,14 @@ contains
   subroutine pressure_observe_scratch(self)
     class(resident_pressure_state), intent(inout) :: self
     call self%observe([self%phi,self%rhs])
+  end subroutine
+
+  ! Whoever ends the stay on the device, this adapter or code the compiler generated before host
+  ! statements, the time step is no longer part of it.
+  subroutine pressure_end_epoch(self)
+    class(resident_pressure_state), intent(inout) :: self
+    call self%resident_domain%end_epoch()
+    self%joined=.false.
   end subroutine
 
   subroutine pressure_finish(self)
