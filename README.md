@@ -115,8 +115,7 @@ code is added in one hook, by these modules:
   the wall corrections in the momentum diffusion are compiled from ELMM's own loops. The mean
   friction velocity of the U and V points gets a procedure that names the four lists of a
   flat-wall geometry, because ELMM's own loop reaches them through pointers;
-- `resident_workspace.py`: storage for the RK constants and the filter
-  snapshot that outlives one call.
+- `resident_workspace.py`: storage for the RK constants that outlives one call.
 
 `gpu_pressure_sources/` holds the hand-written Fortran and CUDA of the domain
 object and the solver connection.

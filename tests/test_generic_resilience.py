@@ -221,7 +221,7 @@ end module filters_mod
     assert "tmp((i+ii),j,k)" in text
     assert "tmp(i,(j+jj),k)" in text
     assert "tmp(i,j,(k+kk))" in text
-    assert "!$fort release(tmp)" in text
+    assert "deallocate(tmp)" in text
 
 
 def test_verify_wall_helpers_resilient_to_comments_and_rejects_missing() -> None:
@@ -375,7 +375,6 @@ end module alpha_mod
 def test_workspace_resilience(tmp_path: Path) -> None:
     from elmm_pipeline.resident_workspace import integrate_workspace
 
-    # Verify integrate_workspace handles non-canonical real(8) allocatable declaration in Filter3ord
     tsteps = tmp_path / "tsteps.f90"
     tsteps.write_text(
         """module TimeSteps
@@ -406,31 +405,7 @@ end module Dynamics
 """,
         encoding="utf-8",
     )
-    filters = tmp_path / "filters.f90"
-    filters.write_text(
-        """module Filters
-  implicit none
-contains
-  subroutine Filter3ord(U, Utype, dir)
-    real(8), allocatable, target :: tmp(:,:,:)
-    allocate(tmp(-2:ubound(U,1),-2:ubound(U,2),-2:ubound(U,3)))
-    rk_handle_tmp = resident_flow%bind_real64(tmp, lbound(tmp), .true., &
-      origin='filters::filter3ord::tmp')
-    rk_handle_tmp = resident_flow%bind_real64(tmp, lbound(tmp), .true., &
-      origin='filters::filter3ord::tmp')
-    rk_handle_tmp = resident_flow%bind_real64(tmp, lbound(tmp), .true., &
-      origin='filters::filter3ord::tmp')
-    rk_handle_tmp = resident_flow%bind_real64(tmp, lbound(tmp), .true., &
-      origin='filters::filter3ord::tmp')
-    !$fort release(tmp)
-  end subroutine Filter3ord
-end module Filters
-""",
-        encoding="utf-8",
-    )
-    sources = {path.name: path.read_text(encoding="utf-8") for path in (tsteps, dynamics, filters)}
+    sources = {path.name: path.read_text(encoding="utf-8") for path in (tsteps, dynamics)}
     integrate_workspace(sources)
-    assert "acquire_work_real_3" in sources["filters.f90"]
-    assert "release_work_real_3" in sources["filters.f90"]
     assert "resident_beta" in sources["tsteps.f90"]
     assert sources["dynamics.f90"] == dynamics.read_text(encoding="utf-8")
